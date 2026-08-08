@@ -9,6 +9,13 @@
    const DEBUG_POWER_ENABLED = new URLSearchParams(window.location.search).get('debug') === '1';
   const DAILY_EPOCH_MIN_VALID = 946684800;   // 2000-01-01 00:00:00 UTC
   const DAILY_EPOCH_MAX_VALID = 4102444800;  // 2100-01-01 00:00:00 UTC
+  const TREND_EPOCH_MAX_VALID = 4102444800;  // 2100-01-01 00:00:00 UTC
+  const CACHE_KEYS = {
+    trend: 'floraSense:trendRecords:v1',
+    daily: 'floraSense:dailyRecords:v1',
+  };
+  const CACHE_MAX_ITEM_BYTES = 8 * 1024;
+  const CACHE_MAX_TOTAL_BYTES = 12 * 1024;
  
    const els = {
      statusDot: document.getElementById('statusDot'),
@@ -20,7 +27,6 @@
      battValue: document.getElementById('battValue'),
      lastUpdate: document.getElementById('lastUpdate'),
      historyBody: document.getElementById('historyBody'),
-     logBox: document.getElementById('logBox'),
      trendChart: document.getElementById('trendChart'),
     trendTempLatest: document.getElementById('trendTempLatest'),
     trendHumLatest: document.getElementById('trendHumLatest'),
@@ -37,7 +43,6 @@
     dailyLatestValue: document.getElementById('dailyLatestValue'),
     dailyAvgValue: document.getElementById('dailyAvgValue'),
     dailyChangeValue: document.getElementById('dailyChangeValue'),
-     debugPanel: document.getElementById('debugPanel'),
      modal: document.getElementById('compatibilityModal'),
      modalIcon: document.getElementById('modalIcon'),
      modalTitle: document.getElementById('modalTitle'),
@@ -98,13 +103,11 @@
      },
    };
  
-   if (DEBUG_ENABLED) els.debugPanel.classList.remove('hidden');
    if (DEBUG_POWER_ENABLED) els.powerDebugPanel.classList.remove('hidden');
  
    function log(msg) {
      if (!DEBUG_ENABLED) return;
-     const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
-     els.logBox.textContent = `${line}\n${els.logBox.textContent}`.slice(0, 6000);
+     console.debug(`[FloraSense] ${msg}`);
    }
  
    function setStatus(mode) {
@@ -152,8 +155,152 @@
        .filter((r) => Number.isFinite(r?.dateEpoch)
          && r.dateEpoch >= DAILY_EPOCH_MIN_VALID
          && r.dateEpoch <= DAILY_EPOCH_MAX_VALID)
-       .sort((a, b) => a.dateEpoch - b.dateEpoch);
+      .sort((a, b) => a.dateEpoch - b.dateEpoch)
+      .slice(-7);
    }
+
+  function sanitizeTrendRecords(records) {
+    if (!Array.isArray(records)) return [];
+    return records
+      .map((r) => ({
+        timestamp: Number(r?.timestamp),
+        temp: Number(r?.temp),
+        hum: Number(r?.hum),
+        batt: Number(r?.batt),
+      }))
+      .filter((r) => Number.isFinite(r.timestamp)
+        && r.timestamp >= 0
+        && r.timestamp <= TREND_EPOCH_MAX_VALID
+        && Number.isFinite(r.temp)
+        && r.temp > -80
+        && r.temp < 120
+        && Number.isFinite(r.hum)
+        && r.hum >= 0
+        && r.hum <= 100
+        && Number.isFinite(r.batt)
+        && r.batt >= 0
+        && r.batt <= 100)
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .slice(-5);
+  }
+
+  // 浏览器本地缓存：保存最近图表数据，确保下次打开无需连接也能直接查看。
+  function byteSize(text) {
+    return new TextEncoder().encode(String(text)).length;
+  }
+
+  function getCacheSavedAt(raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      return Number(parsed?.savedAt) || 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  // 当缓存总量超限时，按时间从旧到新删除，保证新数据优先保留。
+  function pruneCacheIfOversized() {
+    const keys = Object.values(CACHE_KEYS);
+    const entries = keys
+      .map((key) => {
+        const raw = localStorage.getItem(key);
+        if (!raw) return null;
+        return {
+          key,
+          raw,
+          size: byteSize(raw),
+          savedAt: getCacheSavedAt(raw),
+        };
+      })
+      .filter(Boolean);
+
+    let total = entries.reduce((sum, it) => sum + it.size, 0);
+    if (total <= CACHE_MAX_TOTAL_BYTES) return;
+
+    entries.sort((a, b) => a.savedAt - b.savedAt);
+    for (const entry of entries) {
+      if (total <= CACHE_MAX_TOTAL_BYTES) break;
+      localStorage.removeItem(entry.key);
+      total -= entry.size;
+      log(`Cache pruned: removed ${entry.key}`);
+    }
+  }
+
+  function readJsonCache(key) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      if (byteSize(raw) > CACHE_MAX_ITEM_BYTES) {
+        localStorage.removeItem(key);
+        log(`Cache dropped (oversized item): ${key}`);
+        return null;
+      }
+      pruneCacheIfOversized();
+      return JSON.parse(raw);
+    } catch (err) {
+      localStorage.removeItem(key);
+      log(`Cache read failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  function writeJsonCache(key, payload) {
+    try {
+      const raw = JSON.stringify(payload);
+      if (byteSize(raw) > CACHE_MAX_ITEM_BYTES) {
+        localStorage.removeItem(key);
+        log(`Cache dropped (oversized payload): ${key}`);
+        return;
+      }
+      localStorage.setItem(key, raw);
+      pruneCacheIfOversized();
+    } catch (err) {
+      pruneCacheIfOversized();
+      log(`Cache write failed: ${err.message}`);
+    }
+  }
+
+  function loadCachedTrendRecords() {
+    const cache = readJsonCache(CACHE_KEYS.trend);
+    return sanitizeTrendRecords(cache?.records);
+  }
+
+  function loadCachedDailyRecords() {
+    const cache = readJsonCache(CACHE_KEYS.daily);
+    return sanitizeDailyRecords(cache?.records);
+  }
+
+  function saveTrendRecordsCache(records) {
+    if (!records?.length) return;
+    writeJsonCache(CACHE_KEYS.trend, {
+      version: 1,
+      savedAt: Date.now(),
+      records,
+    });
+  }
+
+  function saveDailyRecordsCache(records) {
+    if (!records?.length) return;
+    writeJsonCache(CACHE_KEYS.daily, {
+      version: 1,
+      savedAt: Date.now(),
+      records,
+    });
+  }
+
+  function restoreCachedCharts() {
+    const trendRecords = loadCachedTrendRecords();
+    if (trendRecords.length) {
+      render(trendRecords);
+      log(`Loaded cached trend records: ${trendRecords.length}`);
+    }
+
+    const dailyRecords = loadCachedDailyRecords();
+    if (dailyRecords.length) {
+      renderDaily(dailyRecords);
+      log(`Loaded cached daily records: ${dailyRecords.length}`);
+    }
+  }
 
     /**
      * "美化"Y轴范围：给定数据的最小/最大值，计算一个"好看"的范围，
@@ -257,8 +404,10 @@
     }
  
    function render(records) {
-     if (!records || !records.length) return;
+    records = sanitizeTrendRecords(records);
+    if (!records.length) return;
      state.lastRecords = records;
+    saveTrendRecordsCache(records);
      const latest = records[records.length - 1];
  
      els.tempValue.textContent = latest.temp.toFixed(2);
@@ -563,7 +712,8 @@
    }
 
    function renderDaily(records) {
-     state.lastDailyRecords = records;
+    records = sanitizeDailyRecords(records);
+    state.lastDailyRecords = records;
      const cfg = DAILY_METRICS[state.dailyMetric] || DAILY_METRICS.temp;
      updateDailyMetricButtons();
 
@@ -607,6 +757,7 @@
      els.dailyAvgValue.style.color = cfg.color;
      els.dailyChangeValue.style.color = cfg.color;
      els.dailyMetricHint.textContent = `${cfg.title} · ${xLabels[0]} - ${xLabels[xLabels.length - 1]}`;
+    saveDailyRecordsCache(records);
    }
  
    function switchChartTab(tab) {
@@ -848,6 +999,7 @@
    }
 
    updateDailyMetricButtons();
+  restoreCachedCharts();
  
    if (!navigator.bluetooth) {
      const ua = navigator.userAgent;
