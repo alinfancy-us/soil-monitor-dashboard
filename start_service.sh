@@ -1,4 +1,7 @@
 #!/bin/bash
+# 获取脚本所在的绝对路径，确保无论在哪执行，都以脚本所在目录为准
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
 
 PORT=8000
 NGROK_LOG="/tmp/ngrok.log"
