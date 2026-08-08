@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Alinfancy</title>
+  <desc id="desc">Alinfancy home and wireless sensor logo</desc>
+  <circle cx="128" cy="128" r="116" fill="#fff" stroke="#efe4d4" stroke-width="5"/>
+  <g fill="none" stroke="#14233d" stroke-linecap="round" stroke-linejoin="round">
+    <path stroke-width="12" d="M78 126 128 84l50 42v49H78z"/>
+    <path stroke-width="12" d="m99 175 12-27h34l12 27"/>
+  </g>
+  <g fill="none" stroke="#2d9df4" stroke-linecap="round">
+    <path stroke-width="8" d="M176 89c10-9 24-9 34 0"/>
+    <path stroke-width="8" d="M182 103c6-5 14-5 20 0"/>
+  </g>
+  <text x="128" y="213" fill="#14233d" font-family="Arial, sans-serif" font-size="25" font-weight="700" text-anchor="middle">alinfancy</text>
+</svg>
