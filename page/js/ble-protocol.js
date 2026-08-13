@@ -96,8 +96,8 @@ const BLEProtocol = (() => {
     // 限制名称前缀为 alinfancy，并传入 128 位格式的 Service UUID
     const device = await navigator.bluetooth.requestDevice({
       filters: [
-        {namePrefix: 'SoilSense'},
-        { namePrefix: 'alinfancy' }
+        // {namePrefix: 'SoilSense'},
+        { namePrefix: 'FloraSense' }
       ],
       optionalServices: [UUIDS.SERVICE]
     });
