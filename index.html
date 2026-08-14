@@ -33,6 +33,13 @@
       <p class="mt-1 text-slate-500">Soil temperature, humidity and battery dashboard</p>
     </header>
 
+    <!-- User guide banner -->
+    <a id="userGuideBanner" href="https://alinfancy-us.github.io/florasense-user-guide" target="_blank" rel="noopener noreferrer"
+       class="mb-6 flex items-center justify-between gap-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-5 py-3 text-sm font-medium text-emerald-700 shadow-sm transition hover:bg-emerald-100">
+      <span>📘 New to FloraSense? View the product user guide</span>
+      <span aria-hidden="true">→</span>
+    </a>
+
     <!-- Controls -->
     <div class="flex items-center justify-between gap-3 bg-white rounded-2xl shadow-sm border border-slate-100 px-5 py-4 mb-6">
       <div class="flex items-center gap-2">
@@ -40,8 +47,8 @@
         <span id="statusText" class="text-sm font-medium text-slate-600">Disconnected</span>
       </div>
       <div class="flex gap-2">
-        <button id="refreshBtn" disabled class="hidden sm:inline-flex items-center px-4 py-2 rounded-xl text-sm font-semibold bg-slate-100 text-slate-600 disabled:opacity-40 hover:bg-slate-200 transition">
-          ↻ Refresh
+        <button id="clearCacheBtn" class="hidden sm:inline-flex items-center px-4 py-2 rounded-xl text-sm font-semibold bg-slate-100 text-slate-600 hover:bg-rose-100 hover:text-rose-600 transition">
+          🗑 Clear cache
         </button>
         <button id="connectBtn" class="inline-flex items-center px-5 py-2 rounded-xl text-sm font-semibold bg-emerald-600 text-white shadow hover:bg-emerald-700 active:scale-95 transition">
           Connect device

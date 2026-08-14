@@ -10,18 +10,23 @@
   const DAILY_EPOCH_MIN_VALID = 946684800;   // 2000-01-01 00:00:00 UTC
   const DAILY_EPOCH_MAX_VALID = 4102444800;  // 2100-01-01 00:00:00 UTC
   const TREND_EPOCH_MAX_VALID = 4102444800;  // 2100-01-01 00:00:00 UTC
-  const CACHE_KEYS = {
-    trend: 'floraSense:trendRecords:v1',
-    daily: 'floraSense:dailyRecords:v1',
-  };
-  const CACHE_MAX_ITEM_BYTES = 8 * 1024;
-  const CACHE_MAX_TOTAL_BYTES = 12 * 1024;
+  // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
+  // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
+  const CACHE_PREFIX = 'floraSense:';
+  const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
+  const RECORD_KEY_RE = /^floraSense:(trend|daily):v1:/;
+  const CACHE_MAX_ITEM_BYTES = 64 * 1024;
+  const CACHE_MAX_TOTAL_BYTES = 512 * 1024;
+
+  function cacheKey(type, deviceId) {
+    return `${CACHE_PREFIX}${type}:v1:${deviceId}`;
+  }
  
    const els = {
      statusDot: document.getElementById('statusDot'),
      statusText: document.getElementById('statusText'),
      connectBtn: document.getElementById('connectBtn'),
-     refreshBtn: document.getElementById('refreshBtn'),
+     clearCacheBtn: document.getElementById('clearCacheBtn'),
      tempValue: document.getElementById('tempValue'),
      humValue: document.getElementById('humValue'),
      battValue: document.getElementById('battValue'),
@@ -63,6 +68,7 @@
  
    const state = {
      device: null,
+     activeDeviceId: null,
      characteristic: null,
      dailyChar: null,
      powerChar: null,
@@ -119,7 +125,6 @@
      const [dot, text, active] = map[mode];
      els.statusDot.className = `w-3 h-3 rounded-full ${dot}`;
      els.statusText.textContent = text;
-     els.refreshBtn.disabled = !active;
      els.connectBtn.textContent = mode === 'connected' ? 'Disconnect' : 'Connect device';
    }
  
@@ -198,10 +203,10 @@
     }
   }
 
-  // 当缓存总量超限时，按时间从旧到新删除，保证新数据优先保留。
+  // 当所有设备缓存总量超过 512KB 时，按时间从旧到新删除，保证新数据优先保留。
   function pruneCacheIfOversized() {
-    const keys = Object.values(CACHE_KEYS);
-    const entries = keys
+    const entries = Object.keys(localStorage)
+      .filter((key) => RECORD_KEY_RE.test(key))
       .map((key) => {
         const raw = localStorage.getItem(key);
         if (!raw) return null;
@@ -260,46 +265,90 @@
     }
   }
 
-  function loadCachedTrendRecords() {
-    const cache = readJsonCache(CACHE_KEYS.trend);
+  // 记录最近一次连接的设备（id + 展示名），刷新页面后可免连接直接回显该设备数据。
+  function getLastDeviceId() {
+    try {
+      const raw = localStorage.getItem(LAST_DEVICE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw)?.id || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function setLastDevice(deviceId, deviceName) {
+    try {
+      localStorage.setItem(LAST_DEVICE_KEY, JSON.stringify({ id: deviceId, name: deviceName || '', savedAt: Date.now() }));
+    } catch (err) {
+      log(`Save last device failed: ${err.message}`);
+    }
+  }
+
+  function loadCachedTrendRecords(deviceId) {
+    if (!deviceId) return [];
+    const cache = readJsonCache(cacheKey('trend', deviceId));
     return sanitizeTrendRecords(cache?.records);
   }
 
-  function loadCachedDailyRecords() {
-    const cache = readJsonCache(CACHE_KEYS.daily);
+  function loadCachedDailyRecords(deviceId) {
+    if (!deviceId) return [];
+    const cache = readJsonCache(cacheKey('daily', deviceId));
     return sanitizeDailyRecords(cache?.records);
   }
 
-  function saveTrendRecordsCache(records) {
-    if (!records?.length) return;
-    writeJsonCache(CACHE_KEYS.trend, {
+  function saveTrendRecordsCache(records, deviceId) {
+    if (!records?.length || !deviceId) return;
+    writeJsonCache(cacheKey('trend', deviceId), {
       version: 1,
       savedAt: Date.now(),
       records,
     });
   }
 
-  function saveDailyRecordsCache(records) {
-    if (!records?.length) return;
-    writeJsonCache(CACHE_KEYS.daily, {
+  function saveDailyRecordsCache(records, deviceId) {
+    if (!records?.length || !deviceId) return;
+    writeJsonCache(cacheKey('daily', deviceId), {
       version: 1,
       savedAt: Date.now(),
       records,
     });
   }
 
-  function restoreCachedCharts() {
-    const trendRecords = loadCachedTrendRecords();
+  // 清空 live 展示区（切换到另一台设备、或没有该设备缓存时，避免继续显示上一台设备的数据）。
+  function resetDisplay() {
+    state.lastRecords = null;
+    state.lastDailyRecords = null;
+    els.tempValue.textContent = '--';
+    els.humValue.textContent = '--';
+    els.battValue.textContent = '--';
+    els.lastUpdate.textContent = 'No measurement received yet';
+    els.historyBody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-slate-300">Connect a device to view history</td></tr>';
+    updateTrendSummary(null);
+    const trendCtx = els.trendChart?.getContext('2d');
+    if (trendCtx) trendCtx.clearRect(0, 0, els.trendChart.width, els.trendChart.height);
+    renderDaily([]);
+  }
+
+  // 加载指定设备（device.id）自己的历史缓存并回显到图表/表格。
+  function restoreCachedCharts(deviceId) {
+    const trendRecords = loadCachedTrendRecords(deviceId);
     if (trendRecords.length) {
       render(trendRecords);
       log(`Loaded cached trend records: ${trendRecords.length}`);
     }
 
-    const dailyRecords = loadCachedDailyRecords();
+    const dailyRecords = loadCachedDailyRecords(deviceId);
     if (dailyRecords.length) {
       renderDaily(dailyRecords);
       log(`Loaded cached daily records: ${dailyRecords.length}`);
     }
+  }
+
+  function clearAllCache() {
+    const keys = Object.keys(localStorage).filter((key) => key.startsWith(CACHE_PREFIX));
+    keys.forEach((key) => localStorage.removeItem(key));
+    resetDisplay();
+    log(`Cache cleared: removed ${keys.length} key(s)`);
   }
 
     /**
@@ -407,7 +456,7 @@
     records = sanitizeTrendRecords(records);
     if (!records.length) return;
      state.lastRecords = records;
-    saveTrendRecordsCache(records);
+    saveTrendRecordsCache(records, state.activeDeviceId);
      const latest = records[records.length - 1];
  
      els.tempValue.textContent = latest.temp.toFixed(2);
@@ -757,7 +806,7 @@
      els.dailyAvgValue.style.color = cfg.color;
      els.dailyChangeValue.style.color = cfg.color;
      els.dailyMetricHint.textContent = `${cfg.title} · ${xLabels[0]} - ${xLabels[xLabels.length - 1]}`;
-    saveDailyRecordsCache(records);
+    saveDailyRecordsCache(records, state.activeDeviceId);
    }
  
    function switchChartTab(tab) {
@@ -939,6 +988,15 @@
          onDisconnected
        );
  
+       // device.id 是 Web Bluetooth 分配的设备唯一标识（浏览器不暴露真实 MAC），
+       // 切换到不同土壤检测器时按它区分缓存，避免数据互相覆盖/串号。
+       if (device.id !== state.activeDeviceId) {
+         resetDisplay();
+       }
+       state.activeDeviceId = device.id;
+       setLastDevice(device.id, device.name);
+       restoreCachedCharts(device.id);
+ 
        state.device = device;
        state.characteristic = dataChar;
        state.dailyChar = dailyChar;
@@ -969,8 +1027,9 @@
      state.device?.gatt.connected ? handleDisconnect() : handleConnect();
    });
  
-   els.refreshBtn.addEventListener('click', () => {
-     readData().catch(err => log(`Refresh failed: ${err.message}`));
+   els.clearCacheBtn.addEventListener('click', () => {
+     if (!window.confirm('Clear all cached measurement data on this browser? This cannot be undone.')) return;
+     clearAllCache();
    });
  
    els.trendTabBtn.addEventListener('click', () => switchChartTab('trend'));
@@ -999,7 +1058,8 @@
    }
 
    updateDailyMetricButtons();
-  restoreCachedCharts();
+  state.activeDeviceId = getLastDeviceId();
+  if (state.activeDeviceId) restoreCachedCharts(state.activeDeviceId);
  
    if (!navigator.bluetooth) {
      const ua = navigator.userAgent;
