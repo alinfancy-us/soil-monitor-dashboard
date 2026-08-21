@@ -4,14 +4,8 @@
 const BLEProtocol = (() => {
   'use strict';
 
-  // 使用 128-bit 完整小写字符串 UUID，防止 Bluefy/iOS 序列化失败
-  const UUIDS = {
-    SERVICE: '0000ffe0-0000-1000-8000-00805f9b34fb',
-    DATA_CHAR: '0000ffe1-0000-1000-8000-00805f9b34fb',
-    TIME_CHAR: '0000ffe2-0000-1000-8000-00805f9b34fb',
-    DAILY_CHAR: '0000ffe3-0000-1000-8000-00805f9b34fb',
-    POWER_CHAR: '0000ffe4-0000-1000-8000-00805f9b34fb',
-  };
+  // 集中配置统一取自 page/js/config.js，方便后续维护管理
+  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC } = FloraSenseConfig;
 
   const RECORD_SIZE = 9;
   const MAX_RECORDS = 5;
@@ -96,8 +90,7 @@ const BLEProtocol = (() => {
     // 限制名称前缀为 alinfancy，并传入 128 位格式的 Service UUID
     const device = await navigator.bluetooth.requestDevice({
       filters: [
-        // {namePrefix: 'SoilSense'},
-        { namePrefix: 'FloraSense' }
+        { namePrefix: DEVICE_NAME_PREFIX }
       ],
       optionalServices: [UUIDS.SERVICE]
     });
@@ -140,15 +133,35 @@ const BLEProtocol = (() => {
       // 生产固件裁掉该特征是正常情况，不打印告警
     }
 
-    return { device, dataChar, dailyChar, powerChar };
+    // Clear/Reset 写特征（0xFFE5），生产固件必带；获取失败不影响主流程
+    let resetChar = null;
+    try {
+      resetChar = await service.getCharacteristic(UUIDS.RESET_CHAR);
+    } catch (e) {
+      console.warn('[BLE] reset characteristic not available:', e);
+    }
+
+    return { device, dataChar, dailyChar, powerChar, resetChar };
+  }
+
+  /**
+   * 任务9：向 0xFFE5 写入 4 字节魔术字 "CLR1"，请求设备清空历史/日均值 RAM 缓存
+   */
+  async function sendReset(resetChar) {
+    if (!resetChar) {
+      throw new Error('reset characteristic unavailable');
+    }
+    await resetChar.writeValue(RESET_MAGIC);
   }
 
   return {
     UUIDS,
+    DEVICE_NAME_PREFIX,
     parsePacket,
     parseDailyPacket,
     parsePowerSnapshot,
     hexDump,
     connectDevice,
+    sendReset,
   };
 })();

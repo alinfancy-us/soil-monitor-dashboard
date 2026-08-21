@@ -4,19 +4,18 @@
  (() => {
    'use strict';
  
-   const DEBUG_ENABLED = true;
-   const POLL_INTERVAL = 5000;
+   // 集中配置统一取自 page/js/config.js，方便后续维护管理
+   const {
+     DEBUG_ENABLED, POLL_INTERVAL,
+     DASHBOARD_URL, BLUEFY_APPSTORE_URL, BLUEFY_DEEPLINK,
+     DAILY_EPOCH_MIN_VALID, DAILY_EPOCH_MAX_VALID, TREND_EPOCH_MAX_VALID,
+     CACHE_PREFIX, CACHE_MAX_ITEM_BYTES, CACHE_MAX_TOTAL_BYTES,
+   } = FloraSenseConfig;
    const DEBUG_POWER_ENABLED = new URLSearchParams(window.location.search).get('debug') === '1';
-  const DAILY_EPOCH_MIN_VALID = 946684800;   // 2000-01-01 00:00:00 UTC
-  const DAILY_EPOCH_MAX_VALID = 4102444800;  // 2100-01-01 00:00:00 UTC
-  const TREND_EPOCH_MAX_VALID = 4102444800;  // 2100-01-01 00:00:00 UTC
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
-  const CACHE_PREFIX = 'floraSense:';
   const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
   const RECORD_KEY_RE = /^floraSense:(trend|daily):v1:/;
-  const CACHE_MAX_ITEM_BYTES = 64 * 1024;
-  const CACHE_MAX_TOTAL_BYTES = 512 * 1024;
 
   function cacheKey(type, deviceId) {
     return `${CACHE_PREFIX}${type}:v1:${deviceId}`;
@@ -72,6 +71,7 @@
      characteristic: null,
      dailyChar: null,
      powerChar: null,
+     resetChar: null,
      pollTimer: null,
      powerHistory: [],
      lastRecords: null,
@@ -930,6 +930,7 @@
      stopPolling();
      setStatus('disconnected');
      state.characteristic = null;
+     state.resetChar = null;
      log('Device disconnected');
    }
  
@@ -941,9 +942,20 @@
      if (isIOS) {
        els.modalIcon.innerHTML = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
        els.modalTitle.textContent = 'Bluetooth Unavailable in Safari';
-       els.modalMessage.textContent = 'iOS Safari does not support Web Bluetooth. Please download Bluefy browser to connect to FloraSense.';
-       els.modalActionBtn.textContent = 'Get Bluefy on App Store';
-       els.modalActionBtn.href = 'https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055';
+       els.modalMessage.textContent = 'iOS Safari does not support Web Bluetooth. Open FloraSense in the Bluefy browser, or download it from the App Store.';
+       els.modalActionBtn.textContent = 'Open in Bluefy';
+       els.modalActionBtn.href = BLUEFY_APPSTORE_URL;
+       els.modalActionBtn.onclick = (e) => {
+         e.preventDefault();
+         const start = Date.now();
+         // 先尝试 Bluefy 深链直接加载 Dashboard；未安装则约 1.2s 后回退 App Store（已安装时
+         //       页面被切到后台，定时器暂停，返回后 elapsed 已超 1.5s 则不会误跳 App Store）
+         const fallback = setTimeout(() => {
+           if (Date.now() - start < 1500) window.location.href = BLUEFY_APPSTORE_URL;
+         }, 1200);
+         window.addEventListener('pagehide', () => clearTimeout(fallback), { once: true });
+         window.location.href = BLUEFY_DEEPLINK;
+       };
        els.modalActionBtn.classList.remove('hidden');
      } else if (isAndroid) {
        els.modalIcon.innerHTML = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
@@ -980,7 +992,7 @@
        setStatus('connecting');
        log('Requesting Bluetooth Device...');
  
-       const { device, dataChar, dailyChar, powerChar } = await BLEProtocol.connectDevice(
+       const { device, dataChar, dailyChar, powerChar, resetChar } = await BLEProtocol.connectDevice(
          (records, hex) => {
            log(`Notification: ${hex}`);
            render(records);
@@ -1001,6 +1013,7 @@
        state.characteristic = dataChar;
        state.dailyChar = dailyChar;
        state.powerChar = powerChar;
+       state.resetChar = resetChar;
  
        if (dataChar.properties.read) {
          await readData();
@@ -1027,9 +1040,22 @@
      state.device?.gatt.connected ? handleDisconnect() : handleConnect();
    });
  
-   els.clearCacheBtn.addEventListener('click', () => {
-     if (!window.confirm('Clear all cached measurement data on this browser? This cannot be undone.')) return;
+   els.clearCacheBtn.addEventListener('click', async () => {
+     const connected = !!state.device?.gatt.connected;
+     const msg = connected
+       ? 'Clear cached data on this browser AND reset the connected device history? This cannot be undone.'
+       : 'Clear all cached measurement data on this browser? This cannot be undone.';
+     if (!window.confirm(msg)) return;
      clearAllCache();
+     // 任务9：已连接时同步向设备下发 Clear/Reset 指令，清空芯片 RAM 历史/日均值
+     if (connected && state.resetChar) {
+       try {
+         await BLEProtocol.sendReset(state.resetChar);
+         log('Device reset command sent (0xFFE5)');
+       } catch (err) {
+         log(`Device reset failed: ${err.message || err}`);
+       }
+     }
    });
  
    els.trendTabBtn.addEventListener('click', () => switchChartTab('trend'));
