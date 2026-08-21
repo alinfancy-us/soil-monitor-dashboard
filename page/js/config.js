@@ -16,7 +16,18 @@ const FloraSenseConfig = (() => {
     DAILY_CHAR: '0000ffe3-0000-1000-8000-00805f9b34fb',
     POWER_CHAR: '0000ffe4-0000-1000-8000-00805f9b34fb',
     RESET_CHAR: '0000ffe5-0000-1000-8000-00805f9b34fb',
+    CALIB_CHAR: '0000ffe6-0000-1000-8000-00805f9b34fb',
+    REFRESH_CHAR: '0000ffe7-0000-1000-8000-00805f9b34fb',
   };
+
+  // 湿度两点校准指令（1 字节），须与固件 soil_calib_point_t 严格对齐
+  const HUM_CALIB_CMD = {
+    DRY: Uint8Array.of(0x00),
+    WET: Uint8Array.of(0x01),
+  };
+
+  // 立即重新测量指令（1 字节固定值），须与固件 SOIL_REFRESH_CMD_TRIGGER 严格对齐
+  const REFRESH_CMD = Uint8Array.of(0x01);
 
   // Clear/Reset 指令 4 字节魔术字 "CLR1"，须与固件 soil_reset_onWrite 严格对齐
   const RESET_MAGIC = Uint8Array.of(0x43, 0x4c, 0x52, 0x31);
@@ -45,6 +56,8 @@ const FloraSenseConfig = (() => {
     DEVICE_NAME_PREFIX,
     UUIDS,
     RESET_MAGIC,
+    HUM_CALIB_CMD,
+    REFRESH_CMD,
     DASHBOARD_URL,
     BLUEFY_APPSTORE_URL,
     BLUEFY_DEEPLINK,

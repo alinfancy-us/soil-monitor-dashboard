@@ -26,6 +26,10 @@
      statusText: document.getElementById('statusText'),
      connectBtn: document.getElementById('connectBtn'),
      clearCacheBtn: document.getElementById('clearCacheBtn'),
+    calibDryBtn: document.getElementById('calibDryBtn'),
+    calibWetBtn: document.getElementById('calibWetBtn'),
+    calibStatus: document.getElementById('calibStatus'),
+    refreshBtn: document.getElementById('refreshBtn'),
      tempValue: document.getElementById('tempValue'),
      humValue: document.getElementById('humValue'),
      battValue: document.getElementById('battValue'),
@@ -72,6 +76,8 @@
      dailyChar: null,
      powerChar: null,
      resetChar: null,
+    calibChar: null,
+    refreshChar: null,
      pollTimer: null,
      powerHistory: [],
      lastRecords: null,
@@ -126,6 +132,12 @@
      els.statusDot.className = `w-3 h-3 rounded-full ${dot}`;
      els.statusText.textContent = text;
      els.connectBtn.textContent = mode === 'connected' ? 'Disconnect' : 'Connect device';
+    els.calibDryBtn.disabled = mode !== 'connected';
+    els.calibWetBtn.disabled = mode !== 'connected';
+    els.calibStatus.textContent = mode === 'connected'
+      ? 'Place the probe, wait a few seconds, then tap dry or wet calibration'
+      : 'Connect a device to enable calibration';
+    els.refreshBtn.disabled = mode !== 'connected';
    }
  
     function formatTime(epoch) {
@@ -931,6 +943,8 @@
      setStatus('disconnected');
      state.characteristic = null;
      state.resetChar = null;
+    state.calibChar = null;
+    state.refreshChar = null;
      log('Device disconnected');
    }
  
@@ -1047,7 +1061,7 @@
        setStatus('connecting');
        log('Requesting Bluetooth Device...');
  
-       const { device, dataChar, dailyChar, powerChar, resetChar } = await BLEProtocol.connectDevice(
+       const { device, dataChar, dailyChar, powerChar, resetChar, calibChar, refreshChar } = await BLEProtocol.connectDevice(
          (records, hex) => {
            log(`Notification: ${hex}`);
            render(records);
@@ -1069,6 +1083,8 @@
        state.dailyChar = dailyChar;
        state.powerChar = powerChar;
        state.resetChar = resetChar;
+      state.calibChar = calibChar;
+      state.refreshChar = refreshChar;
  
        if (dataChar.properties.read) {
          await readData();
@@ -1112,7 +1128,53 @@
        }
      }
    });
- 
+
+  async function handleCalibClick(point, label) {
+    if (!state.device?.gatt.connected || !state.calibChar) {
+      els.calibStatus.textContent = 'Connect a device to enable calibration';
+      return;
+    }
+    const msg = point === 'dry'
+      ? 'Confirm the probe is fully dry in open air, then apply dry (0%) calibration?'
+      : 'Confirm the probe is fully submerged in water, then apply wet (100%) calibration?';
+    if (!window.confirm(msg)) return;
+
+    els.calibDryBtn.disabled = true;
+    els.calibWetBtn.disabled = true;
+    els.calibStatus.textContent = `Applying ${label} calibration…`;
+    try {
+      await BLEProtocol.sendHumCalib(state.calibChar, point);
+      els.calibStatus.textContent = `${label} calibration applied`;
+      log(`Humidity ${label} calibration command sent (0xFFE6)`);
+    } catch (err) {
+      els.calibStatus.textContent = `${label} calibration failed: ${err.message || err}`;
+      log(`Humidity calibration failed: ${err.message || err}`);
+    } finally {
+      els.calibDryBtn.disabled = false;
+      els.calibWetBtn.disabled = false;
+    }
+  }
+
+  els.calibDryBtn.addEventListener('click', () => handleCalibClick('dry', 'Dry'));
+  els.calibWetBtn.addEventListener('click', () => handleCalibClick('wet', 'Wet'));
+
+  async function handleRefreshClick() {
+    if (!state.device?.gatt.connected || !state.refreshChar) {
+      return;
+    }
+    els.refreshBtn.disabled = true;
+    try {
+      await BLEProtocol.sendRefresh(state.refreshChar);
+      log('Refresh command sent (0xFFE7), measuring now');
+    } catch (err) {
+      log(`Refresh failed: ${err.message || err}`);
+    } finally {
+      els.refreshBtn.disabled = !state.device?.gatt.connected;
+    }
+  }
+
+  els.refreshBtn.addEventListener('click', handleRefreshClick);
+
    els.trendTabBtn.addEventListener('click', () => switchChartTab('trend'));
    els.dailyTabBtn.addEventListener('click', () => switchChartTab('daily'));
   els.dailyMetricTempBtn.addEventListener('click', () => setDailyMetric('temp'));

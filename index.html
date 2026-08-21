@@ -50,6 +50,10 @@
         <button id="clearCacheBtn" class="inline-flex items-center px-4 py-2 rounded-xl text-sm font-semibold bg-slate-100 text-slate-600 hover:bg-rose-100 hover:text-rose-600 transition">
           🗑 Clear data
         </button>
+        <button id="refreshBtn" disabled
+          class="inline-flex items-center px-4 py-2 rounded-xl text-sm font-semibold bg-slate-100 text-slate-600 hover:bg-sky-100 hover:text-sky-600 transition disabled:cursor-not-allowed disabled:opacity-40">
+          🔄 Refresh
+        </button>
         <button id="connectBtn" class="inline-flex items-center px-5 py-2 rounded-xl text-sm font-semibold bg-emerald-600 text-white shadow hover:bg-emerald-700 active:scale-95 transition">
           Connect device
         </button>
@@ -75,6 +79,29 @@
       </div>
     </div>
     <p id="lastUpdate" class="text-center text-xs text-slate-400 mb-8">No measurement received yet</p>
+
+    <!-- Sensor calibration -->
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 sm:p-5 mb-6">
+      <h2 class="text-sm font-semibold text-slate-600 mb-1">Sensor calibration</h2>
+      <p class="text-xs text-slate-400 mb-3">
+        Uses the device's current live humidity reading, so place the probe first, wait a few seconds, then tap the matching button below.
+      </p>
+      <div class="grid grid-cols-2 gap-3">
+        <button id="calibDryBtn" disabled
+          class="flex flex-col items-center gap-1 rounded-xl border border-orange-100 bg-orange-50 px-3 py-3 text-orange-700 transition hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-40">
+          <span class="text-xl">🏜️</span>
+          <span class="text-sm font-semibold">Dry calibration (0%)</span>
+          <span class="text-[11px] text-orange-500 text-center leading-tight">Probe in open air, fully dry</span>
+        </button>
+        <button id="calibWetBtn" disabled
+          class="flex flex-col items-center gap-1 rounded-xl border border-sky-100 bg-sky-50 px-3 py-3 text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40">
+          <span class="text-xl">💦</span>
+          <span class="text-sm font-semibold">Wet calibration (100%)</span>
+          <span class="text-[11px] text-sky-500 text-center leading-tight">Probe fully submerged in water</span>
+        </button>
+      </div>
+      <p id="calibStatus" class="mt-3 text-center text-xs text-slate-400">Connect a device to enable calibration</p>
+    </div>
 
     <!-- History table -->
     <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 sm:p-5 mb-6 overflow-x-auto">

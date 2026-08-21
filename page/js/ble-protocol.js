@@ -5,8 +5,7 @@ const BLEProtocol = (() => {
   'use strict';
 
   // 集中配置统一取自 page/js/config.js，方便后续维护管理
-  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC } = FloraSenseConfig;
-
+  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC, HUM_CALIB_CMD, REFRESH_CMD } = FloraSenseConfig;
   const RECORD_SIZE = 9;
   const MAX_RECORDS = 5;
   const PACKET_SIZE = 1 + RECORD_SIZE * MAX_RECORDS;
@@ -141,7 +140,23 @@ const BLEProtocol = (() => {
       console.warn('[BLE] reset characteristic not available:', e);
     }
 
-    return { device, dataChar, dailyChar, powerChar, resetChar };
+    // 湿度两点校准写特征（0xFFE6），生产固件必带；获取失败不影响主流程（仅禁用校准按钮）
+    let calibChar = null;
+    try {
+      calibChar = await service.getCharacteristic(UUIDS.CALIB_CHAR);
+    } catch (e) {
+      console.warn('[BLE] calibration characteristic not available:', e);
+    }
+
+    // 立即重新测量写特征（0xFFE7），生产固件必带；获取失败不影响主流程（仅禁用 refresh 按钮）
+    let refreshChar = null;
+    try {
+      refreshChar = await service.getCharacteristic(UUIDS.REFRESH_CHAR);
+    } catch (e) {
+      console.warn('[BLE] refresh characteristic not available:', e);
+    }
+
+    return { device, dataChar, dailyChar, powerChar, resetChar, calibChar, refreshChar };
   }
 
   /**
@@ -154,6 +169,30 @@ const BLEProtocol = (() => {
     await resetChar.writeValue(RESET_MAGIC);
   }
 
+  /**
+   * 向 0xFFE6 写入 1 字节湿度校准指令，用设备当前实测电压覆盖 dry(0%)/wet(100%) 基准点
+   * @param {BluetoothRemoteGATTCharacteristic} calibChar
+   * @param {'dry'|'wet'} point
+   */
+  async function sendHumCalib(calibChar, point) {
+    if (!calibChar) {
+      throw new Error('calibration characteristic unavailable');
+    }
+    const cmd = point === 'dry' ? HUM_CALIB_CMD.DRY : HUM_CALIB_CMD.WET;
+    await calibChar.writeValue(cmd);
+  }
+
+  /**
+   * 向 0xFFE7 写入 1 字节固定值，请求设备在连接态下立即重新执行一次测量
+   * @param {BluetoothRemoteGATTCharacteristic} refreshChar
+   */
+  async function sendRefresh(refreshChar) {
+    if (!refreshChar) {
+      throw new Error('refresh characteristic unavailable');
+    }
+    await refreshChar.writeValue(REFRESH_CMD);
+  }
+
   return {
     UUIDS,
     DEVICE_NAME_PREFIX,
@@ -163,5 +202,7 @@ const BLEProtocol = (() => {
     hexDump,
     connectDevice,
     sendReset,
+    sendHumCalib,
+    sendRefresh,
   };
 })();
