@@ -934,6 +934,46 @@
      log('Device disconnected');
    }
  
+   // 剪贴板写入（iOS Safari 兼容）：优先 Clipboard API（要求 HTTPS + 在用户手势内调用），
+   // 失败或不可用时回退到隐藏 textarea + document.execCommand('copy') 的同步复制方案。
+   async function copyTextToClipboard(text) {
+     if (navigator.clipboard && navigator.clipboard.writeText) {
+       try {
+         await navigator.clipboard.writeText(text);
+         return true;
+       } catch (_) {
+         // 忽略异常，走 legacy 兜底方案
+       }
+     }
+     return copyTextLegacy(text);
+   }
+
+   function copyTextLegacy(text) {
+     const textarea = document.createElement('textarea');
+     textarea.value = text;
+     textarea.setAttribute('readonly', '');
+     // 移出可视区域，避免页面滚动和 iOS 键盘弹出
+     textarea.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;';
+     document.body.appendChild(textarea);
+     const selection = document.getSelection();
+     const savedRange = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+     textarea.focus();
+     textarea.setSelectionRange(0, text.length);
+     let ok = false;
+     try {
+       ok = document.execCommand('copy');
+     } catch (_) {
+       ok = false;
+     }
+     document.body.removeChild(textarea);
+     // 恢复用户原来的文本选区
+     if (selection && savedRange) {
+       selection.removeAllRanges();
+       selection.addRange(savedRange);
+     }
+     return ok;
+   }
+
    function showModal(isIOS, isAndroid) {
      const ua = navigator.userAgent;
      const isWeChat = /MicroMessenger/i.test(ua);
@@ -942,17 +982,32 @@
      if (isIOS) {
        els.modalIcon.innerHTML = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
        els.modalTitle.textContent = 'Bluetooth Unavailable in Safari';
-       els.modalMessage.textContent = 'iOS Safari does not support Web Bluetooth. Open FloraSense in the Bluefy browser, or download it from the App Store.';
+       els.modalMessage.textContent = 'iOS Safari does not support Web Bluetooth. Tap "Open in Bluefy" to continue — the dashboard link will be copied to your clipboard so you can paste it into Bluefy after installing.';
        els.modalActionBtn.textContent = 'Open in Bluefy';
        els.modalActionBtn.href = BLUEFY_APPSTORE_URL;
-       els.modalActionBtn.onclick = (e) => {
+       els.modalActionBtn.onclick = async (e) => {
          e.preventDefault();
+         // iOS Safari 只允许在用户手势内写剪贴板，且此刻还无法判断是否已安装 Bluefy，
+         // 因此必须"先复制、后跳转"：已安装 → 深链直接打开 Bluefy 加载 Dashboard；
+         // 未安装 → 回退 App Store，用户装好 Bluefy 后打开它，长按地址栏粘贴剪贴板里
+         // 的地址即可进入本页。加 400ms 超时兜底，避免剪贴板写入异常时卡住深链跳转。
+         const copied = await Promise.race([
+           copyTextToClipboard(window.location.href),
+           new Promise((resolve) => setTimeout(() => resolve(false), 400)),
+         ]);
+         els.modalMessage.textContent = copied
+           ? '✅ Dashboard link copied to clipboard. Opening Bluefy… If it is not installed, you will be taken to the App Store — after installing, open Bluefy and paste the link to continue.'
+           : `After installing Bluefy from the App Store, open it and manually enter this address: ${window.location.href}`;
+
          const start = Date.now();
-         // 先尝试 Bluefy 深链直接加载 Dashboard；未安装则约 1.2s 后回退 App Store（已安装时
-         //       页面被切到后台，定时器暂停，返回后 elapsed 已超 1.5s 则不会误跳 App Store）
+         // 先尝试 Bluefy 深链直接加载 Dashboard；2.5s 后页面仍在前台说明深链未拉起（未安装），
+         // 回退 App Store。已安装时页面被切到后台：pagehide 会清除定时器；即使定时器被系统
+         // 暂停后恢复触发，此时页面已隐藏（document.hidden）或 elapsed 已超 5s，均不会误跳。
          const fallback = setTimeout(() => {
-           if (Date.now() - start < 1500) window.location.href = BLUEFY_APPSTORE_URL;
-         }, 1200);
+           if (!document.hidden && Date.now() - start < 5000) {
+             window.location.href = BLUEFY_APPSTORE_URL;
+           }
+         }, 2500);
          window.addEventListener('pagehide', () => clearTimeout(fallback), { once: true });
          window.location.href = BLUEFY_DEEPLINK;
        };
