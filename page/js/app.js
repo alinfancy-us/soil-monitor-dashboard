@@ -138,6 +138,7 @@
       ? 'Place the probe, wait a few seconds, then tap dry or wet calibration'
       : 'Connect a device to enable calibration';
     els.refreshBtn.disabled = mode !== 'connected';
+    els.clearCacheBtn.disabled = mode !== 'connected';
    }
  
     function formatTime(epoch) {
@@ -1112,14 +1113,13 @@
    });
  
    els.clearCacheBtn.addEventListener('click', async () => {
-     const connected = !!state.device?.gatt.connected;
-     const msg = connected
-       ? 'Clear cached data on this browser AND reset the connected device history? This cannot be undone.'
-       : 'Clear all cached measurement data on this browser? This cannot be undone.';
+     // 中文：Clear data 仅在已连接状态下可用（setStatus 联动 disabled），此处再兜底防御一次
+     if (!state.device?.gatt.connected) return;
+     const msg = 'Clear cached data on this browser AND reset the connected device history? This cannot be undone.';
      if (!window.confirm(msg)) return;
      clearAllCache();
-     // 任务9：已连接时同步向设备下发 Clear/Reset 指令，清空芯片 RAM 历史/日均值
-     if (connected && state.resetChar) {
+     // 任务9：向已连接设备下发 Clear/Reset 指令，清空芯片 RAM 历史/日均值
+     if (state.resetChar) {
        try {
          await BLEProtocol.sendReset(state.resetChar);
          log('Device reset command sent (0xFFE5)');
