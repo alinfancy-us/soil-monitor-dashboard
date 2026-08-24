@@ -10,8 +10,8 @@
 <body class="min-h-screen bg-gradient-to-br from-emerald-50 via-white to-sky-50 text-slate-800">
 
   <!-- 兼容性提示 Modal -->
-  <div id="compatibilityModal" class="hidden fixed inset-0 z-50 items-center justify-center bg-slate-900/50 px-5">
-    <div class="w-full max-w-sm rounded-3xl bg-white p-6 text-center shadow-2xl">
+  <div id="compatibilityModal" class="fixed inset-0 z-50 items-center justify-center hidden px-5 bg-slate-900/50">
+    <div class="w-full max-w-sm p-6 text-center bg-white shadow-2xl rounded-3xl">
       <div id="modalIcon" class="text-4xl">📡</div>
       <h2 id="modalTitle" class="mt-3 text-xl font-bold text-slate-800">Bluetooth is unavailable</h2>
       <p id="modalMessage" class="mt-2 text-sm leading-6 text-slate-500"></p>
@@ -25,91 +25,91 @@
     </div>
   </div>
 
-  <div class="max-w-3xl mx-auto px-4 py-8 sm:py-12">
+  <div class="max-w-3xl px-4 py-8 mx-auto sm:py-12">
     <!-- Header -->
-    <header class="text-center mb-8">
-      <img src="page/images/alinfancy-logo.svg" alt="Alinfancy" class="mx-auto h-24 w-24 object-contain">
-      <h1 class="mt-3 text-2xl sm:text-3xl font-bold text-emerald-700">FloraSense</h1>
+    <header class="mb-8 text-center">
+      <img src="page/images/alinfancy-logo.svg" alt="Alinfancy" class="object-contain w-24 h-24 mx-auto">
+      <h1 class="mt-3 text-2xl font-bold sm:text-3xl text-emerald-700">FloraSense</h1>
       <p class="mt-1 text-slate-500">Soil temperature, humidity and battery dashboard</p>
     </header>
 
     <!-- User guide banner -->
     <a id="userGuideBanner" href="https://alinfancy-us.github.io/florasense-user-guide" target="_blank" rel="noopener noreferrer"
-       class="mb-6 flex items-center justify-between gap-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-5 py-3 text-sm font-medium text-emerald-700 shadow-sm transition hover:bg-emerald-100">
+       class="flex items-center justify-between gap-3 px-5 py-3 mb-6 text-sm font-medium transition border shadow-sm rounded-2xl border-emerald-100 bg-emerald-50 text-emerald-700 hover:bg-emerald-100">
       <span>📘 New to FloraSense? View the product user guide</span>
       <span aria-hidden="true">→</span>
     </a>
 
     <!-- Controls -->
-    <div class="flex items-center justify-between gap-3 bg-white rounded-2xl shadow-sm border border-slate-100 px-5 py-4 mb-6">
+    <div class="flex items-center justify-between gap-3 px-5 py-4 mb-6 bg-white border shadow-sm rounded-2xl border-slate-100">
       <div class="flex items-center gap-2">
         <span id="statusDot" class="w-3 h-3 rounded-full bg-slate-300"></span>
         <span id="statusText" class="text-sm font-medium text-slate-600">Disconnected</span>
       </div>
       <div class="flex gap-2">
         <button id="clearCacheBtn" disabled
-          class="inline-flex items-center px-4 py-2 rounded-xl text-sm font-semibold bg-slate-100 text-slate-600 hover:bg-rose-100 hover:text-rose-600 transition disabled:cursor-not-allowed disabled:opacity-40">
+          class="inline-flex items-center px-4 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-rose-100 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-40">
           🗑 Clear data
         </button>
         <button id="refreshBtn" disabled
-          class="inline-flex items-center px-4 py-2 rounded-xl text-sm font-semibold bg-slate-100 text-slate-600 hover:bg-sky-100 hover:text-sky-600 transition disabled:cursor-not-allowed disabled:opacity-40">
+          class="inline-flex items-center px-4 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-sky-100 hover:text-sky-600 disabled:cursor-not-allowed disabled:opacity-40">
           🔄 Refresh
         </button>
-        <button id="connectBtn" class="inline-flex items-center px-5 py-2 rounded-xl text-sm font-semibold bg-emerald-600 text-white shadow hover:bg-emerald-700 active:scale-95 transition">
+        <button id="connectBtn" class="inline-flex items-center px-5 py-2 text-sm font-semibold text-white transition shadow rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95">
           Connect device
         </button>
       </div>
     </div>
 
     <!-- Live readings -->
-    <div class="grid grid-cols-3 gap-3 sm:gap-4 mb-6">
-      <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 text-center">
+    <div class="grid grid-cols-3 gap-3 mb-6 sm:gap-4">
+      <div class="p-4 text-center bg-white border shadow-sm rounded-2xl border-slate-100">
         <div class="text-2xl sm:text-3xl">🌡️</div>
         <div id="tempValue" class="mt-1 text-2xl font-bold text-orange-500">--</div>
         <div class="text-xs text-slate-400 mt-0.5">Temperature ℃</div>
       </div>
-      <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 text-center">
+      <div class="p-4 text-center bg-white border shadow-sm rounded-2xl border-slate-100">
         <div class="text-2xl sm:text-3xl">💧</div>
         <div id="humValue" class="mt-1 text-2xl font-bold text-sky-500">--</div>
         <div class="text-xs text-slate-400 mt-0.5">Humidity %RH</div>
       </div>
-      <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 text-center">
+      <div class="p-4 text-center bg-white border shadow-sm rounded-2xl border-slate-100">
         <div class="text-2xl sm:text-3xl">🔋</div>
         <div id="battValue" class="mt-1 text-2xl font-bold text-emerald-600">--</div>
         <div class="text-xs text-slate-400 mt-0.5">Battery %</div>
       </div>
     </div>
-    <p id="lastUpdate" class="text-center text-xs text-slate-400 mb-8">No measurement received yet</p>
+    <p id="lastUpdate" class="mb-8 text-xs text-center text-slate-400">No measurement received yet</p>
 
     <!-- Sensor calibration -->
-    <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 sm:p-5 mb-6">
-      <h2 class="text-sm font-semibold text-slate-600 mb-1">Sensor calibration</h2>
-      <p class="text-xs text-slate-400 mb-3">
-        Uses the device's current live humidity reading, so place the probe first, wait a few seconds, then tap the matching button below.
+    <div class="p-4 mb-6 bg-white border shadow-sm rounded-2xl border-slate-100 sm:p-5">
+      <h2 class="mb-1 text-sm font-semibold text-slate-600">Sensor calibration</h2>
+      <p class="mb-3 text-xs text-slate-400">
+        Uses the device's live humidity reading. Place the probe first, tap the matching calibration button below, and wait a few minutes to see the updated calibrated humidity.
       </p>
       <div class="grid grid-cols-2 gap-3">
         <button id="calibDryBtn" disabled
-          class="flex flex-col items-center gap-1 rounded-xl border border-orange-100 bg-orange-50 px-3 py-3 text-orange-700 transition hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-40">
+          class="flex flex-col items-center gap-1 px-3 py-3 text-orange-700 transition border border-orange-100 rounded-xl bg-orange-50 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-40">
           <span class="text-xl">🏜️</span>
           <span class="text-sm font-semibold">Dry calibration (0%)</span>
           <span class="text-[11px] text-orange-500 text-center leading-tight">Probe in open air, fully dry</span>
         </button>
         <button id="calibWetBtn" disabled
-          class="flex flex-col items-center gap-1 rounded-xl border border-sky-100 bg-sky-50 px-3 py-3 text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40">
+          class="flex flex-col items-center gap-1 px-3 py-3 transition border rounded-xl border-sky-100 bg-sky-50 text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40">
           <span class="text-xl">💦</span>
           <span class="text-sm font-semibold">Wet calibration (100%)</span>
           <span class="text-[11px] text-sky-500 text-center leading-tight">Probe fully submerged in water</span>
         </button>
       </div>
-      <p id="calibStatus" class="mt-3 text-center text-xs text-slate-400">Connect a device to enable calibration</p>
+      <p id="calibStatus" class="mt-3 text-xs text-center text-slate-400">Connect a device to enable calibration</p>
     </div>
 
     <!-- History table -->
-    <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 sm:p-5 mb-6 overflow-x-auto">
-      <h2 class="text-sm font-semibold text-slate-600 mb-3">Measurement history</h2>
+    <div class="p-4 mb-6 overflow-x-auto bg-white border shadow-sm rounded-2xl border-slate-100 sm:p-5">
+      <h2 class="mb-3 text-sm font-semibold text-slate-600">Measurement history</h2>
       <table class="w-full text-sm">
         <thead>
-          <tr class="text-left text-slate-400 border-b border-slate-100">
+          <tr class="text-left border-b text-slate-400 border-slate-100">
             <th class="py-2 pr-2">#</th>
             <th class="py-2 pr-2">Date</th>
             <th class="py-2 pr-2">Temperature</th>
@@ -124,7 +124,7 @@
     </div>
 
     <!-- Trend charts (tabbed: recent records / 7-day daily average) -->
-    <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 sm:p-5 mb-6">
+    <div class="p-4 mb-6 bg-white border shadow-sm rounded-2xl border-slate-100 sm:p-5">
       <div class="flex items-center gap-2 mb-3">
         <button id="trendTabBtn" class="chart-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold bg-emerald-600 text-white transition">Recent 5-record trend</button>
         <button id="dailyTabBtn" class="chart-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold bg-slate-100 text-slate-500 transition">7-day daily average</button>
@@ -132,7 +132,7 @@
 
       <div id="trendTabPanel">
         <div class="relative h-56 sm:h-60">
-          <canvas id="trendChart" class="h-full w-full"></canvas>
+          <canvas id="trendChart" class="w-full h-full"></canvas>
         </div>
         <div class="grid grid-cols-3 gap-2 mt-3 text-xs">
           <div class="rounded-lg bg-orange-50 px-2.5 py-2 text-center">
@@ -148,12 +148,12 @@
             <div class="mt-0.5 text-slate-500">Battery (%)</div>
           </div>
         </div>
-        <p id="trendRangeText" class="mt-2 text-center text-xs text-slate-400">Waiting for device data</p>
+        <p id="trendRangeText" class="mt-2 text-xs text-center text-slate-400">Waiting for device data</p>
       </div>
 
       <div id="dailyTabPanel" class="hidden">
-        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div class="inline-flex rounded-xl bg-slate-100 p-1">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <div class="inline-flex p-1 rounded-xl bg-slate-100">
             <button id="dailyMetricTempBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold bg-white text-orange-600 shadow-sm">Temperature</button>
             <button id="dailyMetricHumBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-500">Humidity</button>
             <button id="dailyMetricBattBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-500">Battery</button>
@@ -161,7 +161,7 @@
           <span id="dailyMetricHint" class="text-xs text-slate-400">Single metric view for clear comparison</span>
         </div>
         <div class="relative h-56 sm:h-60">
-          <canvas id="dailyChart" class="h-full w-full"></canvas>
+          <canvas id="dailyChart" class="w-full h-full"></canvas>
         </div>
         <div class="grid grid-cols-3 gap-2 mt-3 text-xs">
           <div class="rounded-lg bg-slate-50 px-2.5 py-2 text-center">
@@ -177,39 +177,39 @@
             <div class="mt-0.5 text-slate-500">Change vs first</div>
           </div>
         </div>
-        <p id="dailyEmpty" class="text-center text-xs text-slate-300 mt-2">No daily data yet</p>
+        <p id="dailyEmpty" class="mt-2 text-xs text-center text-slate-300">No daily data yet</p>
       </div>
     </div>
 
     <!-- Debug power estimation panel (only shown with ?debug=1) -->
-    <div id="powerDebugPanel" class="hidden bg-white rounded-2xl shadow-sm border border-slate-100 p-4 sm:p-5 mb-6">
-      <h2 class="text-sm font-semibold text-slate-600 mb-3">Debug: power / battery life estimate</h2>
+    <div id="powerDebugPanel" class="hidden p-4 mb-6 bg-white border shadow-sm rounded-2xl border-slate-100 sm:p-5">
+      <h2 class="mb-3 text-sm font-semibold text-slate-600">Debug: power / battery life estimate</h2>
       <canvas id="powerChart" class="w-full" height="140"></canvas>
       <div class="grid grid-cols-2 gap-3 mt-4 text-xs text-slate-600">
         <label class="flex flex-col gap-1">Active current (mA)
-          <input id="iActiveInput" type="number" step="0.1" value="5" class="rounded-lg border border-slate-200 px-2 py-1">
+          <input id="iActiveInput" type="number" step="0.1" value="5" class="px-2 py-1 border rounded-lg border-slate-200">
         </label>
         <label class="flex flex-col gap-1">Advertising current (mA)
-          <input id="iAdvInput" type="number" step="0.1" value="4.8" class="rounded-lg border border-slate-200 px-2 py-1">
+          <input id="iAdvInput" type="number" step="0.1" value="4.8" class="px-2 py-1 border rounded-lg border-slate-200">
         </label>
         <label class="flex flex-col gap-1">Sleep current (µA)
-          <input id="iSleepInput" type="number" step="0.1" value="1.6" class="rounded-lg border border-slate-200 px-2 py-1">
+          <input id="iSleepInput" type="number" step="0.1" value="1.6" class="px-2 py-1 border rounded-lg border-slate-200">
         </label>
         <label class="flex flex-col gap-1">Battery capacity (mAh)
-          <input id="battCapacityInput" type="number" step="1" value="2500" class="rounded-lg border border-slate-200 px-2 py-1">
+          <input id="battCapacityInput" type="number" step="1" value="2500" class="px-2 py-1 border rounded-lg border-slate-200">
         </label>
       </div>
-      <div class="mt-4 grid grid-cols-2 gap-3 text-center">
-        <div class="bg-slate-50 rounded-xl py-3">
+      <div class="grid grid-cols-2 gap-3 mt-4 text-center">
+        <div class="py-3 bg-slate-50 rounded-xl">
           <div id="avgCurrentValue" class="text-xl font-bold text-emerald-600">--</div>
           <div class="text-xs text-slate-400 mt-0.5">Average current (µA)</div>
         </div>
-        <div class="bg-slate-50 rounded-xl py-3">
+        <div class="py-3 bg-slate-50 rounded-xl">
           <div id="batteryLifeValue" class="text-xl font-bold text-emerald-600">--</div>
           <div class="text-xs text-slate-400 mt-0.5">Estimated battery life (days)</div>
         </div>
       </div>
-      <p id="powerEmpty" class="text-center text-xs text-slate-300 mt-3">No power snapshot yet (debug firmware only)</p>
+      <p id="powerEmpty" class="mt-3 text-xs text-center text-slate-300">No power snapshot yet (debug firmware only)</p>
     </div>
   </div>
 
