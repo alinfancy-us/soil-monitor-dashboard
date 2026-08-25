@@ -1,6 +1,6 @@
 {
   "version": "1.4.0",
   "bin": "florasense_v1.4.0.bin",
-  "size": 66532,
+  "size": 64116,
   "notes": "FloraSense soil sensor firmware (TLSR8258). Bump SOIL_FW_VERSION in app_config.h, rebuild, copy the new bin here and update this manifest to publish an OTA update."
 }

@@ -82,18 +82,29 @@ const BLEProtocol = (() => {
   /**
    * 建立蓝牙连接并配置通道（针对 Bluefy 优化）
    */
+  /** 连接阶段超时（毫秒）：选完设备后，gatt.connect + 服务/特征发现应在 5s 内完成。
+   *  蓝牙不可用 / 设备处于睡眠时这一步会挂起，超时后由 app.js 复位 UI。 */
+  const CONNECT_TIMEOUT_MS = 5000;
+
   /**
-   * 建立蓝牙连接（限制仅过滤 alinfancy 开头的设备）
+   * 阶段1：仅弹出设备选择器（不设超时——用户挑设备时长不受限）。
+   * @returns {Promise<BluetoothDevice>}
    */
-  async function connectDevice(onNotification, onDisconnect) {
+  async function requestSoilDevice() {
     // 限制名称前缀为 alinfancy，并传入 128 位格式的 Service UUID
-    const device = await navigator.bluetooth.requestDevice({
+    return navigator.bluetooth.requestDevice({
       filters: [
         { namePrefix: DEVICE_NAME_PREFIX }
       ],
       optionalServices: [UUIDS.SERVICE, UUIDS.OTA_SERVICE, UUIDS.DIS_SERVICE]
     });
+  }
 
+  /**
+   * 阶段2 主体：gatt.connect + 服务/特征发现 + 时间同步 + 订阅 Notify（原 connectDevice 内容）。
+   * @param {BluetoothDevice} device
+   */
+  async function finishConnectInner(device, onNotification, onDisconnect) {
     device.addEventListener('gattserverdisconnected', onDisconnect);
 
     const server = await device.gatt.connect();
@@ -177,6 +188,42 @@ const BLEProtocol = (() => {
     }
 
     return { device, dataChar, dailyChar, powerChar, resetChar, calibChar, refreshChar, otaChar, fwVersion };
+  }
+
+  /**
+   * 阶段2 的“带 5s 超时”入口：对内部逻辑整体做 Promise.race。
+   * 超时抛 __CONNECT_TIMEOUT__，由 app.js 识别并复位 UI（同时防“迟到成功”成幽灵连接）。
+   * @param {BluetoothDevice} device
+   */
+  async function finishConnect(device, onNotification, onDisconnect) {
+    let timedOut = false;
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => { timedOut = true; reject(new Error('CONNECT_TIMEOUT')); }, CONNECT_TIMEOUT_MS);
+    });
+
+    const inner = finishConnectInner(device, onNotification, onDisconnect);
+    // 超时后又“迟到成功”（例如设备在 5s 后才醒来并连上）：主动断开这次孤儿连接，
+    // 防止出现“UI 显示未连接、设备却已连上”的幽灵状态。晚期失败也一并吞掉，避免未处理 rejection。
+    inner.then(() => {
+      if (timedOut) {
+        try { device.gatt.disconnect(); } catch (_) {}
+      }
+    }).catch(() => {});
+
+    try {
+      return await Promise.race([inner, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 兼容入口：顺序执行 选设备 -> 带超时连接。供既有调用方（如 OTA 重试）继续使用。
+   */
+  async function connectDevice(onNotification, onDisconnect) {
+    const device = await requestSoilDevice();
+    return finishConnect(device, onNotification, onDisconnect);
   }
 
   /**
@@ -447,6 +494,8 @@ const BLEProtocol = (() => {
     parseDailyPacket,
     parsePowerSnapshot,
     hexDump,
+    requestSoilDevice,
+    finishConnect,
     connectDevice,
     sendReset,
     sendHumCalib,

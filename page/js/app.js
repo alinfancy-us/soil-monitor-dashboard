@@ -1100,25 +1100,39 @@
      els.modal.classList.add('flex');
    }
  
+let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的连接，防止幽灵状态
+
    async function handleConnect() {
      if (!navigator.bluetooth) {
        const ua = navigator.userAgent;
        showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
        return;
      }
- 
+
+     const token = ++connectToken;
      try {
        setStatus('connecting');
        log('Requesting Bluetooth Device...');
- 
-       const { device, dataChar, dailyChar, powerChar, resetChar, calibChar, refreshChar, otaChar, fwVersion } = await BLEProtocol.connectDevice(
+
+       // 阶段1：仅弹设备选择器（不设超时，用户挑设备时长不受限）
+       const device = await BLEProtocol.requestSoilDevice();
+       if (token !== connectToken) return;   // 期间用户又发起了新连接，丢弃本次
+
+       // 阶段2：gatt.connect + 服务/特征发现，由 finishConnect 内部保证 5s 超时
+       const { dataChar, dailyChar, powerChar, resetChar, calibChar, refreshChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
+         device,
          (records, hex) => {
            log(`Notification: ${hex}`);
            render(records);
          },
          onDisconnected
        );
- 
+
+       if (token !== connectToken) {           // 迟到成功：丢弃并断开，防 UI 未连接、设备已连接
+         device.gatt?.disconnect?.();
+         return;
+       }
+
        // device.id 是 Web Bluetooth 分配的设备唯一标识（浏览器不暴露真实 MAC），
        // 切换到不同土壤检测器时按它区分缓存，避免数据互相覆盖/串号。
        if (device.id !== state.activeDeviceId) {
@@ -1127,28 +1141,34 @@
        state.activeDeviceId = device.id;
        setLastDevice(device.id, device.name);
        restoreCachedCharts(device.id);
- 
+
        state.device = device;
        state.characteristic = dataChar;
        state.dailyChar = dailyChar;
        state.powerChar = powerChar;
        state.resetChar = resetChar;
-      state.calibChar = calibChar;
-      state.refreshChar = refreshChar;
-      state.otaChar = otaChar;
-      state.fwVersion = fwVersion;
-      checkFirmwareUpdate();
- 
+       state.calibChar = calibChar;
+       state.refreshChar = refreshChar;
+       state.otaChar = otaChar;
+       state.fwVersion = fwVersion;
+       checkFirmwareUpdate();
+
        if (dataChar.properties.read) {
          await readData();
        }
- 
+
        setStatus('connected');
        log('Connected & Listening for updates.');
        startPolling();
      } catch (err) {
+       if (token !== connectToken) return;   // 超时/失败期间用户已重新点击，不被覆盖
        setStatus('disconnected');
-       log(`Connection failed: ${err.message || err}`);
+       if (String(err && err.message).includes('CONNECT_TIMEOUT')) {
+         els.statusText.textContent = 'Connect timed out — device may be sleeping (touch it to wake) or Bluetooth is off';
+         log('Connection timed out after 5s');
+       } else {
+         log(`Connection failed: ${err.message || err}`);
+       }
      }
    }
  
