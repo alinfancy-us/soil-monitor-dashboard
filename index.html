@@ -49,6 +49,84 @@
       max-width: 100%;
     }
 
+    /* ===== Persistent connection bar ===== */
+    .toolbar {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    @media (min-width: 640px) {
+      .toolbar {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+      }
+    }
+
+    /* ===== Main tab navigation ===== */
+    .main-nav {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      padding: 5px;
+      background: #e9f3ed;
+      border: 1px solid #d6e7dc;
+      border-radius: 999px;
+      box-shadow: 0 4px 14px rgba(27, 66, 55, 0.05);
+    }
+
+    .main-tab-btn {
+      min-height: 46px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 10px 8px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #4c7561;
+      background: transparent;
+      white-space: nowrap;
+      transition: all 0.18s ease;
+      cursor: pointer;
+    }
+
+    .main-tab-btn:hover {
+      color: #0c5d44;
+      background: rgba(12, 93, 68, 0.10);
+    }
+
+    .main-tab-active,
+    .main-tab-active:hover {
+      color: #ffffff;
+      background: #0c5d44;
+      box-shadow: 0 6px 16px rgba(12, 93, 68, 0.30);
+    }
+
+    /* ===== Guide ===== */
+    .guide-step {
+      display: flex;
+      gap: 12px;
+    }
+    .guide-step + .guide-step {
+      margin-top: 14px;
+    }
+    .guide-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      flex: 0 0 26px;
+      border-radius: 999px;
+      background: #d1fae5;
+      color: #047857;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    /* ===== Mobile tweaks ===== */
     @media (max-width: 639px) {
       .dashboard-shell {
         padding-left: 14px;
@@ -65,7 +143,7 @@
       }
 
       .metric-card .metric-value {
-        font-size: clamp(1.25rem, 7vw, 1.75rem);
+        font-size: clamp(1.5rem, 8vw, 2rem);
         line-height: 1.15;
       }
 
@@ -149,20 +227,21 @@
         white-space: normal;
         line-height: 1.2;
       }
+
+      .main-tab-btn {
+        font-size: 12.5px;
+      }
     }
   </style>
 </head>
 <body class="min-h-screen text-slate-800 antialiased">
-
   <!-- 兼容性提示 Modal -->
   <div id="compatibilityModal" class="fixed inset-0 z-50 items-center justify-center hidden px-5 bg-slate-900/50">
     <div class="w-full max-w-sm p-6 text-center bg-white shadow-2xl rounded-3xl">
       <div id="modalIcon" class="text-4xl">📡</div>
       <h2 id="modalTitle" class="mt-3 text-xl font-bold text-slate-800">Bluetooth is unavailable</h2>
       <p id="modalMessage" class="mt-2 text-sm leading-6 text-slate-500"></p>
-      
       <div class="mt-5">
-        <!-- 仅保留动态跳转按钮，移除了 Got it -->
         <a id="modalActionBtn" href="#" target="_blank" class="block w-full rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700 text-center">
           Download Supported Browser
         </a>
@@ -172,7 +251,7 @@
 
   <div class="dashboard-shell max-w-4xl px-4 py-5 mx-auto sm:px-6 sm:py-10 lg:py-12">
     <!-- Header -->
-    <header class="flex items-center gap-4 mb-5 text-left sm:mb-8 sm:justify-center sm:text-center">
+    <header class="flex items-center gap-4 mb-5 text-left sm:mb-7 sm:justify-center sm:text-center">
       <img src="page/images/alinfancy-logo.svg" alt="Alinfancy" class="object-contain w-16 h-16 shrink-0 sm:w-24 sm:h-24">
       <div>
         <h1 class="text-2xl font-bold sm:text-3xl text-emerald-800">FloraSense</h1>
@@ -180,42 +259,14 @@
       </div>
     </header>
 
-    <!-- User guide banner -->
-    <a id="userGuideBanner" href="https://alinfancy-us.github.io/florasense-user-guide" target="_blank" rel="noopener noreferrer"
-       class="flex items-center justify-between gap-3 px-4 py-3 mb-4 text-sm font-medium transition border rounded-2xl sm:px-5 sm:mb-6 border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100">
-      <span class="flex items-center gap-2"><span aria-hidden="true">📘</span><span>New to FloraSense? View the product user guide</span></span>
-      <span class="text-lg shrink-0" aria-hidden="true">→</span>
-    </a>
-
     <!-- Firmware update banner（连接后检测到新版本时显示，点击即可一键 OTA 升级） -->
-    <div id="otaUpdateBanner" class="hidden dashboard-card flex flex-wrap items-center justify-between gap-3 px-4 py-3 mb-4 text-sm rounded-2xl sm:px-5 sm:mb-6 border-violet-200 bg-violet-50 text-violet-800">
+    <div id="otaUpdateBanner" class="hidden dashboard-card flex flex-wrap items-center justify-between gap-3 px-4 py-3 mb-4 text-sm rounded-2xl sm:px-5 sm:mb-5 border-violet-200 bg-violet-50 text-violet-800">
       <span class="flex items-center gap-2"><span aria-hidden="true">🚀</span><span>New firmware <b id="otaNewVersion">--</b> available (current <b id="otaCurrentVersion">--</b>)</span></span>
       <button id="otaUpdateNowBtn" class="px-4 py-1.5 text-xs font-semibold text-white transition rounded-xl bg-violet-600 hover:bg-violet-700 active:scale-[0.98]">Update now</button>
     </div>
 
-    <!-- Controls -->
-    <div class="dashboard-card grid grid-cols-2 gap-3 p-3 mb-5 rounded-2xl sm:flex sm:items-center sm:justify-between sm:px-5 sm:py-4 sm:mb-6">
-      <div class="flex items-center gap-2 px-2 col-span-2 sm:px-0 sm:col-auto">
-        <span id="statusDot" class="w-3 h-3 rounded-full bg-slate-300"></span>
-        <span id="statusText" class="text-sm font-medium text-slate-600">Disconnected</span>
-      </div>
-      <div class="contents sm:flex sm:gap-2">
-        <button id="clearCacheBtn" disabled
-          class="action-button inline-flex items-center px-3 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-rose-100 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-40 sm:px-4">
-          🗑 Clear data
-        </button>
-        <button id="refreshBtn" disabled
-          class="action-button inline-flex items-center px-3 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-sky-100 hover:text-sky-600 disabled:cursor-not-allowed disabled:opacity-40 sm:px-4">
-          🔄 Refresh
-        </button>
-        <button id="connectBtn" class="action-button inline-flex items-center col-span-2 px-5 py-2 text-sm font-semibold text-white transition shadow-sm rounded-xl bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] sm:col-auto">
-          Connect device
-        </button>
-      </div>
-    </div>
-
     <!-- OTA 固件升级进度面板（检测到新版本并开始升级时显示） -->
-    <div id="otaPanel" class="hidden dashboard-card p-4 mb-5 rounded-2xl sm:p-5 sm:mb-6">
+    <div id="otaPanel" class="hidden dashboard-card p-4 mb-5 rounded-2xl sm:p-5 sm:mb-5">
       <h2 class="mb-3 text-sm font-semibold text-slate-600">Firmware update</h2>
       <div class="flex items-center gap-3">
         <div class="flex-1 h-2 min-w-0 overflow-hidden rounded-full bg-slate-100">
@@ -229,125 +280,223 @@
       <p id="otaStatus" class="mt-2 text-xs font-medium text-slate-600">Reading firmware…</p>
     </div>
 
-    <!-- Live readings -->
-    <div class="grid grid-cols-3 gap-2 mb-4 sm:gap-4 sm:mb-6">
-      <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #f97316">
-        <div class="text-xl sm:text-3xl">🌡️</div>
-        <div id="tempValue" class="metric-value mt-1 text-2xl font-bold text-orange-600 sm:text-3xl">--</div>
-        <div class="metric-label text-xs text-slate-500 mt-0.5">Temperature ℃</div>
+    <!-- Controls（全局：连接 / 刷新 / 清空） -->
+    <div class="dashboard-card toolbar p-3 mb-4 rounded-2xl sm:px-5 sm:py-4 sm:mb-6">
+      <div class="flex items-center gap-2 px-2 sm:px-0">
+        <span id="statusDot" class="w-3 h-3 rounded-full bg-slate-300"></span>
+        <span id="statusText" class="text-sm font-medium text-slate-600">Disconnected</span>
       </div>
-      <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #0ea5e9">
-        <div class="text-xl sm:text-3xl">💧</div>
-        <div id="humValue" class="metric-value mt-1 text-2xl font-bold text-sky-600 sm:text-3xl">--</div>
-        <div class="metric-label text-xs text-slate-500 mt-0.5">Humidity %RH</div>
-      </div>
-      <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #16a34a">
-        <div class="text-xl sm:text-3xl">🔋</div>
-        <div id="battValue" class="metric-value mt-1 text-2xl font-bold text-emerald-700 sm:text-3xl">--</div>
-        <div class="metric-label text-xs text-slate-500 mt-0.5">Battery %</div>
-      </div>
-    </div>
-    <p id="lastUpdate" class="mb-5 text-xs text-center text-slate-400 sm:mb-8">No measurement received yet</p>
-
-    <!-- Sensor calibration -->
-    <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5 sm:mb-6">
-      <h2 class="mb-1 text-sm font-semibold text-slate-600">Sensor calibration</h2>
-      <p class="mb-3 text-xs text-slate-400">
-        Uses the device's live humidity reading. Place the probe first, tap the matching calibration button below, and wait a few minutes to see the updated calibrated humidity.
-      </p>
-      <div class="calibration-grid grid grid-cols-2 gap-3">
-        <button id="calibDryBtn" disabled
-          class="flex flex-col items-center gap-1 px-3 py-3 text-orange-700 transition border border-orange-100 rounded-xl bg-orange-50 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-40">
-          <span class="text-xl">🏜️</span>
-          <span class="text-sm font-semibold">Dry calibration (0%)</span>
-          <span class="text-[11px] text-orange-500 text-center leading-tight">Probe in open air, fully dry</span>
+      <div class="grid grid-cols-2 gap-2 sm:flex sm:gap-2">
+        <button id="clearCacheBtn" disabled
+          class="action-button inline-flex items-center px-3 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-rose-100 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-40 sm:px-4">
+          🗑 Clear data
         </button>
-        <button id="calibWetBtn" disabled
-          class="flex flex-col items-center gap-1 px-3 py-3 transition border rounded-xl border-sky-100 bg-sky-50 text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40">
-          <span class="text-xl">💦</span>
-          <span class="text-sm font-semibold">Wet calibration (100%)</span>
-          <span class="text-[11px] text-sky-500 text-center leading-tight">Probe fully submerged in water</span>
+        <button id="refreshBtn" disabled
+          class="action-button inline-flex items-center px-3 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-sky-100 hover:text-sky-600 disabled:cursor-not-allowed disabled:opacity-40 sm:px-4">
+          🔄 Refresh
+        </button>
+        <button id="connectBtn" class="action-button inline-flex items-center px-5 py-2 text-sm font-semibold text-white transition shadow-sm rounded-xl bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] w-full col-span-2 sm:w-auto">
+          Connect device
         </button>
       </div>
-      <p id="calibStatus" class="mt-3 text-xs text-center text-slate-400">Connect a device to enable calibration</p>
     </div>
 
-    <!-- History table -->
-    <div class="dashboard-card p-4 mb-5 overflow-hidden rounded-2xl sm:p-5 sm:mb-6">
-      <h2 class="mb-3 text-sm font-semibold text-slate-600">Measurement history</h2>
-      <table class="history-table w-full text-sm">
-        <thead>
-          <tr class="text-left border-b text-slate-400 border-slate-100">
-            <th class="py-2 pr-2">#</th>
-            <th class="py-2 pr-2">Date</th>
-            <th class="py-2 pr-2">Temperature</th>
-            <th class="py-2 pr-2">Humidity</th>
-            <th class="py-2">Battery</th>
-          </tr>
-        </thead>
-        <tbody id="historyBody">
-          <tr><td colspan="5" class="py-6 text-center text-slate-300">Connect a device to view history</td></tr>
-        </tbody>
-      </table>
-    </div>
+    <!-- Main tab navigation -->
+    <nav class="main-nav mb-5 sm:mb-6" role="tablist" aria-label="Dashboard views">
+      <button id="mainTabNowBtn" class="main-tab-btn main-tab-active" role="tab" aria-selected="true">📊 Now</button>
+      <button id="mainTabHistoryBtn" class="main-tab-btn" role="tab" aria-selected="false">📈 History</button>
+      <button id="mainTabGuideBtn" class="main-tab-btn" role="tab" aria-selected="false">📘 Guide</button>
+    </nav>
+    <!-- ================= Panel: Now ================= -->
+    <section id="mainTabNowPanel" role="tabpanel">
+      <!-- Live readings -->
+      <div class="grid grid-cols-3 gap-2 mb-4 sm:gap-4 sm:mb-5">
+        <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #f97316">
+          <div class="text-xl sm:text-3xl">🌡️</div>
+          <div id="tempValue" class="metric-value mt-1 text-3xl font-bold text-orange-600 sm:text-4xl">--</div>
+          <div class="metric-label text-xs text-slate-500 mt-0.5">Temperature ℃</div>
+        </div>
+        <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #0ea5e9">
+          <div class="text-xl sm:text-3xl">💧</div>
+          <div id="humValue" class="metric-value mt-1 text-3xl font-bold text-sky-600 sm:text-4xl">--</div>
+          <div class="metric-label text-xs text-slate-500 mt-0.5">Humidity %RH</div>
+        </div>
+        <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #16a34a">
+          <div class="text-xl sm:text-3xl">🔋</div>
+          <div id="battValue" class="metric-value mt-1 text-3xl font-bold text-emerald-700 sm:text-4xl">--</div>
+          <div class="metric-label text-xs text-slate-500 mt-0.5">Battery %</div>
+        </div>
+      </div>
+      <p id="lastUpdate" class="mb-5 text-xs text-center text-slate-400 sm:mb-6">No measurement received yet</p>
 
-    <!-- Trend charts (tabbed: recent records / 7-day daily average) -->
-    <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5 sm:mb-6">
-      <div class="chart-tabs flex items-stretch gap-2 mb-4">
-        <button id="trendTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-emerald-600 text-white transition">Recent 5-record trend</button>
-        <button id="dailyTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-slate-100 text-slate-500 transition">7-day daily average</button>
+      <!-- Sensor calibration -->
+      <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5 sm:mb-0">
+        <h2 class="mb-1 text-sm font-semibold text-slate-600">Sensor calibration</h2>
+        <p class="mb-3 text-xs leading-5 text-slate-400">
+          Uses the device's live humidity reading. Place the probe first, tap the matching calibration button below, and wait a few minutes to see the updated calibrated humidity.
+        </p>
+        <div class="calibration-grid grid grid-cols-2 gap-3">
+          <button id="calibDryBtn" disabled
+            class="flex flex-col items-center gap-1 px-3 py-3 text-orange-700 transition border border-orange-100 rounded-xl bg-orange-50 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-40">
+            <span class="text-xl">🏜️</span>
+            <span class="text-sm font-semibold">Dry calibration (0%)</span>
+            <span class="text-[11px] text-orange-500 text-center leading-tight">Probe in open air, fully dry</span>
+          </button>
+          <button id="calibWetBtn" disabled
+            class="flex flex-col items-center gap-1 px-3 py-3 transition border rounded-xl border-sky-100 bg-sky-50 text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40">
+            <span class="text-xl">💦</span>
+            <span class="text-sm font-semibold">Wet calibration (100%)</span>
+            <span class="text-[11px] text-sky-500 text-center leading-tight">Probe fully submerged in water</span>
+          </button>
+        </div>
+        <p id="calibStatus" class="mt-3 text-xs text-center text-slate-400">Connect a device to enable calibration</p>
+      </div>
+    </section>
+    <!-- ================= Panel: History ================= -->
+    <section id="mainTabHistoryPanel" class="hidden" role="tabpanel">
+      <!-- History table -->
+      <div class="dashboard-card p-4 mb-5 overflow-hidden rounded-2xl sm:p-5 sm:mb-6">
+        <h2 class="mb-3 text-sm font-semibold text-slate-600">Measurement history</h2>
+        <table class="history-table w-full text-sm">
+          <thead>
+            <tr class="text-left border-b text-slate-400 border-slate-100">
+              <th class="py-2 pr-2">#</th>
+              <th class="py-2 pr-2">Date</th>
+              <th class="py-2 pr-2">Temperature</th>
+              <th class="py-2 pr-2">Humidity</th>
+              <th class="py-2">Battery</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody">
+            <tr><td colspan="5" class="py-6 text-center text-slate-300">Connect a device to view history</td></tr>
+          </tbody>
+        </table>
       </div>
 
-      <div id="trendTabPanel">
-        <div class="relative h-56 sm:h-60">
-          <canvas id="trendChart" class="w-full h-full"></canvas>
+      <!-- Trend charts (tabbed: recent records / 7-day daily average) -->
+      <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5 sm:mb-0">
+        <div class="chart-tabs flex items-stretch gap-2 mb-4">
+          <button id="trendTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-emerald-600 text-white transition">Recent 5-record trend</button>
+          <button id="dailyTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-slate-100 text-slate-500 transition">7-day daily average</button>
         </div>
-        <div class="grid grid-cols-3 gap-2 mt-3 text-xs">
-          <div class="rounded-lg bg-orange-50 px-2.5 py-2 text-center">
-            <div id="trendTempLatest" class="text-sm font-semibold text-orange-600">--</div>
-            <div class="mt-0.5 text-slate-500">Temperature (℃)</div>
-          </div>
-          <div class="rounded-lg bg-sky-50 px-2.5 py-2 text-center">
-            <div id="trendHumLatest" class="text-sm font-semibold text-sky-600">--</div>
-            <div class="mt-0.5 text-slate-500">Humidity (%)</div>
-          </div>
-          <div class="rounded-lg bg-emerald-50 px-2.5 py-2 text-center">
-            <div id="trendBattLatest" class="text-sm font-semibold text-emerald-600">--</div>
-            <div class="mt-0.5 text-slate-500">Battery (%)</div>
-          </div>
-        </div>
-        <p id="trendRangeText" class="mt-2 text-xs text-center text-slate-400">Waiting for device data</p>
-      </div>
 
-      <div id="dailyTabPanel" class="hidden">
-        <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
-          <div class="inline-flex p-1 rounded-xl bg-slate-100">
-            <button id="dailyMetricTempBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold bg-white text-orange-600 shadow-sm">Temperature</button>
-            <button id="dailyMetricHumBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-500">Humidity</button>
-            <button id="dailyMetricBattBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-500">Battery</button>
+        <div id="trendTabPanel">
+          <div class="relative h-56 sm:h-60">
+            <canvas id="trendChart" class="w-full h-full"></canvas>
           </div>
-          <span id="dailyMetricHint" class="text-xs text-slate-400">Single metric view for clear comparison</span>
+          <div class="grid grid-cols-3 gap-2 mt-3 text-xs">
+            <div class="rounded-lg bg-orange-50 px-2.5 py-2 text-center">
+              <div id="trendTempLatest" class="text-sm font-semibold text-orange-600">--</div>
+              <div class="mt-0.5 text-slate-500">Temperature (℃)</div>
+            </div>
+            <div class="rounded-lg bg-sky-50 px-2.5 py-2 text-center">
+              <div id="trendHumLatest" class="text-sm font-semibold text-sky-600">--</div>
+              <div class="mt-0.5 text-slate-500">Humidity (%)</div>
+            </div>
+            <div class="rounded-lg bg-emerald-50 px-2.5 py-2 text-center">
+              <div id="trendBattLatest" class="text-sm font-semibold text-emerald-600">--</div>
+              <div class="mt-0.5 text-slate-500">Battery (%)</div>
+            </div>
+          </div>
+          <p id="trendRangeText" class="mt-2 text-xs text-center text-slate-400">Waiting for device data</p>
         </div>
-        <div class="relative h-56 sm:h-60">
-          <canvas id="dailyChart" class="w-full h-full"></canvas>
+
+        <div id="dailyTabPanel" class="hidden">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <div class="inline-flex p-1 rounded-xl bg-slate-100">
+              <button id="dailyMetricTempBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold bg-white text-orange-600 shadow-sm">Temperature</button>
+              <button id="dailyMetricHumBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-500">Humidity</button>
+              <button id="dailyMetricBattBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-500">Battery</button>
+            </div>
+            <span id="dailyMetricHint" class="text-xs text-slate-400">Single metric view for clear comparison</span>
+          </div>
+          <div class="relative h-56 sm:h-60">
+            <canvas id="dailyChart" class="w-full h-full"></canvas>
+          </div>
+          <div class="grid grid-cols-3 gap-2 mt-3 text-xs">
+            <div class="rounded-lg bg-slate-50 px-2.5 py-2 text-center">
+              <div id="dailyLatestValue" class="text-sm font-semibold text-slate-700">--</div>
+              <div class="mt-0.5 text-slate-500">Latest</div>
+            </div>
+            <div class="rounded-lg bg-slate-50 px-2.5 py-2 text-center">
+              <div id="dailyAvgValue" class="text-sm font-semibold text-slate-700">--</div>
+              <div class="mt-0.5 text-slate-500">7-day average</div>
+            </div>
+            <div class="rounded-lg bg-slate-50 px-2.5 py-2 text-center">
+              <div id="dailyChangeValue" class="text-sm font-semibold text-slate-700">--</div>
+              <div class="mt-0.5 text-slate-500">Change vs first</div>
+            </div>
+          </div>
+          <p id="dailyEmpty" class="mt-2 text-xs text-center text-slate-300">No daily data yet</p>
         </div>
-        <div class="grid grid-cols-3 gap-2 mt-3 text-xs">
-          <div class="rounded-lg bg-slate-50 px-2.5 py-2 text-center">
-            <div id="dailyLatestValue" class="text-sm font-semibold text-slate-700">--</div>
-            <div class="mt-0.5 text-slate-500">Latest</div>
-          </div>
-          <div class="rounded-lg bg-slate-50 px-2.5 py-2 text-center">
-            <div id="dailyAvgValue" class="text-sm font-semibold text-slate-700">--</div>
-            <div class="mt-0.5 text-slate-500">7-day average</div>
-          </div>
-          <div class="rounded-lg bg-slate-50 px-2.5 py-2 text-center">
-            <div id="dailyChangeValue" class="text-sm font-semibold text-slate-700">--</div>
-            <div class="mt-0.5 text-slate-500">Change vs first</div>
-          </div>
-        </div>
-        <p id="dailyEmpty" class="mt-2 text-xs text-center text-slate-300">No daily data yet</p>
       </div>
-    </div>
+    </section>
+    <!-- ================= Panel: Guide ================= -->
+    <section id="mainTabGuidePanel" class="hidden" role="tabpanel">
+      <div class="dashboard-card p-5 rounded-2xl sm:p-6">
+        <h2 class="text-lg font-bold text-emerald-800">Welcome to FloraSense 👋</h2>
+        <p class="mt-1 text-sm leading-6 text-slate-500">
+          FloraSense is a Bluetooth soil sensor that measures soil temperature, humidity and battery level. This quick guide helps you get started in a few minutes.
+        </p>
+
+        <div class="mt-6">
+          <h3 class="mb-3 text-sm font-semibold text-slate-600">Getting started</h3>
+          <div class="guide-step">
+            <span class="guide-num">1</span>
+            <div>
+              <p class="text-sm font-medium text-slate-700">Tap “Connect device”</p>
+              <p class="text-xs leading-5 text-slate-500">Your browser opens a Bluetooth device list. Pick the FloraSense detector closest to you.</p>
+            </div>
+          </div>
+          <div class="guide-step">
+            <span class="guide-num">2</span>
+            <div>
+              <p class="text-sm font-medium text-slate-700">Watch live readings</p>
+              <p class="text-xs leading-5 text-slate-500">Once connected, the <b>Now</b> tab shows temperature, humidity and battery — updated in real time.</p>
+            </div>
+          </div>
+          <div class="guide-step">
+            <span class="guide-num">3</span>
+            <div>
+              <p class="text-sm font-medium text-slate-700">Review trends</p>
+              <p class="text-xs leading-5 text-slate-500">Open the <b>History</b> tab to browse every measurement and see 5-record or 7-day average charts.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-6">
+          <h3 class="mb-3 text-sm font-semibold text-slate-600">Calibration</h3>
+          <p class="text-xs leading-5 text-slate-500">
+            In the <b>Now</b> tab, place the probe fully dry in open air and tap <b>Dry calibration</b>, then submerge the probe in water and tap <b>Wet calibration</b>. This improves humidity accuracy for the soil you use.
+          </p>
+        </div>
+
+        <div class="mt-6">
+          <h3 class="mb-3 text-sm font-semibold text-slate-600">Understanding readings</h3>
+          <ul class="space-y-2 text-xs leading-5 text-slate-500">
+            <li><b class="text-orange-600">🌡️ Temperature</b> — soil temperature in degrees Celsius. Most plants thrive between 15–30 ℃.</li>
+            <li><b class="text-sky-600">💧 Humidity</b> — relative soil moisture as a percentage. Aim for the sweet spot of your plant.</li>
+            <li><b class="text-emerald-600">🔋 Battery</b> — remaining charge. Recharge before it gets too low.</li>
+          </ul>
+        </div>
+
+        <div class="mt-6">
+          <h3 class="mb-3 text-sm font-semibold text-slate-600">Firmware update</h3>
+          <p class="text-xs leading-5 text-slate-500">
+            When a newer firmware is available, a violet banner appears above the toolbar. Tap <b>Update now</b> to upgrade over the air — the device reboots automatically after a successful update.
+          </p>
+        </div>
+
+        <div class="mt-6">
+          <h3 class="mb-3 text-sm font-semibold text-slate-600">Troubleshooting</h3>
+          <ul class="space-y-2 text-xs leading-5 text-slate-500">
+            <li><b>Bluetooth unavailable?</b> Use Google Chrome on desktop or the Bluefy app on iOS. On Android WeChat, tap the menu and choose “Open in Browser”.</li>
+            <li><b>Not connecting?</b> Make sure the sensor is powered on and close to your phone or computer, then tap <b>Refresh</b>.</li>
+            <li><b>Odd data?</b> Use <b>Clear data</b> to remove cached readings for the current device, then reconnect.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
 
   </div>
 

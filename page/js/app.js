@@ -66,6 +66,12 @@
      modalActionBtn: document.getElementById('modalActionBtn'),
      dailyChart: document.getElementById('dailyChart'),
      dailyEmpty: document.getElementById('dailyEmpty'),
+     mainTabNowBtn: document.getElementById('mainTabNowBtn'),
+     mainTabHistoryBtn: document.getElementById('mainTabHistoryBtn'),
+     mainTabGuideBtn: document.getElementById('mainTabGuideBtn'),
+     mainTabNowPanel: document.getElementById('mainTabNowPanel'),
+     mainTabHistoryPanel: document.getElementById('mainTabHistoryPanel'),
+     mainTabGuidePanel: document.getElementById('mainTabGuidePanel'),
    };
  
    const state = {
@@ -878,6 +884,32 @@
      }
    }
  
+   function setMainTabBtn(btn, active) {
+     btn.className = active ? 'main-tab-btn main-tab-active' : 'main-tab-btn';
+     btn.setAttribute('aria-selected', active ? 'true' : 'false');
+   }
+
+   function switchMainTab(tab) {
+     const isNow = tab === 'now';
+     const isHistory = tab === 'history';
+     const isGuide = tab === 'guide';
+     els.mainTabNowPanel.classList.toggle('hidden', !isNow);
+     els.mainTabHistoryPanel.classList.toggle('hidden', !isHistory);
+     els.mainTabGuidePanel.classList.toggle('hidden', !isGuide);
+     setMainTabBtn(els.mainTabNowBtn, isNow);
+     setMainTabBtn(els.mainTabHistoryBtn, isHistory);
+     setMainTabBtn(els.mainTabGuideBtn, isGuide);
+
+     // History 面板内含 canvas，隐藏时宽度为 0；切到该面板时需按当前子标签重绘图表
+     if (isHistory) {
+       if (!els.trendTabPanel.classList.contains('hidden')) {
+         if (state.lastRecords) drawChart(state.lastRecords);
+       } else if (!els.dailyTabPanel.classList.contains('hidden')) {
+         if (state.lastDailyRecords) renderDaily(state.lastDailyRecords);
+       }
+     }
+   }
+
    async function readDaily() {
      if (!state.dailyChar) return;
      const val = await state.dailyChar.readValue();
@@ -1356,15 +1388,19 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
   els.dailyMetricTempBtn.addEventListener('click', () => setDailyMetric('temp'));
   els.dailyMetricHumBtn.addEventListener('click', () => setDailyMetric('hum'));
   els.dailyMetricBattBtn.addEventListener('click', () => setDailyMetric('batt'));
+  els.mainTabNowBtn.addEventListener('click', () => switchMainTab('now'));
+  els.mainTabHistoryBtn.addEventListener('click', () => switchMainTab('history'));
+  els.mainTabGuideBtn.addEventListener('click', () => switchMainTab('guide'));
 
    let resizeTimer = null;
    window.addEventListener('resize', () => {
      clearTimeout(resizeTimer);
      resizeTimer = setTimeout(() => {
-       if (!els.trendTabPanel.classList.contains('hidden') && state.lastRecords) {
+       const historyVisible = !els.mainTabHistoryPanel.classList.contains('hidden');
+       if (historyVisible && !els.trendTabPanel.classList.contains('hidden') && state.lastRecords) {
          drawChart(state.lastRecords);
        }
-       if (!els.dailyTabPanel.classList.contains('hidden') && state.lastDailyRecords) {
+       if (historyVisible && !els.dailyTabPanel.classList.contains('hidden') && state.lastDailyRecords) {
          renderDaily(state.lastDailyRecords);
        }
      }, 200);
