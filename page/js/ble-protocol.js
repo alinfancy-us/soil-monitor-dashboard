@@ -54,22 +54,6 @@ const BLEProtocol = (() => {
     return records;
   }
 
-  /**
-   * 解析 0xFFE4 调试功耗快照：13 字节
-   * mcu_active_us(u32) adv_window_us(u32) sleep_s(u16) battery_mv(u16) sample_period_s(u8)
-   */
-  function parsePowerSnapshot(view) {
-    if (view.byteLength < 13) {
-      throw new Error(`Invalid power snapshot length: ${view.byteLength} (expected 13)`);
-    }
-    return {
-      mcuActiveUs: view.getUint32(0, true),
-      advWindowUs: view.getUint32(4, true),
-      sleepS: view.getUint16(8, true),
-      batteryMv: view.getUint16(10, true),
-      samplePeriodS: view.getUint8(12),
-    };
-  }
 
   function hexDump(view) {
     const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
@@ -135,13 +119,6 @@ const BLEProtocol = (() => {
       console.warn('[BLE] daily characteristic not available:', e);
     }
 
-    // 调试功耗特征（0xFFE4），仅 SOIL_POWER_LOG_EN=1 的调试固件才有，读取失败静默忽略
-    let powerChar = null;
-    try {
-      powerChar = await service.getCharacteristic(UUIDS.POWER_CHAR);
-    } catch (e) {
-      // 生产固件裁掉该特征是正常情况，不打印告警
-    }
 
     // Clear/Reset 写特征（0xFFE5），生产固件必带；获取失败不影响主流程
     let resetChar = null;
@@ -187,7 +164,7 @@ const BLEProtocol = (() => {
       console.warn("[BLE] firmware revision not available:", e);
     }
 
-    return { device, dataChar, dailyChar, powerChar, resetChar, calibChar, refreshChar, otaChar, fwVersion };
+    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, otaChar, fwVersion };
   }
 
   /**
@@ -492,7 +469,6 @@ const BLEProtocol = (() => {
     DEVICE_NAME_PREFIX,
     parsePacket,
     parseDailyPacket,
-    parsePowerSnapshot,
     hexDump,
     requestSoilDevice,
     finishConnect,

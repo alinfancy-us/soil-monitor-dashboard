@@ -349,36 +349,6 @@
       </div>
     </div>
 
-    <!-- Debug power estimation panel (only shown with ?debug=1) -->
-    <div id="powerDebugPanel" class="hidden p-4 mb-6 bg-white border shadow-sm rounded-2xl border-slate-100 sm:p-5">
-      <h2 class="mb-3 text-sm font-semibold text-slate-600">Debug: power / battery life estimate</h2>
-      <canvas id="powerChart" class="w-full" height="140"></canvas>
-      <div class="grid grid-cols-2 gap-3 mt-4 text-xs text-slate-600">
-        <label class="flex flex-col gap-1">Active current (mA)
-          <input id="iActiveInput" type="number" step="0.1" value="5" class="px-2 py-1 border rounded-lg border-slate-200">
-        </label>
-        <label class="flex flex-col gap-1">Advertising current (mA)
-          <input id="iAdvInput" type="number" step="0.1" value="4.8" class="px-2 py-1 border rounded-lg border-slate-200">
-        </label>
-        <label class="flex flex-col gap-1">Sleep current (µA)
-          <input id="iSleepInput" type="number" step="0.1" value="1.6" class="px-2 py-1 border rounded-lg border-slate-200">
-        </label>
-        <label class="flex flex-col gap-1">Battery capacity (mAh)
-          <input id="battCapacityInput" type="number" step="1" value="2500" class="px-2 py-1 border rounded-lg border-slate-200">
-        </label>
-      </div>
-      <div class="grid grid-cols-2 gap-3 mt-4 text-center">
-        <div class="py-3 bg-slate-50 rounded-xl">
-          <div id="avgCurrentValue" class="text-xl font-bold text-emerald-600">--</div>
-          <div class="text-xs text-slate-400 mt-0.5">Average current (µA)</div>
-        </div>
-        <div class="py-3 bg-slate-50 rounded-xl">
-          <div id="batteryLifeValue" class="text-xl font-bold text-emerald-600">--</div>
-          <div class="text-xs text-slate-400 mt-0.5">Estimated battery life (days)</div>
-        </div>
-      </div>
-      <p id="powerEmpty" class="mt-3 text-xs text-center text-slate-300">No power snapshot yet (debug firmware only)</p>
-    </div>
   </div>
 
   <!-- 引入业务模块脚本 -->

@@ -12,7 +12,6 @@
      CACHE_PREFIX, CACHE_MAX_ITEM_BYTES, CACHE_MAX_TOTAL_BYTES,
      FIRMWARE_MANIFEST_URL,
 } = FloraSenseConfig;
-   const DEBUG_POWER_ENABLED = new URLSearchParams(window.location.search).get('debug') === '1';
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
   const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
@@ -67,15 +66,6 @@
      modalActionBtn: document.getElementById('modalActionBtn'),
      dailyChart: document.getElementById('dailyChart'),
      dailyEmpty: document.getElementById('dailyEmpty'),
-     powerDebugPanel: document.getElementById('powerDebugPanel'),
-     powerChart: document.getElementById('powerChart'),
-     powerEmpty: document.getElementById('powerEmpty'),
-     iActiveInput: document.getElementById('iActiveInput'),
-     iAdvInput: document.getElementById('iAdvInput'),
-     iSleepInput: document.getElementById('iSleepInput'),
-     battCapacityInput: document.getElementById('battCapacityInput'),
-     avgCurrentValue: document.getElementById('avgCurrentValue'),
-     batteryLifeValue: document.getElementById('batteryLifeValue'),
    };
  
    const state = {
@@ -83,7 +73,6 @@
      activeDeviceId: null,
      characteristic: null,
      dailyChar: null,
-     powerChar: null,
      resetChar: null,
     calibChar: null,
     refreshChar: null,
@@ -93,7 +82,6 @@
     fwVersion: null,
     fwUpdate: null,
      pollTimer: null,
-     powerHistory: [],
      lastRecords: null,
      lastDailyRecords: null,
      dailyMetric: 'temp',
@@ -129,7 +117,6 @@
      },
    };
  
-   if (DEBUG_POWER_ENABLED) els.powerDebugPanel.classList.remove('hidden');
  
    function log(msg) {
      if (!DEBUG_ENABLED) return;
@@ -904,49 +891,6 @@
      renderDaily(records);
    }
  
-   function renderPowerEstimate(snapshot) {
-     if (snapshot) {
-       els.powerEmpty.classList.add('hidden');
-       state.powerHistory.push(snapshot);
-       if (state.powerHistory.length > 20) state.powerHistory.shift();
-       drawMultiSeriesChart(els.powerChart, [
-         { values: state.powerHistory.map(s => s.mcuActiveUs), color: '#f97316' },
-         { values: state.powerHistory.map(s => s.advWindowUs), color: '#0ea5e9' },
-       ], { showValueLabels: true, latestOnly: true, height: 160, leftAxisColor: '#f97316', rightAxisColor: '#0ea5e9' });
-     }
- 
-     const latest = state.powerHistory[state.powerHistory.length - 1];
-     if (!latest) return;
- 
-     const iActiveMa = parseFloat(els.iActiveInput.value) || 0;
-     const iAdvMa = parseFloat(els.iAdvInput.value) || 0;
-     const iSleepUa = parseFloat(els.iSleepInput.value) || 0;
-     const battCapacityMah = parseFloat(els.battCapacityInput.value) || 0;
- 
-     const tActiveS = latest.mcuActiveUs / 1e6;
-     const tAdvS = latest.advWindowUs / 1e6;
-     const tSleepS = latest.sleepS;
-     const tTotalS = tActiveS + tAdvS + tSleepS;
-     if (tTotalS <= 0) return;
- 
-     const iActiveUa = iActiveMa * 1000;
-     const iAdvUa = iAdvMa * 1000;
-     const iAvgUa = (tActiveS * iActiveUa + tAdvS * iAdvUa + tSleepS * iSleepUa) / tTotalS;
- 
-     els.avgCurrentValue.textContent = iAvgUa.toFixed(1);
- 
-     const iAvgMa = iAvgUa / 1000;
-     const days = iAvgMa > 0 ? (battCapacityMah / iAvgMa / 24) : 0;
-     els.batteryLifeValue.textContent = days > 0 ? days.toFixed(0) : '--';
-   }
- 
-   async function readPower() {
-     if (!state.powerChar) return;
-     const val = await state.powerChar.readValue();
-     const snapshot = BLEProtocol.parsePowerSnapshot(val);
-     log(`Power snapshot: active=${snapshot.mcuActiveUs}us adv=${snapshot.advWindowUs}us sleep=${snapshot.sleepS}s`);
-     renderPowerEstimate(snapshot);
-   }
  
    async function readData() {
      if (!state.characteristic) return;
@@ -961,9 +905,6 @@
      }
  
      await readDaily().catch(err => log(`Daily read failed: ${err.message}`));
-     if (DEBUG_POWER_ENABLED) {
-       await readPower().catch(err => log(`Power read failed: ${err.message}`));
-     }
    }
  
    function startPolling() {
@@ -1119,7 +1060,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        if (token !== connectToken) return;   // 期间用户又发起了新连接，丢弃本次
 
        // 阶段2：gatt.connect + 服务/特征发现，由 finishConnect 内部保证 5s 超时
-       const { dataChar, dailyChar, powerChar, resetChar, calibChar, refreshChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
+       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
          device,
          (records, hex) => {
            log(`Notification: ${hex}`);
@@ -1145,7 +1086,6 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        state.device = device;
        state.characteristic = dataChar;
        state.dailyChar = dailyChar;
-       state.powerChar = powerChar;
        state.resetChar = resetChar;
        state.calibChar = calibChar;
        state.refreshChar = refreshChar;
@@ -1430,11 +1370,6 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
      }, 200);
    });
  
-   if (DEBUG_POWER_ENABLED) {
-     [els.iActiveInput, els.iAdvInput, els.iSleepInput, els.battCapacityInput].forEach(input => {
-       input.addEventListener('input', () => renderPowerEstimate(null));
-     });
-   }
 
    updateDailyMetricButtons();
   state.activeDeviceId = getLastDeviceId();
