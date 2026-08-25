@@ -10,7 +10,8 @@
      DASHBOARD_URL, BLUEFY_APPSTORE_URL, BLUEFY_DEEPLINK,
      DAILY_EPOCH_MIN_VALID, DAILY_EPOCH_MAX_VALID, TREND_EPOCH_MAX_VALID,
      CACHE_PREFIX, CACHE_MAX_ITEM_BYTES, CACHE_MAX_TOTAL_BYTES,
-   } = FloraSenseConfig;
+     FIRMWARE_MANIFEST_URL,
+} = FloraSenseConfig;
    const DEBUG_POWER_ENABLED = new URLSearchParams(window.location.search).get('debug') === '1';
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
@@ -30,6 +31,14 @@
     calibWetBtn: document.getElementById('calibWetBtn'),
     calibStatus: document.getElementById('calibStatus'),
     refreshBtn: document.getElementById('refreshBtn'),
+    otaPanel: document.getElementById('otaPanel'),
+    otaProgressBar: document.getElementById('otaProgressBar'),
+    otaStatus: document.getElementById('otaStatus'),
+    otaRetryBtn: document.getElementById('otaRetryBtn'),
+    otaUpdateBanner: document.getElementById('otaUpdateBanner'),
+    otaNewVersion: document.getElementById('otaNewVersion'),
+    otaCurrentVersion: document.getElementById('otaCurrentVersion'),
+    otaUpdateNowBtn: document.getElementById('otaUpdateNowBtn'),
      tempValue: document.getElementById('tempValue'),
      humValue: document.getElementById('humValue'),
      battValue: document.getElementById('battValue'),
@@ -78,6 +87,11 @@
      resetChar: null,
     calibChar: null,
     refreshChar: null,
+    otaChar: null,
+    otaRunning: false,
+    otaLastFirmware: null,
+    fwVersion: null,
+    fwUpdate: null,
      pollTimer: null,
      powerHistory: [],
      lastRecords: null,
@@ -139,7 +153,37 @@
       : 'Connect a device to enable calibration';
     els.refreshBtn.disabled = mode !== 'connected';
     els.clearCacheBtn.disabled = mode !== 'connected';
+    if (state.otaRunning) {
+      setOtaUiLock(true);
+    }
    }
+
+
+  function setOtaUiLock(lock) {
+    const connected = !!state.device?.gatt.connected;
+
+    els.connectBtn.disabled = lock;
+    els.connectBtn.classList.toggle('opacity-40', lock);
+    els.connectBtn.classList.toggle('cursor-not-allowed', lock);
+
+    els.clearCacheBtn.disabled = lock || !connected;
+    els.refreshBtn.disabled = lock || !connected;
+    els.calibDryBtn.disabled = lock || !connected;
+    els.calibWetBtn.disabled = lock || !connected;
+    els.otaUpdateNowBtn.disabled = lock || !connected || !state.fwUpdate;
+
+    if (lock) {
+      els.statusDot.className = 'w-3 h-3 rounded-full bg-violet-500';
+      els.statusText.textContent = 'Updating firmware…';
+      els.calibStatus.textContent = 'Firmware update in progress, calibration is temporarily disabled';
+    }
+  }
+
+  // 失败后才露出重试按钮；hidden 与 flex 互斥，需成对切换
+  function setOtaRetryVisible(show) {
+    els.otaRetryBtn.classList.toggle('hidden', !show);
+    els.otaRetryBtn.classList.toggle('inline-flex', show);
+  }
  
     function formatTime(epoch) {
       if (!epoch) return 'Time not synchronized';
@@ -941,11 +985,16 @@
  
    function onDisconnected() {
      stopPolling();
+    state.otaRunning = false;
+    setOtaUiLock(false);
      setStatus('disconnected');
      state.characteristic = null;
      state.resetChar = null;
     state.calibChar = null;
     state.refreshChar = null;
+    state.otaChar = null;
+    state.otaRunning = false;
+    els.otaUpdateBanner.classList.add("hidden");
      log('Device disconnected');
    }
  
@@ -1062,7 +1111,7 @@
        setStatus('connecting');
        log('Requesting Bluetooth Device...');
  
-       const { device, dataChar, dailyChar, powerChar, resetChar, calibChar, refreshChar } = await BLEProtocol.connectDevice(
+       const { device, dataChar, dailyChar, powerChar, resetChar, calibChar, refreshChar, otaChar, fwVersion } = await BLEProtocol.connectDevice(
          (records, hex) => {
            log(`Notification: ${hex}`);
            render(records);
@@ -1086,6 +1135,9 @@
        state.resetChar = resetChar;
       state.calibChar = calibChar;
       state.refreshChar = refreshChar;
+      state.otaChar = otaChar;
+      state.fwVersion = fwVersion;
+      checkFirmwareUpdate();
  
        if (dataChar.properties.read) {
          await readData();
@@ -1113,6 +1165,10 @@
    });
  
    els.clearCacheBtn.addEventListener('click', async () => {
+    if (state.otaRunning) {
+      log('Action ignored: OTA update is running');
+      return;
+    }
      // 中文：Clear data 仅在已连接状态下可用（setStatus 联动 disabled），此处再兜底防御一次
      if (!state.device?.gatt.connected) return;
      const msg = 'Clear cached data on this browser AND reset the connected device history? This cannot be undone.';
@@ -1130,6 +1186,10 @@
    });
 
   async function handleCalibClick(point, label) {
+    if (state.otaRunning) {
+      log('Calibration ignored: OTA update is running');
+      return;
+    }
     if (!state.device?.gatt.connected || !state.calibChar) {
       els.calibStatus.textContent = 'Connect a device to enable calibration';
       return;
@@ -1159,6 +1219,10 @@
   els.calibWetBtn.addEventListener('click', () => handleCalibClick('wet', 'Wet'));
 
   async function handleRefreshClick() {
+    if (state.otaRunning) {
+      log('Refresh ignored: OTA update is running');
+      return;
+    }
     if (!state.device?.gatt.connected || !state.refreshChar) {
       return;
     }
@@ -1175,7 +1239,159 @@
 
   els.refreshBtn.addEventListener('click', handleRefreshClick);
 
-   els.trendTabBtn.addEventListener('click', () => switchChartTab('trend'));
+  // 中文：统一格式化 OTA 报错文案——断链（监督超时/设备复位）给安抚性提示，
+  //       双 bank 设计保证老固件仍在运行，重连即可重试；其余错误原样展示。
+  //       下载阶段（外层 click 回调）与传输阶段（runOtaUpdate 内部）共用此函数，避免文案不一致。
+  function formatOtaError(err) {
+    const raw = err?.message || String(err);
+    const isDisconnect = /disconnect|gatt server/i.test(raw);
+    return isDisconnect
+      ? "Connection lost during update — the device is still running the previous firmware. Please reconnect and retry."
+      : `OTA error: ${raw}`;
+  }
+
+  // 新版本横幅一键升级：从 page/firmware/ 下载清单指向的固件并推送
+  els.otaUpdateNowBtn.addEventListener("click", async () => {
+    const upd = state.fwUpdate;
+    if (!upd || state.otaRunning || !state.device?.gatt.connected) return;
+    const msg = `Upgrade firmware to v${upd.version} (${(upd.size / 1024).toFixed(1)} KB)? The device will reboot after a successful update.`;
+    if (!window.confirm(msg)) return;
+    els.otaPanel.classList.remove("hidden");
+    els.otaProgressBar.style.width = "0%";
+    els.otaStatus.className = "text-xs font-medium text-slate-600";
+    els.otaUpdateNowBtn.disabled = true;
+    setOtaRetryVisible(false);
+    els.otaStatus.textContent = `Downloading v${upd.version}…`;
+    try {
+      const res = await fetch(upd.url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`firmware download failed: HTTP ${res.status}`);
+      await runOtaUpdate(await res.arrayBuffer(), upd.bin);
+    } catch (err) {
+      els.otaStatus.textContent = formatOtaError(err);
+      els.otaStatus.className = "text-xs font-medium text-rose-600";
+      setOtaRetryVisible(true);
+      log(`[OTA] error: ${err.message || err}`);
+    } finally {
+      els.otaUpdateNowBtn.disabled = state.otaRunning || !state.device?.gatt.connected || !state.fwUpdate;
+    }
+  });
+
+  // 重试：复用已下载的固件重走一遍推送，避免重复下载
+  els.otaRetryBtn.addEventListener("click", async () => {
+    if (state.otaRunning) return;
+    const last = state.otaLastFirmware;
+    if (!last) return;
+    if (!state.device?.gatt.connected) {
+      els.otaStatus.textContent = "Reconnect the device first, then tap Retry.";
+      els.otaStatus.className = "text-xs font-medium text-rose-600";
+      return;
+    }
+    await runOtaUpdate(last.firmware, last.label);
+  });
+
+  // OTA 推送主流程（手动选文件 / 一键升级共用）：进度条 + 结果展示 + 按钮态恢复
+  async function runOtaUpdate(firmware, label) {
+    state.otaRunning = true;
+    state.otaLastFirmware = { firmware, label };
+    stopPolling(); // OTA 期间暂停轮询，避免 GATT 读写抢占升级链路
+    setOtaUiLock(true);
+    els.otaPanel.classList.remove("hidden");
+    els.otaUpdateNowBtn.disabled = true;
+    els.otaProgressBar.style.width = "0%";
+    els.otaStatus.className = "text-xs font-medium text-slate-600";
+    setOtaRetryVisible(false);
+    els.otaStatus.textContent = `Sending ${label}…`;
+
+    const runOnce = async (isRetry) => {
+      if (isRetry) {
+        els.otaStatus.textContent = 'Channel busy, restarting OTA session…';
+      }
+      return BLEProtocol.performOta(state.otaChar, firmware, (info) => {
+        els.otaProgressBar.style.width = `${info.percent}%`;
+        if (info.phase === "data") {
+          els.otaStatus.textContent = `Sending firmware… ${info.percent}% (${(info.sent / 1024).toFixed(1)} / ${(info.total / 1024).toFixed(1)} KB)`;
+        } else if (info.phase === "end") {
+          els.otaStatus.textContent = "Firmware sent, verifying…";
+        }
+      });
+    };
+
+    try {
+      let result;
+      try {
+        result = await runOnce(false);
+      } catch (firstErr) {
+        const msg = String(firstErr?.message || firstErr || '').toLowerCase();
+        const retryableBusy = msg.includes('already in progress') || msg.includes('busy');
+        if (!retryableBusy || !state.device?.gatt.connected) {
+          throw firstErr;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 220));
+        result = await runOnce(true);
+      }
+
+      const { ok, message } = result;
+      els.otaStatus.textContent = message;
+      els.otaStatus.className = `text-xs font-medium ${ok ? "text-emerald-600" : "text-rose-600"}`;
+      setOtaRetryVisible(!ok);
+      log(`[OTA] ${message}`);
+      if (ok) els.otaUpdateBanner.classList.add("hidden"); // 升级成功隐藏新版本横幅
+    } catch (err) {
+      // 中文：真实中途断链会走到这里（并非“已在进行中”类忙碌错误），需展示安抚性提示而非原始报错文案
+      els.otaStatus.textContent = formatOtaError(err);
+      els.otaStatus.className = "text-xs font-medium text-rose-600";
+      setOtaRetryVisible(true);
+      log(`[OTA] error: ${err.message || err}`);
+    } finally {
+      state.otaRunning = false;
+      // 成功后设备自动重启断链；失败但仍连接则恢复轮询与按钮态
+      if (state.device?.gatt.connected) {
+        setOtaUiLock(false);
+        setStatus("connected");
+        startPolling();
+      }
+    }
+  }
+
+  // 固件版本比较（语义化 x.y.z 逐段数值比较；容忍 V 前缀/缺段，如 "V1.0" 与 "1.0.0" 视为相等）
+  function parseVersion(v) {
+    const m = String(v || "").match(/[0-9]+(\.[0-9]+)*/);
+    return m ? m[0].split(".").map(Number) : [0];
+  }
+
+  function compareVersions(a, b) {
+    const va = parseVersion(a), vb = parseVersion(b);
+    const n = Math.max(va.length, vb.length);
+    for (let i = 0; i < n; i++) {
+      const d = (va[i] || 0) - (vb[i] || 0);
+      if (d) return d;
+    }
+    return 0;
+  }
+
+  // 连接后检测新版本：fetch page/firmware/firmware.json 与设备固件版本（DIS 0x2A26）比较，更高则显示一键升级横幅
+  async function checkFirmwareUpdate() {
+    state.fwUpdate = null;
+    els.otaUpdateBanner.classList.add("hidden");
+    if (!state.device?.gatt.connected || !state.otaChar) return;
+    try {
+      const res = await fetch(FIRMWARE_MANIFEST_URL, { cache: "no-store" });
+      if (!res.ok) return;
+      const m = await res.json();
+      if (!m?.version || !m?.bin) return;
+      els.otaCurrentVersion.textContent = state.fwVersion || "unknown";
+      if (compareVersions(m.version, state.fwVersion) <= 0) return; // 无新版本
+      const base = FIRMWARE_MANIFEST_URL.slice(0, FIRMWARE_MANIFEST_URL.lastIndexOf("/") + 1);
+      state.fwUpdate = { version: m.version, bin: m.bin, size: Number(m.size) || 0, url: base + m.bin };
+      els.otaNewVersion.textContent = `v${m.version}`;
+      els.otaUpdateBanner.classList.remove("hidden");
+      log(`[OTA] new firmware available: v${m.version} (current ${state.fwVersion || "unknown"})`);
+    } catch (err) {
+      log(`Firmware manifest check failed: ${err.message || err}`); // 清单缺失/网络失败静默降级
+    }
+  }
+
+  els.trendTabBtn.addEventListener('click', () => switchChartTab('trend'));
    els.dailyTabBtn.addEventListener('click', () => switchChartTab('daily'));
   els.dailyMetricTempBtn.addEventListener('click', () => setDailyMetric('temp'));
   els.dailyMetricHumBtn.addEventListener('click', () => setDailyMetric('hum'));

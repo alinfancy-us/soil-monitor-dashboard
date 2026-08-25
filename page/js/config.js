@@ -18,7 +18,17 @@ const FloraSenseConfig = (() => {
     RESET_CHAR: '0000ffe5-0000-1000-8000-00805f9b34fb',
     CALIB_CHAR: '0000ffe6-0000-1000-8000-00805f9b34fb',
     REFRESH_CHAR: '0000ffe7-0000-1000-8000-00805f9b34fb',
+    // Telink OTA 升级服务（128bit，须与固件 app_att.c 的 TELINK_OTA_UUID_SERVICE / TELINK_SPP_DATA_OTA
+    // 的 GATT 小端字节序反转后一致），仅 BLE_OTA_SERVER_ENABLE=1 的固件才有
+    OTA_SERVICE: '00010203-0405-0607-0809-0a0b0c0d1912',
+    OTA_CHAR: '00010203-0405-0607-0809-0a0b0c0d2b12',
+    // 标准 Device Information Service，读 Firmware Revision String(0x2A26) 获取设备固件版本，须与固件 SOIL_FW_VERSION 编译值一致
+    DIS_SERVICE: '0000180a-0000-1000-8000-00805f9b34fb',
+    DIS_FW_REV_CHAR: '00002a26-0000-1000-8000-00805f9b34fb',
   };
+
+  // 固件升级清单（version/bin/size），与固件 .bin 一起托管在 page/firmware/；连接后 fetch 与设备固件版本比较，更高则提示一键升级
+  const FIRMWARE_MANIFEST_URL = 'page/firmware/firmware.json';
 
   // 湿度两点校准指令（1 字节），须与固件 soil_calib_point_t 严格对齐
   const HUM_CALIB_CMD = {
@@ -55,6 +65,7 @@ const FloraSenseConfig = (() => {
   return {
     DEVICE_NAME_PREFIX,
     UUIDS,
+    FIRMWARE_MANIFEST_URL,
     RESET_MAGIC,
     HUM_CALIB_CMD,
     REFRESH_CMD,
