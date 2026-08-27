@@ -5,7 +5,7 @@ const BLEProtocol = (() => {
   'use strict';
 
   // 集中配置统一取自 page/js/config.js，方便后续维护管理
-  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC, HUM_CALIB_CMD, REFRESH_CMD } = FloraSenseConfig;
+  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC, FACTORY_RESET_MAGIC, HUM_CALIB_CMD, REFRESH_CMD, TEMP_OFFSET } = FloraSenseConfig;
   const RECORD_SIZE = 9;
   const MAX_RECORDS = 5;
   const PACKET_SIZE = 1 + RECORD_SIZE * MAX_RECORDS;
@@ -144,6 +144,14 @@ const BLEProtocol = (() => {
       console.warn('[BLE] refresh characteristic not available:', e);
     }
 
+    // 温度偏移校准特征（0xFFE8，Read | Write，1 字节 s8 = 0.1℃）；旧固件可能没有，获取失败不影响主流程
+    let tempOffsetChar = null;
+    try {
+      tempOffsetChar = await service.getCharacteristic(UUIDS.TEMP_OFFSET_CHAR);
+    } catch (e) {
+      console.warn('[BLE] temperature offset characteristic not available:', e);
+    }
+
     // Telink OTA 升级特征（128bit UUID，仅 BLE_OTA_SERVER_ENABLE=1 的固件才有）；
     // 获取失败不影响主流程（仅禁用 firmware update 按钮）
     let otaChar = null;
@@ -164,7 +172,7 @@ const BLEProtocol = (() => {
       console.warn("[BLE] firmware revision not available:", e);
     }
 
-    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, otaChar, fwVersion };
+    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, otaChar, fwVersion };
   }
 
   /**
@@ -211,6 +219,47 @@ const BLEProtocol = (() => {
       throw new Error('reset characteristic unavailable');
     }
     await resetChar.writeValue(RESET_MAGIC);
+  }
+
+  /**
+   * 向 0xFFE5 写入 4 字节魔术字 "RST1"，请求设备清空全部业务数据并重启（连接会断开）
+   */
+  async function sendFactoryReset(resetChar) {
+    if (!resetChar) {
+      throw new Error('reset characteristic unavailable');
+    }
+    await resetChar.writeValue(FACTORY_RESET_MAGIC);
+  }
+
+  /**
+   * 读取 0xFFE8 温度偏移值（有符号 1 字节，单位 0.1℃）
+   * @param {BluetoothRemoteGATTCharacteristic} tempOffsetChar
+   * @returns {Promise<number>} 偏移值，单位 0.1℃
+   */
+  async function readTempOffset(tempOffsetChar) {
+    if (!tempOffsetChar) {
+      throw new Error('temperature offset characteristic unavailable');
+    }
+    const val = await tempOffsetChar.readValue();
+    if (val.byteLength < 1) {
+      throw new Error('invalid temperature offset length');
+    }
+    return new DataView(val.buffer, val.byteOffset, val.byteLength).getInt8(0);
+  }
+
+  /**
+   * 写入 0xFFE8 温度偏移值（有符号 1 字节，单位 0.1℃，内部钳位到 ±10℃）
+   * @param {BluetoothRemoteGATTCharacteristic} tempOffsetChar
+   * @param {number} offsetX10 - 单位 0.1℃
+   */
+  async function sendTempOffset(tempOffsetChar, offsetX10) {
+    if (!tempOffsetChar) {
+      throw new Error('temperature offset characteristic unavailable');
+    }
+    const clamped = Math.max(TEMP_OFFSET.MIN_X10, Math.min(TEMP_OFFSET.MAX_X10, Math.round(offsetX10)));
+    const v = new Uint8Array(1);
+    new DataView(v.buffer).setInt8(0, clamped);
+    await tempOffsetChar.writeValue(v);
   }
 
   /**
@@ -474,8 +523,11 @@ const BLEProtocol = (() => {
     finishConnect,
     connectDevice,
     sendReset,
+    sendFactoryReset,
     sendHumCalib,
     sendRefresh,
+    readTempOffset,
+    sendTempOffset,
     performOta,
   };
 })();

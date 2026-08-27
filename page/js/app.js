@@ -11,6 +11,7 @@
      DAILY_EPOCH_MIN_VALID, DAILY_EPOCH_MAX_VALID, TREND_EPOCH_MAX_VALID,
      CACHE_PREFIX, CACHE_MAX_ITEM_BYTES, CACHE_MAX_TOTAL_BYTES,
      FIRMWARE_MANIFEST_URL,
+     TEMP_OFFSET,
 } = FloraSenseConfig;
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
@@ -30,14 +31,25 @@
     calibWetBtn: document.getElementById('calibWetBtn'),
     calibStatus: document.getElementById('calibStatus'),
     refreshBtn: document.getElementById('refreshBtn'),
-    otaPanel: document.getElementById('otaPanel'),
+    otaProgressWrap: document.getElementById('otaProgressWrap'),
     otaProgressBar: document.getElementById('otaProgressBar'),
     otaStatus: document.getElementById('otaStatus'),
     otaRetryBtn: document.getElementById('otaRetryBtn'),
-    otaUpdateBanner: document.getElementById('otaUpdateBanner'),
+    otaUpdateHint: document.getElementById('otaUpdateHint'),
     otaNewVersion: document.getElementById('otaNewVersion'),
-    otaCurrentVersion: document.getElementById('otaCurrentVersion'),
+    otaCurrentVersionBadge: document.getElementById('otaCurrentVersionBadge'),
     otaUpdateNowBtn: document.getElementById('otaUpdateNowBtn'),
+    otaChangelog: document.getElementById('otaChangelog'),
+    otaChangelogList: document.getElementById('otaChangelogList'),
+    settingUpdateDot: document.getElementById('settingUpdateDot'),
+    settingLockedHint: document.getElementById('settingLockedHint'),
+    settingContent: document.getElementById('settingContent'),
+    tempOffsetSlider: document.getElementById('tempOffsetSlider'),
+    tempOffsetValue: document.getElementById('tempOffsetValue'),
+    tempOffsetApplyBtn: document.getElementById('tempOffsetApplyBtn'),
+    tempOffsetStatus: document.getElementById('tempOffsetStatus'),
+    factoryResetBtn: document.getElementById('factoryResetBtn'),
+    factoryResetStatus: document.getElementById('factoryResetStatus'),
      tempValue: document.getElementById('tempValue'),
      humValue: document.getElementById('humValue'),
      battValue: document.getElementById('battValue'),
@@ -66,11 +78,11 @@
      modalActionBtn: document.getElementById('modalActionBtn'),
      dailyChart: document.getElementById('dailyChart'),
      dailyEmpty: document.getElementById('dailyEmpty'),
-     mainTabNowBtn: document.getElementById('mainTabNowBtn'),
-     mainTabHistoryBtn: document.getElementById('mainTabHistoryBtn'),
+     mainTabDataBtn: document.getElementById('mainTabDataBtn'),
      mainTabGuideBtn: document.getElementById('mainTabGuideBtn'),
-     mainTabNowPanel: document.getElementById('mainTabNowPanel'),
-     mainTabHistoryPanel: document.getElementById('mainTabHistoryPanel'),
+     mainTabSettingBtn: document.getElementById('mainTabSettingBtn'),
+     mainTabDataPanel: document.getElementById('mainTabDataPanel'),
+     mainTabSettingPanel: document.getElementById('mainTabSettingPanel'),
      mainTabGuidePanel: document.getElementById('mainTabGuidePanel'),
    };
  
@@ -82,6 +94,8 @@
      resetChar: null,
     calibChar: null,
     refreshChar: null,
+    tempOffsetChar: null,
+    tempOffsetX10: 0,
     otaChar: null,
     otaRunning: false,
     otaLastFirmware: null,
@@ -139,16 +153,35 @@
      els.statusDot.className = `w-3 h-3 rounded-full ${dot}`;
      els.statusText.textContent = text;
      els.connectBtn.textContent = mode === 'connected' ? 'Disconnect' : 'Connect device';
-    els.calibDryBtn.disabled = mode !== 'connected';
-    els.calibWetBtn.disabled = mode !== 'connected';
-    els.calibStatus.textContent = mode === 'connected'
+     const connected = mode === 'connected';
+    els.calibDryBtn.disabled = !connected;
+    els.calibWetBtn.disabled = !connected;
+    els.calibStatus.textContent = connected
       ? 'Place the probe, wait a few seconds, then tap dry or wet calibration'
       : 'Connect a device to enable calibration';
-    els.refreshBtn.disabled = mode !== 'connected';
-    els.clearCacheBtn.disabled = mode !== 'connected';
+    els.refreshBtn.disabled = !connected;
+    els.clearCacheBtn.disabled = !connected;
+    updateSettingsAccess(connected);
     if (state.otaRunning) {
       setOtaUiLock(true);
     }
+   }
+
+   // Setting 面板仅连接后可操作；未连接时锁定 Tab 并切回 Data（若正停留在 Setting）
+   function updateSettingsAccess(connected) {
+     els.mainTabSettingBtn.disabled = !connected;
+     els.settingLockedHint.classList.toggle('hidden', connected);
+     els.settingContent.classList.toggle('hidden', !connected);
+     if (!connected && !els.mainTabSettingPanel.classList.contains('hidden')) {
+       switchMainTab('data');
+     }
+     els.tempOffsetSlider.disabled = !connected || !state.tempOffsetChar;
+     els.tempOffsetApplyBtn.disabled = !connected || !state.tempOffsetChar;
+     els.factoryResetBtn.disabled = !connected || !state.resetChar;
+     if (!connected) {
+       els.tempOffsetStatus.textContent = 'Connect a device to adjust temperature offset';
+       els.factoryResetStatus.textContent = 'Connect a device to reset';
+     }
    }
 
 
@@ -164,6 +197,10 @@
     els.calibDryBtn.disabled = lock || !connected;
     els.calibWetBtn.disabled = lock || !connected;
     els.otaUpdateNowBtn.disabled = lock || !connected || !state.fwUpdate;
+    els.tempOffsetSlider.disabled = lock || !connected || !state.tempOffsetChar;
+    els.tempOffsetApplyBtn.disabled = lock || !connected || !state.tempOffsetChar;
+    els.factoryResetBtn.disabled = lock || !connected || !state.resetChar;
+    els.mainTabSettingBtn.disabled = lock || !connected;
 
     if (lock) {
       els.statusDot.className = 'w-3 h-3 rounded-full bg-violet-500';
@@ -890,18 +927,19 @@
    }
 
    function switchMainTab(tab) {
-     const isNow = tab === 'now';
-     const isHistory = tab === 'history';
+     const isData = tab === 'data';
      const isGuide = tab === 'guide';
-     els.mainTabNowPanel.classList.toggle('hidden', !isNow);
-     els.mainTabHistoryPanel.classList.toggle('hidden', !isHistory);
+     const isSetting = tab === 'setting';
+     if (isSetting && els.mainTabSettingBtn.disabled) return;  // setting 仅连接后可点
+     els.mainTabDataPanel.classList.toggle('hidden', !isData);
      els.mainTabGuidePanel.classList.toggle('hidden', !isGuide);
-     setMainTabBtn(els.mainTabNowBtn, isNow);
-     setMainTabBtn(els.mainTabHistoryBtn, isHistory);
+     els.mainTabSettingPanel.classList.toggle('hidden', !isSetting);
+     setMainTabBtn(els.mainTabDataBtn, isData);
      setMainTabBtn(els.mainTabGuideBtn, isGuide);
+     setMainTabBtn(els.mainTabSettingBtn, isSetting);
 
-     // History 面板内含 canvas，隐藏时宽度为 0；切到该面板时需按当前子标签重绘图表
-     if (isHistory) {
+     // Data 面板内含 canvas，隐藏时宽度为 0；切到该面板时需按当前子标签重绘图表
+     if (isData) {
        if (!els.trendTabPanel.classList.contains('hidden')) {
          if (state.lastRecords) drawChart(state.lastRecords);
        } else if (!els.dailyTabPanel.classList.contains('hidden')) {
@@ -958,16 +996,19 @@
  
    function onDisconnected() {
      stopPolling();
-    state.otaRunning = false;
-    setOtaUiLock(false);
+     state.otaRunning = false;
+     setOtaUiLock(false);
      setStatus('disconnected');
      state.characteristic = null;
      state.resetChar = null;
-    state.calibChar = null;
-    state.refreshChar = null;
-    state.otaChar = null;
-    state.otaRunning = false;
-    els.otaUpdateBanner.classList.add("hidden");
+     state.calibChar = null;
+     state.refreshChar = null;
+     state.tempOffsetChar = null;
+     state.tempOffsetX10 = 0;
+     state.otaChar = null;
+     state.otaRunning = false;
+     state.fwUpdate = null;
+     renderFirmwareCard();
      log('Device disconnected');
    }
  
@@ -1018,8 +1059,8 @@
  
      if (isIOS) {
        els.modalIcon.innerHTML = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
-       els.modalTitle.textContent = 'Bluetooth Unavailable in Safari';
-       els.modalMessage.textContent = 'iOS Safari does not support Web Bluetooth. Tap "Open in Bluefy" to continue — the dashboard link will be copied to your clipboard so you can paste it into Bluefy after installing.';
+       els.modalTitle.textContent = 'Bluetooth Unavailable in Browser';
+       els.modalMessage.textContent = 'iOS Browser does not support Web Bluetooth. Tap "Open in Bluefy" to continue — the dashboard link will be copied to your clipboard so you can paste it into Bluefy after installing.';
        els.modalActionBtn.textContent = 'Open in Bluefy';
        els.modalActionBtn.href = BLUEFY_APPSTORE_URL;
        els.modalActionBtn.onclick = async (e) => {
@@ -1092,7 +1133,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        if (token !== connectToken) return;   // 期间用户又发起了新连接，丢弃本次
 
        // 阶段2：gatt.connect + 服务/特征发现，由 finishConnect 内部保证 5s 超时
-       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
+       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
          device,
          (records, hex) => {
            log(`Notification: ${hex}`);
@@ -1121,9 +1162,27 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        state.resetChar = resetChar;
        state.calibChar = calibChar;
        state.refreshChar = refreshChar;
+       state.tempOffsetChar = tempOffsetChar;
        state.otaChar = otaChar;
        state.fwVersion = fwVersion;
        checkFirmwareUpdate();
+
+       // 读取设备当前温度偏移，同步设置面板滑杆；旧固件无此特征则保持 0 并提示不支持
+       if (tempOffsetChar) {
+         try {
+           state.tempOffsetX10 = await BLEProtocol.readTempOffset(tempOffsetChar);
+           renderTempOffset();
+           els.tempOffsetStatus.textContent = '';
+         } catch (err) {
+           state.tempOffsetX10 = 0;
+           renderTempOffset();
+           log(`Temperature offset read failed: ${err.message || err}`);
+         }
+       } else {
+         state.tempOffsetX10 = 0;
+         renderTempOffset();
+         els.tempOffsetStatus.textContent = 'Not supported by this firmware';
+       }
 
        if (dataChar.properties.read) {
          await readData();
@@ -1231,6 +1290,71 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
 
   els.refreshBtn.addEventListener('click', handleRefreshClick);
 
+  // 温度偏移：滑杆实时预览，Apply 写入 0xFFE8 后请求一次重测
+  els.tempOffsetSlider.addEventListener('input', () => {
+    const x10 = Number(els.tempOffsetSlider.value);
+    els.tempOffsetValue.textContent = `${(x10 / 10).toFixed(1)} ℃`;
+  });
+
+  els.tempOffsetApplyBtn.addEventListener('click', async () => {
+    if (state.otaRunning) {
+      log('Temperature offset ignored: OTA update is running');
+      return;
+    }
+    if (!state.device?.gatt.connected || !state.tempOffsetChar) {
+      els.tempOffsetStatus.textContent = 'Connect a device to adjust temperature offset';
+      return;
+    }
+    const x10 = Number(els.tempOffsetSlider.value);
+    els.tempOffsetApplyBtn.disabled = true;
+    els.tempOffsetStatus.textContent = 'Applying temperature offset…';
+    try {
+      await BLEProtocol.sendTempOffset(state.tempOffsetChar, x10);
+      state.tempOffsetX10 = x10;
+      els.tempOffsetStatus.textContent = `Temperature offset set to ${(x10 / 10).toFixed(1)} ℃`;
+      log(`Temperature offset sent (0xFFE8): ${x10 / 10}℃`);
+      // 立即重测，让 Data 面板尽快反映修正后的温度
+      if (state.refreshChar) {
+        try { await BLEProtocol.sendRefresh(state.refreshChar); } catch (_) {}
+      }
+    } catch (err) {
+      els.tempOffsetStatus.textContent = `Temperature offset failed: ${err.message || err}`;
+      log(`Temperature offset failed: ${err.message || err}`);
+    } finally {
+      els.tempOffsetApplyBtn.disabled = !state.device?.gatt.connected || !state.tempOffsetChar;
+    }
+  });
+
+  // 工厂重置 + 重启：写入 RST1 后设备会清空数据并重启，连接随即断开
+  els.factoryResetBtn.addEventListener('click', async () => {
+    if (state.otaRunning) {
+      log('Factory reset ignored: OTA update is running');
+      return;
+    }
+    if (!state.device?.gatt.connected || !state.resetChar) {
+      els.factoryResetStatus.textContent = 'Connect a device to reset';
+      return;
+    }
+    const msg = 'Factory reset the device? All stored data (history, daily averages, humidity calibration and temperature offset) will be cleared and the device will reboot. The connection will drop.';
+    if (!window.confirm(msg)) return;
+    els.factoryResetBtn.disabled = true;
+    els.factoryResetStatus.textContent = 'Sending factory reset… the device will reboot';
+    try {
+      await BLEProtocol.sendFactoryReset(state.resetChar);
+      log('Factory reset command sent (0xFFE5 RST1)');
+      els.factoryResetStatus.textContent = 'Factory reset requested — the device is rebooting. Reconnect when it appears again.';
+    } catch (err) {
+      // 设备可能在写入确认前就重启断链，此处按“已下发”处理而非报错
+      if (/disconnect|gatt server/i.test(String(err?.message || err))) {
+        els.factoryResetStatus.textContent = 'Factory reset requested — the device is rebooting. Reconnect when it appears again.';
+        log('Factory reset caused disconnect (expected)');
+      } else {
+        els.factoryResetStatus.textContent = `Factory reset failed: ${err.message || err}`;
+        log(`Factory reset failed: ${err.message || err}`);
+      }
+    }
+  });
+
   // 中文：统一格式化 OTA 报错文案——断链（监督超时/设备复位）给安抚性提示，
   //       双 bank 设计保证老固件仍在运行，重连即可重试；其余错误原样展示。
   //       下载阶段（外层 click 回调）与传输阶段（runOtaUpdate 内部）共用此函数，避免文案不一致。
@@ -1248,7 +1372,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
     if (!upd || state.otaRunning || !state.device?.gatt.connected) return;
     const msg = `Upgrade firmware to v${upd.version} (${(upd.size / 1024).toFixed(1)} KB)? The device will reboot after a successful update.`;
     if (!window.confirm(msg)) return;
-    els.otaPanel.classList.remove("hidden");
+    els.otaProgressWrap.classList.remove("hidden");
     els.otaProgressBar.style.width = "0%";
     els.otaStatus.className = "text-xs font-medium text-slate-600";
     els.otaUpdateNowBtn.disabled = true;
@@ -1287,7 +1411,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
     state.otaLastFirmware = { firmware, label };
     stopPolling(); // OTA 期间暂停轮询，避免 GATT 读写抢占升级链路
     setOtaUiLock(true);
-    els.otaPanel.classList.remove("hidden");
+    els.otaProgressWrap.classList.remove("hidden");
     els.otaUpdateNowBtn.disabled = true;
     els.otaProgressBar.style.width = "0%";
     els.otaStatus.className = "text-xs font-medium text-slate-600";
@@ -1327,7 +1451,10 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
       els.otaStatus.className = `text-xs font-medium ${ok ? "text-emerald-600" : "text-rose-600"}`;
       setOtaRetryVisible(!ok);
       log(`[OTA] ${message}`);
-      if (ok) els.otaUpdateBanner.classList.add("hidden"); // 升级成功隐藏新版本横幅
+      if (ok) {
+        state.fwUpdate = null;
+        renderFirmwareCard();
+      }
     } catch (err) {
       // 中文：真实中途断链会走到这里（并非“已在进行中”类忙碌错误），需展示安抚性提示而非原始报错文案
       els.otaStatus.textContent = formatOtaError(err);
@@ -1361,26 +1488,93 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
     return 0;
   }
 
-  // 连接后检测新版本：fetch page/firmware/firmware.json 与设备固件版本（DIS 0x2A26）比较，更高则显示一键升级横幅
+  // 连接后检测新版本：fetch page/firmware/firmware.json 与设备固件版本（DIS 0x2A26）比较，更高则在 Setting 显示升级提示
   async function checkFirmwareUpdate() {
     state.fwUpdate = null;
-    els.otaUpdateBanner.classList.add("hidden");
+    renderFirmwareCard();
     if (!state.device?.gatt.connected || !state.otaChar) return;
     try {
       const res = await fetch(FIRMWARE_MANIFEST_URL, { cache: "no-store" });
       if (!res.ok) return;
-      const m = await res.json();
-      if (!m?.version || !m?.bin) return;
-      els.otaCurrentVersion.textContent = state.fwVersion || "unknown";
-      if (compareVersions(m.version, state.fwVersion) <= 0) return; // 无新版本
+      const raw = await res.json();
+      const m = normalizeManifest(raw);
+      if (!m) return;
+      if (compareVersions(m.latest.version, state.fwVersion) <= 0) {
+        renderFirmwareCard();
+        return;
+      }
       const base = FIRMWARE_MANIFEST_URL.slice(0, FIRMWARE_MANIFEST_URL.lastIndexOf("/") + 1);
-      state.fwUpdate = { version: m.version, bin: m.bin, size: Number(m.size) || 0, url: base + m.bin };
-      els.otaNewVersion.textContent = `v${m.version}`;
-      els.otaUpdateBanner.classList.remove("hidden");
-      log(`[OTA] new firmware available: v${m.version} (current ${state.fwVersion || "unknown"})`);
+      const latest = m.latest;
+      state.fwUpdate = {
+        version: latest.version,
+        bin: latest.bin,
+        size: Number(latest.size) || 0,
+        url: base + latest.bin,
+        notes: latest.notes || '',
+        history: m.history,
+      };
+      els.otaNewVersion.textContent = `v${latest.version}`;
+      renderFirmwareCard();
+      log(`[OTA] new firmware available: v${latest.version} (current ${state.fwVersion || "unknown"})`);
     } catch (err) {
       log(`Firmware manifest check failed: ${err.message || err}`); // 清单缺失/网络失败静默降级
     }
+  }
+
+  // 兼容 firmware.json 单对象与数组两种格式；数组按版本倒序后取最高版本，并保留完整升级列表
+  function normalizeManifest(raw) {
+    if (Array.isArray(raw)) {
+      const sorted = raw.filter(r => r && r.version && r.bin).sort((a, b) => compareVersions(b.version, a.version));
+      return sorted.length ? { latest: sorted[0], history: sorted } : null;
+    }
+    if (raw && raw.version && raw.bin) {
+      return { latest: raw, history: Array.isArray(raw.history) && raw.history.length ? raw.history : [raw] };
+    }
+    return null;
+  }
+
+  function escapeHtml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  // 渲染 Setting 面板里的 Firmware 卡片状态（当前版本 / 更新提示 / 红点 / What's new 列表）
+  function renderFirmwareCard() {
+    const upd = state.fwUpdate;
+    const ver = state.fwVersion || 'unknown';
+    els.otaCurrentVersionBadge.textContent = `v${ver}`;
+    const hasUpdate = !!upd;
+    els.otaUpdateHint.classList.toggle('hidden', !hasUpdate);
+    els.otaUpdateNowBtn.classList.toggle('hidden', !hasUpdate);
+    els.settingUpdateDot.classList.toggle('hidden', !hasUpdate);
+    els.otaUpdateNowBtn.disabled = state.otaRunning || !state.device?.gatt.connected || !hasUpdate;
+
+    const notesLines = upd?.notes ? String(upd.notes).split(/\r?\n/).map(s => s.trim()).filter(Boolean) : [];
+    const history = Array.isArray(upd?.history) ? upd.history : [];
+    const hasChangelog = notesLines.length > 0 || history.length > 1;
+    els.otaChangelog.classList.toggle('hidden', !hasChangelog);
+    if (!hasChangelog) {
+      els.otaChangelogList.innerHTML = '';
+      return;
+    }
+    const items = [];
+    if (notesLines.length) {
+      items.push(...notesLines);
+    } else {
+      history.forEach(h => items.push(`v${h.version}${h.notes ? ' — ' + String(h.notes).split(/\r?\n/)[0].trim() : ''}`));
+    }
+    els.otaChangelogList.innerHTML = items.map(t => `<li>${escapeHtml(t)}</li>`).join('');
+  }
+
+  // 渲染温度偏移滑杆与数值
+  function renderTempOffset() {
+    const x10 = state.tempOffsetX10 || 0;
+    els.tempOffsetSlider.value = String(x10);
+    els.tempOffsetValue.textContent = `${(x10 / 10).toFixed(1)} ℃`;
   }
 
   els.trendTabBtn.addEventListener('click', () => switchChartTab('trend'));
@@ -1388,19 +1582,19 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
   els.dailyMetricTempBtn.addEventListener('click', () => setDailyMetric('temp'));
   els.dailyMetricHumBtn.addEventListener('click', () => setDailyMetric('hum'));
   els.dailyMetricBattBtn.addEventListener('click', () => setDailyMetric('batt'));
-  els.mainTabNowBtn.addEventListener('click', () => switchMainTab('now'));
-  els.mainTabHistoryBtn.addEventListener('click', () => switchMainTab('history'));
+  els.mainTabDataBtn.addEventListener('click', () => switchMainTab('data'));
   els.mainTabGuideBtn.addEventListener('click', () => switchMainTab('guide'));
+  els.mainTabSettingBtn.addEventListener('click', () => switchMainTab('setting'));
 
    let resizeTimer = null;
    window.addEventListener('resize', () => {
      clearTimeout(resizeTimer);
      resizeTimer = setTimeout(() => {
-       const historyVisible = !els.mainTabHistoryPanel.classList.contains('hidden');
-       if (historyVisible && !els.trendTabPanel.classList.contains('hidden') && state.lastRecords) {
+       const dataVisible = !els.mainTabDataPanel.classList.contains('hidden');
+       if (dataVisible && !els.trendTabPanel.classList.contains('hidden') && state.lastRecords) {
          drawChart(state.lastRecords);
        }
-       if (historyVisible && !els.dailyTabPanel.classList.contains('hidden') && state.lastDailyRecords) {
+       if (dataVisible && !els.dailyTabPanel.classList.contains('hidden') && state.lastDailyRecords) {
          renderDaily(state.lastDailyRecords);
        }
      }, 200);

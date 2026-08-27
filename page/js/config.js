@@ -17,6 +17,7 @@ const FloraSenseConfig = (() => {
     RESET_CHAR: '0000ffe5-0000-1000-8000-00805f9b34fb',
     CALIB_CHAR: '0000ffe6-0000-1000-8000-00805f9b34fb',
     REFRESH_CHAR: '0000ffe7-0000-1000-8000-00805f9b34fb',
+    TEMP_OFFSET_CHAR: '0000ffe8-0000-1000-8000-00805f9b34fb',
     // Telink OTA 升级服务（128bit，须与固件 app_att.c 的 TELINK_OTA_UUID_SERVICE / TELINK_SPP_DATA_OTA
     // 的 GATT 小端字节序反转后一致），仅 BLE_OTA_SERVER_ENABLE=1 的固件才有
     OTA_SERVICE: '00010203-0405-0607-0809-0a0b0c0d1912',
@@ -40,6 +41,16 @@ const FloraSenseConfig = (() => {
 
   // Clear/Reset 指令 4 字节魔术字 "CLR1"，须与固件 soil_reset_onWrite 严格对齐
   const RESET_MAGIC = Uint8Array.of(0x43, 0x4c, 0x52, 0x31);
+
+  // Factory reset & reboot 指令 4 字节魔术字 "RST1"，清空设备全部业务数据（RAM/校准/偏移）并重启
+  const FACTORY_RESET_MAGIC = Uint8Array.of(0x52, 0x53, 0x54, 0x31);
+
+  // 温度偏移校准参数（单位 0.1℃，±10℃ 内，须与固件 SOIL_TEMP_OFFSET_* 对齐）
+  const TEMP_OFFSET = {
+    MIN_X10: -100,
+    MAX_X10: 100,
+    STEP_X10: 5,
+  };
 
   // Bluefy 深链唤起配置：iOS Safari 无 Web Bluetooth 时引导用 Bluefy 打开本 Dashboard，
   // 未安装则回退 App Store（deep link scheme 未公开文档，需真机验证）
@@ -66,8 +77,10 @@ const FloraSenseConfig = (() => {
     UUIDS,
     FIRMWARE_MANIFEST_URL,
     RESET_MAGIC,
+    FACTORY_RESET_MAGIC,
     HUM_CALIB_CMD,
     REFRESH_CMD,
+    TEMP_OFFSET,
     DASHBOARD_URL,
     BLUEFY_APPSTORE_URL,
     BLUEFY_DEEPLINK,

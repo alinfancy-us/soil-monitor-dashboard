@@ -104,6 +104,20 @@
       box-shadow: 0 6px 16px rgba(12, 93, 68, 0.30);
     }
 
+    .main-tab-btn:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+
+    /* Firmware update badge pulse（新版本提示更醒目） */
+    @keyframes updatePulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(124, 58, 237, 0.55); }
+      50% { box-shadow: 0 0 0 6px rgba(124, 58, 237, 0); }
+    }
+    .update-badge {
+      animation: updatePulse 1.8s ease-in-out infinite;
+    }
+
     /* ===== Guide ===== */
     .guide-step {
       display: flex;
@@ -151,6 +165,10 @@
         min-height: 28px;
         font-size: 10px;
         line-height: 14px;
+      }
+
+      .calibration-grid.grid {
+        grid-template-columns: 1fr;
       }
 
       .history-table,
@@ -259,27 +277,6 @@
       </div>
     </header>
 
-    <!-- Firmware update banner（连接后检测到新版本时显示，点击即可一键 OTA 升级） -->
-    <div id="otaUpdateBanner" class="hidden dashboard-card flex flex-wrap items-center justify-between gap-3 px-4 py-3 mb-4 text-sm rounded-2xl sm:px-5 sm:mb-5 border-violet-200 bg-violet-50 text-violet-800">
-      <span class="flex items-center gap-2"><span aria-hidden="true">🚀</span><span>New firmware <b id="otaNewVersion">--</b> available (current <b id="otaCurrentVersion">--</b>)</span></span>
-      <button id="otaUpdateNowBtn" class="px-4 py-1.5 text-xs font-semibold text-white transition rounded-xl bg-violet-600 hover:bg-violet-700 active:scale-[0.98]">Update now</button>
-    </div>
-
-    <!-- OTA 固件升级进度面板（检测到新版本并开始升级时显示） -->
-    <div id="otaPanel" class="hidden dashboard-card p-4 mb-5 rounded-2xl sm:p-5 sm:mb-5">
-      <h2 class="mb-3 text-sm font-semibold text-slate-600">Firmware update</h2>
-      <div class="flex items-center gap-3">
-        <div class="flex-1 h-2 min-w-0 overflow-hidden rounded-full bg-slate-100">
-          <div id="otaProgressBar" class="h-full transition-all duration-200 rounded-full bg-violet-500" style="width: 0%"></div>
-        </div>
-        <button id="otaRetryBtn" type="button"
-          class="hidden action-button shrink-0 items-center px-3 py-1.5 text-xs font-semibold text-white transition rounded-lg bg-violet-600 hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40 sm:px-4 sm:py-2 sm:text-sm">
-          Retry
-        </button>
-      </div>
-      <p id="otaStatus" class="mt-2 text-xs font-medium text-slate-600">Reading firmware…</p>
-    </div>
-
     <!-- Controls（全局：连接 / 刷新 / 清空） -->
     <div class="dashboard-card toolbar p-3 mb-4 rounded-2xl sm:px-5 sm:py-4 sm:mb-6">
       <div class="flex items-center gap-2 px-2 sm:px-0">
@@ -303,12 +300,15 @@
 
     <!-- Main tab navigation -->
     <nav class="main-nav mb-5 sm:mb-6" role="tablist" aria-label="Dashboard views">
-      <button id="mainTabNowBtn" class="main-tab-btn main-tab-active" role="tab" aria-selected="true">📊 Now</button>
-      <button id="mainTabHistoryBtn" class="main-tab-btn" role="tab" aria-selected="false">📈 History</button>
+      <button id="mainTabDataBtn" class="main-tab-btn main-tab-active" role="tab" aria-selected="true">📊 Data</button>
       <button id="mainTabGuideBtn" class="main-tab-btn" role="tab" aria-selected="false">📘 Guide</button>
+      <button id="mainTabSettingBtn" class="main-tab-btn" role="tab" aria-selected="false" disabled>
+        <span>⚙️ Setting</span>
+        <span id="settingUpdateDot" class="hidden update-badge inline-flex items-center px-1.5 py-0.5 text-[9px] font-bold leading-none text-white bg-violet-600 rounded-full">NEW</span>
+      </button>
     </nav>
-    <!-- ================= Panel: Now ================= -->
-    <section id="mainTabNowPanel" role="tabpanel">
+    <!-- ================= Panel: Data ================= -->
+    <section id="mainTabDataPanel" role="tabpanel">
       <!-- Live readings -->
       <div class="grid grid-cols-3 gap-2 mb-4 sm:gap-4 sm:mb-5">
         <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #f97316">
@@ -329,31 +329,7 @@
       </div>
       <p id="lastUpdate" class="mb-5 text-xs text-center text-slate-400 sm:mb-6">No measurement received yet</p>
 
-      <!-- Sensor calibration -->
-      <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5 sm:mb-0">
-        <h2 class="mb-1 text-sm font-semibold text-slate-600">Sensor calibration</h2>
-        <p class="mb-3 text-xs leading-5 text-slate-400">
-          Uses the device's live humidity reading. Place the probe first, tap the matching calibration button below, and wait a few minutes to see the updated calibrated humidity.
-        </p>
-        <div class="calibration-grid grid grid-cols-2 gap-3">
-          <button id="calibDryBtn" disabled
-            class="flex flex-col items-center gap-1 px-3 py-3 text-orange-700 transition border border-orange-100 rounded-xl bg-orange-50 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-40">
-            <span class="text-xl">🏜️</span>
-            <span class="text-sm font-semibold">Dry calibration (0%)</span>
-            <span class="text-[11px] text-orange-500 text-center leading-tight">Probe in open air, fully dry</span>
-          </button>
-          <button id="calibWetBtn" disabled
-            class="flex flex-col items-center gap-1 px-3 py-3 transition border rounded-xl border-sky-100 bg-sky-50 text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40">
-            <span class="text-xl">💦</span>
-            <span class="text-sm font-semibold">Wet calibration (100%)</span>
-            <span class="text-[11px] text-sky-500 text-center leading-tight">Probe fully submerged in water</span>
-          </button>
-        </div>
-        <p id="calibStatus" class="mt-3 text-xs text-center text-slate-400">Connect a device to enable calibration</p>
-      </div>
-    </section>
-    <!-- ================= Panel: History ================= -->
-    <section id="mainTabHistoryPanel" class="hidden" role="tabpanel">
+      <!-- History & trend charts（原 History 面板内容已并入 Data 面板） -->
       <!-- History table -->
       <div class="dashboard-card p-4 mb-5 overflow-hidden rounded-2xl sm:p-5 sm:mb-6">
         <h2 class="mb-3 text-sm font-semibold text-slate-600">Measurement history</h2>
@@ -431,6 +407,108 @@
         </div>
       </div>
     </section>
+    <!-- ================= Panel: Setting ================= -->
+    <section id="mainTabSettingPanel" class="hidden" role="tabpanel">
+      <div id="settingLockedHint" class="dashboard-card p-5 mb-5 rounded-2xl text-center sm:p-6">
+        <div class="text-3xl">🔒</div>
+        <p class="mt-2 text-sm font-semibold text-slate-600">Settings are locked</p>
+        <p class="mt-1 text-xs leading-5 text-slate-400">Connect a device to access calibration, temperature offset, firmware update and reset.</p>
+      </div>
+
+      <div id="settingContent" class="hidden">
+        <!-- Firmware update -->
+        <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="text-sm font-semibold text-slate-600">Firmware</h2>
+            <span id="otaCurrentVersionBadge" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-slate-100 text-slate-500">--</span>
+          </div>
+          <div id="otaUpdateHint" class="hidden mt-3 p-4 rounded-2xl bg-violet-600 text-white">
+            <div class="flex flex-wrap items-center gap-2 text-sm font-bold">🚀 New firmware <span id="otaNewVersion" class="text-violet-100">--</span> available</div>
+            <div class="mt-1 text-xs text-violet-200">Update to get the latest fixes and features.</div>
+          </div>
+          <details id="otaChangelog" class="hidden mt-3">
+            <summary class="text-xs font-semibold text-violet-600 cursor-pointer select-none">What's new</summary>
+            <ul id="otaChangelogList" class="mt-2 pl-4 space-y-1 text-xs leading-5 text-slate-500 list-disc"></ul>
+          </details>
+          <div class="flex justify-end mt-3">
+            <button id="otaUpdateNowBtn"
+              class="hidden action-button inline-flex items-center w-full px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-violet-600 hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">
+              Update now
+            </button>
+          </div>
+          <div id="otaProgressWrap" class="hidden mt-4">
+            <div class="flex items-center gap-3">
+              <div class="flex-1 h-2 min-w-0 overflow-hidden rounded-full bg-slate-100">
+                <div id="otaProgressBar" class="h-full transition-all duration-200 rounded-full bg-violet-500" style="width: 0%"></div>
+              </div>
+              <button id="otaRetryBtn" type="button"
+                class="hidden action-button shrink-0 items-center px-3 py-1.5 text-xs font-semibold text-white transition rounded-lg bg-violet-600 hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40 sm:px-4 sm:py-2 sm:text-sm">
+                Retry
+              </button>
+            </div>
+          </div>
+          <p id="otaStatus" class="mt-2 text-xs font-medium text-slate-600"></p>
+        </div>
+
+        <!-- Sensor calibration -->
+        <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
+          <h2 class="mb-1 text-sm font-semibold text-slate-600">Sensor calibration</h2>
+          <p class="mb-3 text-xs leading-5 text-slate-400">
+            Uses the device's live humidity reading. Place the probe first, tap the matching calibration button below, and wait a few minutes to see the updated calibrated humidity.
+          </p>
+          <div class="calibration-grid grid grid-cols-2 gap-3">
+            <button id="calibDryBtn" disabled
+              class="flex flex-col items-center gap-1 px-3 py-3 text-orange-700 transition border border-orange-100 rounded-xl bg-orange-50 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-40">
+              <span class="text-xl">🏜️</span>
+              <span class="text-sm font-semibold">Dry calibration (0%)</span>
+              <span class="text-[11px] text-orange-500 text-center leading-tight">Probe in open air, fully dry</span>
+            </button>
+            <button id="calibWetBtn" disabled
+              class="flex flex-col items-center gap-1 px-3 py-3 transition border rounded-xl border-sky-100 bg-sky-50 text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40">
+              <span class="text-xl">💦</span>
+              <span class="text-sm font-semibold">Wet calibration (100%)</span>
+              <span class="text-[11px] text-sky-500 text-center leading-tight">Probe fully submerged in water</span>
+            </button>
+          </div>
+          <p id="calibStatus" class="mt-3 text-xs text-center text-slate-400">Connect a device to enable calibration</p>
+        </div>
+
+        <!-- Temperature offset -->
+        <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
+          <h2 class="mb-1 text-sm font-semibold text-slate-600">Temperature offset</h2>
+          <p class="mb-3 text-xs leading-5 text-slate-400">
+            Correct the soil temperature reading by up to ±10 ℃. The offset is stored on the device in memory and cleared after a factory reset or battery replacement.
+          </p>
+          <div class="flex items-center gap-3">
+            <input id="tempOffsetSlider" type="range" min="-100" max="100" step="5" value="0" class="flex-1 h-2 rounded-full accent-emerald-600">
+            <span id="tempOffsetValue" class="w-16 px-2 py-1 text-sm font-semibold text-center rounded-lg bg-slate-100 text-slate-700">0.0 ℃</span>
+          </div>
+          <div class="flex justify-between mt-1 text-[11px] text-slate-400"><span>-10.0 ℃</span><span>+10.0 ℃</span></div>
+          <div class="flex justify-end mt-3">
+            <button id="tempOffsetApplyBtn" disabled
+              class="action-button inline-flex items-center w-full px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">
+              Apply offset
+            </button>
+          </div>
+          <p id="tempOffsetStatus" class="mt-2 text-xs text-center text-slate-400"></p>
+        </div>
+
+        <!-- Reset -->
+        <div class="dashboard-card p-4 rounded-2xl border-rose-100 sm:p-5">
+          <h2 class="mb-1 text-sm font-semibold text-rose-600">Reset</h2>
+          <p class="mb-3 text-xs leading-5 text-slate-400">
+            Factory reset clears all stored data (history, daily averages, humidity calibration and temperature offset) and reboots the device. The connection will drop.
+          </p>
+          <div class="flex justify-end mt-3">
+            <button id="factoryResetBtn" disabled
+              class="action-button inline-flex items-center w-full px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-rose-600 hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">
+              Factory reset & reboot
+            </button>
+          </div>
+          <p id="factoryResetStatus" class="mt-2 text-xs text-center text-slate-400"></p>
+        </div>
+      </div>
+    </section>
     <!-- ================= Panel: Guide ================= -->
     <section id="mainTabGuidePanel" class="hidden" role="tabpanel">
       <div class="dashboard-card p-5 rounded-2xl sm:p-6">
@@ -452,14 +530,14 @@
             <span class="guide-num">2</span>
             <div>
               <p class="text-sm font-medium text-slate-700">Watch live readings</p>
-              <p class="text-xs leading-5 text-slate-500">Once connected, the <b>Now</b> tab shows temperature, humidity and battery — updated in real time.</p>
+              <p class="text-xs leading-5 text-slate-500">Once connected, the <b>Data</b> tab shows temperature, humidity and battery — updated in real time.</p>
             </div>
           </div>
           <div class="guide-step">
             <span class="guide-num">3</span>
             <div>
               <p class="text-sm font-medium text-slate-700">Review trends</p>
-              <p class="text-xs leading-5 text-slate-500">Open the <b>History</b> tab to browse every measurement and see 5-record or 7-day average charts.</p>
+              <p class="text-xs leading-5 text-slate-500">Open the <b>Data</b> tab to browse every measurement and see 5-record or 7-day average charts.</p>
             </div>
           </div>
         </div>
@@ -467,7 +545,7 @@
         <div class="mt-6">
           <h3 class="mb-3 text-sm font-semibold text-slate-600">Calibration</h3>
           <p class="text-xs leading-5 text-slate-500">
-            In the <b>Now</b> tab, place the probe fully dry in open air and tap <b>Dry calibration</b>, then submerge the probe in water and tap <b>Wet calibration</b>. This improves humidity accuracy for the soil you use.
+            In the <b>Setting</b> tab, place the probe fully dry in open air and tap <b>Dry calibration</b>, then submerge the probe in water and tap <b>Wet calibration</b>. This improves humidity accuracy for the soil you use.
           </p>
         </div>
 
@@ -483,7 +561,7 @@
         <div class="mt-6">
           <h3 class="mb-3 text-sm font-semibold text-slate-600">Firmware update</h3>
           <p class="text-xs leading-5 text-slate-500">
-            When a newer firmware is available, a violet banner appears above the toolbar. Tap <b>Update now</b> to upgrade over the air — the device reboots automatically after a successful update.
+            When a newer firmware is available, the <b>Setting</b> tab shows an update hint and a red dot. Open it, read “What's new”, then tap <b>Update now</b> to upgrade over the air — the device reboots automatically after a successful update.
           </p>
         </div>
 
