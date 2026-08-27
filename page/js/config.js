@@ -54,7 +54,7 @@ const FloraSenseConfig = (() => {
 
   // Bluefy 深链唤起配置：iOS Safari 无 Web Bluetooth 时引导用 Bluefy 打开本 Dashboard，
   // 未安装则回退 App Store（deep link scheme 未公开文档，需真机验证）
-  const DASHBOARD_URL = 'https://alinfancy-us.github.io/soil-monitor-dashboard';
+  const DASHBOARD_URL = 'https://florasense.alinfancy.com';
   const BLUEFY_APPSTORE_URL = 'https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055';
   const BLUEFY_DEEPLINK = `bluefy://open?url=${encodeURIComponent(DASHBOARD_URL)}`;
 
