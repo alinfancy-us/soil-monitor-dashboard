@@ -314,7 +314,11 @@
         <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #f97316">
           <div class="text-xl sm:text-3xl">🌡️</div>
           <div id="tempValue" class="metric-value mt-1 text-3xl font-bold text-orange-600 sm:text-4xl">--</div>
-          <div class="metric-label text-xs text-slate-500 mt-0.5">Temperature ℃</div>
+          <div id="tempUnitLabel" class="metric-label text-xs text-slate-500 mt-0.5">Temperature °F</div>
+          <div id="tempUnitToggle" class="mt-1.5 inline-flex p-0.5 rounded-lg bg-slate-100" role="group" aria-label="Temperature unit">
+            <button type="button" class="temperature-unit-btn px-2 py-0.5 text-[11px] font-semibold rounded-md transition" data-unit="F">°F</button>
+            <button type="button" class="temperature-unit-btn px-2 py-0.5 text-[11px] font-semibold rounded-md transition" data-unit="C">°C</button>
+          </div>
         </div>
         <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #0ea5e9">
           <div class="text-xl sm:text-3xl">💧</div>
@@ -363,7 +367,7 @@
           <div class="grid grid-cols-3 gap-2 mt-3 text-xs">
             <div class="rounded-lg bg-orange-50 px-2.5 py-2 text-center">
               <div id="trendTempLatest" class="text-sm font-semibold text-orange-600">--</div>
-              <div class="mt-0.5 text-slate-500">Temperature (℃)</div>
+              <div class="mt-0.5 text-slate-500">Temperature</div>
             </div>
             <div class="rounded-lg bg-sky-50 px-2.5 py-2 text-center">
               <div id="trendHumLatest" class="text-sm font-semibold text-sky-600">--</div>
@@ -517,6 +521,13 @@
           FloraSense is a Bluetooth soil sensor that measures soil temperature, humidity and battery level. This quick guide helps you get started in a few minutes.
         </p>
 
+        <div class="mt-4">
+          <a href="page/doc/introduction.pdf" download class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98]">
+            📄 Download introduction (PDF)
+          </a>
+          <p class="mt-1 text-xs text-slate-400">A printable quick-start guide — opens or saves as a PDF.</p>
+        </div>
+
         <div class="mt-6">
           <h3 class="mb-3 text-sm font-semibold text-slate-600">Getting started</h3>
           <div class="guide-step">
@@ -552,8 +563,8 @@
         <div class="mt-6">
           <h3 class="mb-3 text-sm font-semibold text-slate-600">Understanding readings</h3>
           <ul class="space-y-2 text-xs leading-5 text-slate-500">
-            <li><b class="text-orange-600">🌡️ Temperature</b> — soil temperature in degrees Celsius. Most plants thrive between 15–30 ℃.</li>
-            <li><b class="text-sky-600">💧 Humidity</b> — relative soil moisture as a percentage. Aim for the sweet spot of your plant.</li>
+            <li><b class="text-orange-600">🌡️ Temperature</b> — soil temperature, shown in °F by default (switch to °C). Most plants thrive between 59–86 °F (15–30 ℃).</li>
+            <li><b class="text-sky-600">💧 Humidity</b> — relative soil humidity as a percentage. Aim for the sweet spot of your plant.</li>
             <li><b class="text-emerald-600">🔋 Battery</b> — remaining charge. Recharge before it gets too low.</li>
           </ul>
         </div>

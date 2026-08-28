@@ -51,6 +51,8 @@
     factoryResetBtn: document.getElementById('factoryResetBtn'),
     factoryResetStatus: document.getElementById('factoryResetStatus'),
      tempValue: document.getElementById('tempValue'),
+     tempUnitLabel: document.getElementById('tempUnitLabel'),
+     tempUnitToggle: document.getElementById('tempUnitToggle'),
      humValue: document.getElementById('humValue'),
      battValue: document.getElementById('battValue'),
      lastUpdate: document.getElementById('lastUpdate'),
@@ -105,14 +107,27 @@
      lastRecords: null,
      lastDailyRecords: null,
      dailyMetric: 'temp',
+     tempUnit: 'F',
    };
+
+   // 温度单位偏好：默认华氏（°F，美国常用），可在温度卡片切换摄氏（°C），持久化到本地
+   try {
+     state.tempUnit = localStorage.getItem(`${CACHE_PREFIX}tempUnit:v1`) === 'C' ? 'C' : 'F';
+   } catch (_) {
+     state.tempUnit = 'F';
+   }
+
+   function cToF(c) { return (c * 9 / 5) + 32; }
+   function tempUnitSymbol() { return state.tempUnit === 'F' ? '°F' : '°C'; }
+   function tempVal(c) { return state.tempUnit === 'F' ? cToF(c) : c; }
+   function fmtTemp(c, decimals = 1) { return `${tempVal(c).toFixed(decimals)}${tempUnitSymbol()}`; }
 
    const DAILY_METRICS = {
      temp: {
        key: 'temp',
        title: 'Temperature',
        color: '#f97316',
-       formatValue: v => `${v.toFixed(1)}℃`,
+       formatValue: v => `${v.toFixed(1)}${tempUnitSymbol()}`,
        axisFormatter: v => v.toFixed(1),
        range: null,
        button: 'dailyMetricTempBtn',
@@ -546,7 +561,7 @@
     saveTrendRecordsCache(records, state.activeDeviceId);
      const latest = records[records.length - 1];
  
-     els.tempValue.textContent = latest.temp.toFixed(2);
+     els.tempValue.textContent = tempVal(latest.temp).toFixed(1);
      els.humValue.textContent = latest.hum.toFixed(1);
      els.battValue.textContent = latest.batt;
      els.lastUpdate.textContent = `Latest measurement: ${formatTime(latest.timestamp)}`;
@@ -556,7 +571,7 @@
          <tr class="border-b border-slate-50 last:border-0">
            <td class="py-2 pr-2 text-slate-400">${i + 1}</td>
            <td class="py-2 pr-2">${formatTime(r.timestamp)}</td>
-           <td class="py-2 pr-2 text-orange-500 font-medium">${r.temp.toFixed(2)}℃</td>
+           <td class="py-2 pr-2 text-orange-500 font-medium">${fmtTemp(r.temp)}</td>
            <td class="py-2 pr-2 text-sky-500 font-medium">${r.hum.toFixed(1)}%</td>
            <td class="py-2 text-emerald-600 font-medium">${r.batt}%</td>
          </tr>`)
@@ -578,7 +593,7 @@
 
      const latest = records[records.length - 1];
      const first = records[0];
-     els.trendTempLatest.textContent = `${latest.temp.toFixed(1)}℃`;
+     els.trendTempLatest.textContent = fmtTemp(latest.temp);
      els.trendHumLatest.textContent = `${latest.hum.toFixed(1)}%`;
      els.trendBattLatest.textContent = `${latest.batt.toFixed(0)}%`;
      els.trendRangeText.textContent = `Time range: ${formatShortTime(first.timestamp)} - ${formatShortTime(latest.timestamp)}`;
@@ -609,7 +624,7 @@
      const plotW = w - padLeft - padRight;
      const plotH = h - padTop - padBottom;
 
-     const temps = records.map(r => r.temp);
+     const temps = records.map(r => tempVal(r.temp));
      const hums = records.map(r => r.hum);
      const tRange = niceRange(Math.min(...temps), Math.max(...temps));
      const hLo = 0;
@@ -841,6 +856,22 @@
      });
    }
 
+   function updateTempUnitUI() {
+     const active = state.tempUnit;
+     (els.tempUnitToggle?.querySelectorAll('.temperature-unit-btn') || []).forEach(btn => {
+       const isActive = btn.dataset.unit === active;
+       btn.className = `temperature-unit-btn px-2 py-0.5 text-[11px] font-semibold rounded-md transition ${isActive ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`;
+     });
+     try { localStorage.setItem(`${CACHE_PREFIX}tempUnit:v1`, active); } catch (_) {}
+     if (els.tempUnitLabel) els.tempUnitLabel.textContent = `Temperature ${tempUnitSymbol()}`;
+     if (state.lastRecords) {
+       render(state.lastRecords);
+     } else {
+       els.tempValue.textContent = '--';
+     }
+     if (state.lastDailyRecords) renderDaily(state.lastDailyRecords);
+   }
+
    function formatSignedMetricValue(cfg, value) {
      if (value === 0) return cfg.formatValue(0);
      const sign = value > 0 ? '+' : '-';
@@ -870,7 +901,8 @@
      els.dailyEmpty.classList.add('hidden');
 
      const xLabels = records.map(r => formatMonthDay(r.dateEpoch));
-     const values = records.map(r => Number(r[cfg.key]) || 0);
+     let values = records.map(r => Number(r[cfg.key]) || 0);
+     if (cfg.key === 'temp') values = values.map(tempVal);
      const latest = values[values.length - 1];
      const first = values[0];
      const avg = values.reduce((sum, v) => sum + v, 0) / values.length;
@@ -892,7 +924,7 @@
      els.dailyLatestValue.style.color = cfg.color;
      els.dailyAvgValue.style.color = cfg.color;
      els.dailyChangeValue.style.color = cfg.color;
-     els.dailyMetricHint.textContent = `${cfg.title} · ${xLabels[0]} - ${xLabels[xLabels.length - 1]}`;
+     els.dailyMetricHint.textContent = `${cfg.title}${cfg.key === 'temp' ? ` (${tempUnitSymbol()})` : ''} · ${xLabels[0]} - ${xLabels[xLabels.length - 1]}`;
     saveDailyRecordsCache(records, state.activeDeviceId);
    }
  
@@ -900,8 +932,8 @@
      const isTrend = tab === 'trend';
      els.trendTabPanel.classList.toggle('hidden', !isTrend);
      els.dailyTabPanel.classList.toggle('hidden', isTrend);
-     els.trendTabBtn.className = `chart-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`;
-     els.dailyTabBtn.className = `chart-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-slate-100 text-slate-500' : 'bg-emerald-600 text-white'}`;
+     els.trendTabBtn.className = `chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`;
+     els.dailyTabBtn.className = `chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-slate-100 text-slate-500' : 'bg-emerald-600 text-white'}`;
  
      if (isTrend && state.lastRecords) {
        drawChart(state.lastRecords);
@@ -1582,6 +1614,12 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
   els.dailyMetricTempBtn.addEventListener('click', () => setDailyMetric('temp'));
   els.dailyMetricHumBtn.addEventListener('click', () => setDailyMetric('hum'));
   els.dailyMetricBattBtn.addEventListener('click', () => setDailyMetric('batt'));
+  (els.tempUnitToggle?.querySelectorAll('.temperature-unit-btn') || []).forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.tempUnit = btn.dataset.unit === 'C' ? 'C' : 'F';
+      updateTempUnitUI();
+    });
+  });
   els.mainTabDataBtn.addEventListener('click', () => switchMainTab('data'));
   els.mainTabGuideBtn.addEventListener('click', () => switchMainTab('guide'));
   els.mainTabSettingBtn.addEventListener('click', () => switchMainTab('setting'));
@@ -1602,6 +1640,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
  
 
    updateDailyMetricButtons();
+  updateTempUnitUI();
   state.activeDeviceId = getLastDeviceId();
   if (state.activeDeviceId) restoreCachedCharts(state.activeDeviceId);
  
