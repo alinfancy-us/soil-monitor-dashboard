@@ -1,5 +1,5 @@
 /**
- * FloraSense Dashboard Application UI Manager
+ * SoilPulse Dashboard Application UI Manager
  */
  (() => {
    'use strict';
@@ -12,11 +12,11 @@
      CACHE_PREFIX, CACHE_MAX_ITEM_BYTES, CACHE_MAX_TOTAL_BYTES,
      FIRMWARE_MANIFEST_URL,
      TEMP_OFFSET,
-} = FloraSenseConfig;
+} = SoilPulseConfig;
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
   const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
-  const RECORD_KEY_RE = /^floraSense:(trend|daily):v1:/;
+  const RECORD_KEY_RE = /^soilPulse:(trend|daily):v1:/;
 
   function cacheKey(type, deviceId) {
     return `${CACHE_PREFIX}${type}:v1:${deviceId}`;
@@ -155,7 +155,7 @@
  
    function log(msg) {
      if (!DEBUG_ENABLED) return;
-     console.debug(`[FloraSense] ${msg}`);
+     console.debug(`[SoilPulse] ${msg}`);
    }
  
    function setStatus(mode) {

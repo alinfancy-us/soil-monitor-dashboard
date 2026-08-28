@@ -1,12 +1,12 @@
 /**
- * FloraSense Frontend Shared Configuration
+ * SoilPulse Frontend Shared Configuration
  * 集中管理设备名前缀 / GATT UUID / Bluefy 深链 / 缓存与轮询参数，供 ble-protocol.js 与 app.js 共用
  */
-const FloraSenseConfig = (() => {
+const SoilPulseConfig = (() => {
   'use strict';
 
   // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致
-  const DEVICE_NAME_PREFIX = 'FloraSense';
+  const DEVICE_NAME_PREFIX = 'SoilPulse';
 
   // GATT UUID：使用 128 位完整小写字符串，防止 Bluefy/iOS 序列化失败
   const UUIDS = {
@@ -54,7 +54,7 @@ const FloraSenseConfig = (() => {
 
   // Bluefy 深链唤起配置：iOS Safari 无 Web Bluetooth 时引导用 Bluefy 打开本 Dashboard，
   // 未安装则回退 App Store（deep link scheme 未公开文档，需真机验证）
-  const DASHBOARD_URL = 'https://florasense.alinfancy.com';
+  const DASHBOARD_URL = 'https://soilpulse.alinfancy.com';
   const BLUEFY_APPSTORE_URL = 'https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055';
   const BLUEFY_DEEPLINK = `bluefy://open?url=${encodeURIComponent(DASHBOARD_URL)}`;
 
@@ -68,7 +68,7 @@ const FloraSenseConfig = (() => {
   const TREND_EPOCH_MAX_VALID = 4102444800;  // 2100-01-01 00:00:00 UTC
 
   // 本地缓存（localStorage）参数
-  const CACHE_PREFIX = 'floraSense:';
+  const CACHE_PREFIX = 'SoilPulse:';
   const CACHE_MAX_ITEM_BYTES = 64 * 1024;
   const CACHE_MAX_TOTAL_BYTES = 512 * 1024;
 

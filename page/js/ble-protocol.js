@@ -1,11 +1,11 @@
 /**
- * FloraSense BLE Protocol & Service Module
+ * SoilPulse BLE Protocol & Service Module
  */
 const BLEProtocol = (() => {
   'use strict';
 
   // 集中配置统一取自 page/js/config.js，方便后续维护管理
-  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC, FACTORY_RESET_MAGIC, HUM_CALIB_CMD, REFRESH_CMD, TEMP_OFFSET } = FloraSenseConfig;
+  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC, FACTORY_RESET_MAGIC, HUM_CALIB_CMD, REFRESH_CMD, TEMP_OFFSET } = SoilPulseConfig;
   const RECORD_SIZE = 9;
   const MAX_RECORDS = 5;
   const PACKET_SIZE = 1 + RECORD_SIZE * MAX_RECORDS;
