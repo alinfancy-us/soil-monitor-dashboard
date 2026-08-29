@@ -1151,14 +1151,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
    async function handleConnect() {
      if (!navigator.bluetooth) {
        const ua = navigator.userAgent;
-       const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
-       const isAndroid = /Android/.test(ua);
-       /* PC desktop browser (e.g. Safari): no compat modal, log only */
-       if (!isIOS && !isAndroid) {
-         console.warn('[SoilPulse] Web Bluetooth unavailable in this desktop browser. Please use Chrome / Edge over HTTPS or localhost.');
-         return;
-       }
-       showModal(isIOS, isAndroid);
+       showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
        return;
      }
 
@@ -1653,13 +1646,8 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
  
    if (!navigator.bluetooth) {
      const ua = navigator.userAgent;
-     const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
-     const isAndroid = /Android/.test(ua);
-     if (isIOS || isAndroid) {
-       showModal(isIOS, isAndroid);
-       els.connectBtn.disabled = true;
-       els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
-     }
-     /* PC desktop browser (e.g. Safari): no modal, page stays browsable */
+     showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
+     els.connectBtn.disabled = true;
+     els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
    }
  })();
