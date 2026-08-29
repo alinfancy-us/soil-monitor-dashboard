@@ -134,7 +134,7 @@
      },
      hum: {
        key: 'hum',
-       title: 'Humidity',
+       title: 'Moisture',
        color: '#0ea5e9',
        formatValue: v => `${v.toFixed(1)}%`,
        axisFormatter: v => v.toFixed(0),
@@ -1288,10 +1288,10 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
     try {
       await BLEProtocol.sendHumCalib(state.calibChar, point);
       els.calibStatus.textContent = `${label} calibration applied`;
-      log(`Humidity ${label} calibration command sent (0xFFE6)`);
+      log(`Moisture ${label} calibration command sent (0xFFE6)`);
     } catch (err) {
       els.calibStatus.textContent = `${label} calibration failed: ${err.message || err}`;
-      log(`Humidity calibration failed: ${err.message || err}`);
+      log(`Moisture calibration failed: ${err.message || err}`);
     } finally {
       els.calibDryBtn.disabled = false;
       els.calibWetBtn.disabled = false;
@@ -1367,7 +1367,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
       els.factoryResetStatus.textContent = 'Connect a device to reset';
       return;
     }
-    const msg = 'Factory reset the device? All stored data (history, daily averages, humidity calibration and temperature offset) will be cleared and the device will reboot. The connection will drop.';
+    const msg = 'Factory reset the device? All stored data (history, daily averages, moisture calibration and temperature offset) will be cleared and the device will reboot. The connection will drop.';
     if (!window.confirm(msg)) return;
     els.factoryResetBtn.disabled = true;
     els.factoryResetStatus.textContent = 'Sending factory reset… the device will reboot';
