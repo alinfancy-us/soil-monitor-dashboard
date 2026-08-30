@@ -75,12 +75,17 @@ const BLEProtocol = (() => {
    * @returns {Promise<BluetoothDevice>}
    */
   async function requestSoilDevice() {
-    // 限制名称前缀为 alinfancy，并传入 128 位格式的 Service UUID
+    // 按广播服务 UUID(0xFFE0) + 名字前缀 组合过滤设备（详见下方 filters 注释）
+    // 前提：固件广播包含 Complete List of 16-bit Service UUIDs 段（见 bth_soil_sensor.h 的 SOIL_ADV_SERVICE_UUID16）
     return navigator.bluetooth.requestDevice({
       filters: [
-        { namePrefix: DEVICE_NAME_PREFIX }
+        // 同一 filter 对象内多条件为 AND：广播服务 UUID(0xFFE0) 匹配 + 名字前缀，
+        // 排除周围其他同样使用 0xFFE0 的设备（HM-10/JDY 类模块的经典 UUID），避免选择器噪音。
+        // 注意：固件改名时必须保留 DEVICE_NAME_PREFIX 前缀，并同步维护 config.js 的 DEVICE_NAME_PREFIX，
+        // 否则该过滤条件将匹配不到设备（这是配置耦合，与系统蓝牙缓存无关）。
+        { services: [UUIDS.SERVICE], namePrefix: DEVICE_NAME_PREFIX }
       ],
-      optionalServices: [UUIDS.SERVICE, UUIDS.OTA_SERVICE, UUIDS.DIS_SERVICE]
+      optionalServices: [UUIDS.OTA_SERVICE, UUIDS.DIS_SERVICE]
     });
   }
 

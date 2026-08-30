@@ -5,7 +5,9 @@
 const SoilPulseConfig = (() => {
   'use strict';
 
-  // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致
+  // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致（固件改名须保留此前缀）。
+  // 它参与 requestDevice 的过滤（与 services UUID 同一 filter 内 AND 匹配），
+  // 用于排除周围其他同样广播 0xFFE0 服务的设备；固件改名后须同步更新此处，否则网页搜不到设备
   const DEVICE_NAME_PREFIX = 'SoilPulse';
 
   // GATT UUID：使用 128 位完整小写字符串，防止 Bluefy/iOS 序列化失败
