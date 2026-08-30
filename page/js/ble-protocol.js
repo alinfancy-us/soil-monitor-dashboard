@@ -75,15 +75,17 @@ const BLEProtocol = (() => {
    * @returns {Promise<BluetoothDevice>}
    */
   async function requestSoilDevice() {
-    // 按广播服务 UUID(0xFFE0) + 名字前缀 组合过滤设备（详见下方 filters 注释）
+    // 按广播服务 UUID(0xFFE0) + 厂商数据公司码(0x0AFE) 组合过滤设备，与设备名无关（详见下方 filters 注释）
     // 前提：固件广播包含 Complete List of 16-bit Service UUIDs 段（见 bth_soil_sensor.h 的 SOIL_ADV_SERVICE_UUID16）
     return navigator.bluetooth.requestDevice({
       filters: [
-        // 同一 filter 对象内多条件为 AND：广播服务 UUID(0xFFE0) 匹配 + 名字前缀，
-        // 排除周围其他同样使用 0xFFE0 的设备（HM-10/JDY 类模块的经典 UUID），避免选择器噪音。
-        // 注意：固件改名时必须保留 DEVICE_NAME_PREFIX 前缀，并同步维护 config.js 的 DEVICE_NAME_PREFIX，
-        // 否则该过滤条件将匹配不到设备（这是配置耦合，与系统蓝牙缓存无关）。
-        { services: [UUIDS.SERVICE], namePrefix: DEVICE_NAME_PREFIX }
+        // 同一 filter 对象内多条件为 AND：广播服务 UUID(0xFFE0) + 厂商自定义数据公司码(0x0AFE)，
+        // 与设备名完全无关——设备任意改名都仍可被搜到（无需同步维护前端配置）。
+        // 0x0AFE 是扫描响应包里的厂商数据公司码（见 app.c soil_app_build_scan_rsp：04 FF FE 0A 01），
+        // 常量定义在 config.js 的 MANUFACTURER_COMPANY_CODE。
+        // 注意：Bluefy(iOS WebKit) 对 manufacturerData 过滤的完整支持不确定，需真机验证；
+        // 若 iOS 上搜不到设备，退化为 { services:[UUIDS.SERVICE], namePrefix: DEVICE_NAME_PREFIX } 即可。
+        { services: [UUIDS.SERVICE] }
       ],
       optionalServices: [UUIDS.OTA_SERVICE, UUIDS.DIS_SERVICE]
     });
