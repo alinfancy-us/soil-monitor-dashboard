@@ -90,6 +90,7 @@
      mainTabSettingPanel: document.getElementById('mainTabSettingPanel'),
      mainTabGuidePanel: document.getElementById('mainTabGuidePanel'),
      pageVersion: document.getElementById('pageVersion'),
+     downloadPdfBtn: document.getElementById('downloadPdfBtn'),
    };
  
    const state = {
@@ -1019,9 +1020,14 @@
      stopPolling();
      if (!DEBUG_ENABLED) return;
      state.pollTimer = setInterval(async () => {
-       if (state.characteristic && state.device?.gatt.connected) {
-         await readData().catch(e => log(`Poll failed: ${e.message}`));
+       if (!state.characteristic) return;
+       // 底层连接已断但 gattserverdisconnected 事件未触发（页面后台 / 平台差异）：
+       // 轮询主动校正 UI 状态，避免"断线但界面仍显示 Connected"
+       if (!state.device?.gatt.connected) {
+         onDisconnected();
+         return;
        }
+       await readData().catch(e => log(`Poll failed: ${e.message}`));
      }, POLL_INTERVAL);
    }
  
@@ -1033,6 +1039,9 @@
    }
  
    function onDisconnected() {
+     // 幂等保护：已被其它路径清理过（轮询 / visibilitychange / 用户点击）则直接返回，
+     // 避免重复 setStatus / 重复日志
+     if (state.characteristic === null) return;
      stopPolling();
      state.otaRunning = false;
      setOtaUiLock(false);
@@ -1257,7 +1266,28 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
    }
  
    els.connectBtn.addEventListener('click', () => {
-     state.device?.gatt.connected ? handleDisconnect() : handleConnect();
+     if (state.device?.gatt.connected) {
+       handleDisconnect();
+     } else {
+       // UI 可能残留"已连接"但底层已断（事件未触发）：先同步为断开，再发起新连接
+       if (state.device) onDisconnected();
+       handleConnect();
+     }
+   });
+
+   // 从后台回到前台（App 切换、标签页恢复）时校验连接：手机系统可能在后台终止 BLE 连接，
+   // 且 gattserverdisconnected 事件在 WebKit 上可能不补发，这里主动校正 UI
+   document.addEventListener('visibilitychange', () => {
+     if (document.visibilityState === 'visible' && state.device && !state.device.gatt.connected) {
+       onDisconnected();
+     }
+   });
+
+   // BFCache（前进/后退）恢复页面时同样校验一次
+   window.addEventListener('pageshow', () => {
+     if (state.device && !state.device.gatt.connected) {
+       onDisconnected();
+     }
    });
  
    els.clearCacheBtn.addEventListener('click', async () => {
@@ -1723,6 +1753,32 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
   els.mainTabDataBtn.addEventListener('click', () => switchMainTab('data'));
   els.mainTabGuideBtn.addEventListener('click', () => switchMainTab('guide'));
   els.mainTabSettingBtn.addEventListener('click', () => switchMainTab('setting'));
+
+  // Guide 面板 PDF 下载：原生 <a download> 在 iOS Safari / Bluefy(WebKit) 上常直接打开 PDF 预览。
+  // 改为 fetch -> Blob -> a.download 强制保存；失败时回退为新标签打开预览。
+  if (els.downloadPdfBtn) {
+    els.downloadPdfBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const url = els.downloadPdfBtn.getAttribute('href');
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        const objUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = objUrl;
+        a.download = 'SoilPulse-introduction.pdf';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+        log('PDF download triggered (blob)');
+      } catch (err) {
+        log(`PDF download failed, opening preview instead: ${err.message}`);
+        window.open(url, '_blank', 'noopener');
+      }
+    });
+  }
 
    let resizeTimer = null;
    window.addEventListener('resize', () => {
