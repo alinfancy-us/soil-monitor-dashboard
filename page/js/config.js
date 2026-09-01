@@ -7,7 +7,7 @@ const SoilPulseConfig = (() => {
 
   // 前端页面版本号：与 index.html 的 <script src="...?v=X"> 保持一致，每次功能变更递增。
   // 页面底部会显示该值，便于现场确认浏览器实际加载的是哪一版前端（排查缓存问题）
-  const PAGE_VERSION = '1.1.0';
+  const PAGE_VERSION = '1.2.1';
 
   // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致（固件改名须保留此前缀）。
   // 它参与 requestDevice 的过滤（与 services UUID 同一 filter 内 AND 匹配），
@@ -26,12 +26,17 @@ const SoilPulseConfig = (() => {
     TEMP_OFFSET_CHAR: '0000ffe8-0000-1000-8000-00805f9b34fb',
     // 校准状态读特征（1 字节标志位），须与固件 app_att.h 的 SOIL_CALIB_STATUS_CHAR_UUID 对齐
     CALIB_STATUS_CHAR: '0000ffe9-0000-1000-8000-00805f9b34fb',
+    // 设备改名写特征（≤9 字节可打印 ASCII），须与固件 app_att.h 的 SOIL_DEV_NAME_CHAR_UUID 对齐
+    DEV_NAME_CHAR: '0000ffea-0000-1000-8000-00805f9b34fb',
     // Telink OTA 升级服务（128bit，须与固件 app_att.c 的 TELINK_OTA_UUID_SERVICE / TELINK_SPP_DATA_OTA
     // 的 GATT 小端字节序反转后一致），仅 BLE_OTA_SERVER_ENABLE=1 的固件才有
     OTA_SERVICE: '00010203-0405-0607-0809-0a0b0c0d1912',
     OTA_CHAR: '00010203-0405-0607-0809-0a0b0c0d2b12',
     // 标准 Device Information Service，读 Firmware Revision String(0x2A26) 获取设备固件版本，须与固件 SOIL_FW_VERSION 编译值一致
     DIS_SERVICE: '0000180a-0000-1000-8000-00805f9b34fb',
+    // Generic Access 服务（0x1800）：读 GAP 设备名特征(0x2A00)展示设备蓝牙名，
+    // 必须列入 requestDevice optionalServices 才能访问（Web Bluetooth 安全模型）
+    GAP_SERVICE: '00001800-0000-1000-8000-00805f9b34fb',
     DIS_FW_REV_CHAR: '00002a26-0000-1000-8000-00805f9b34fb',
   };
 
@@ -68,6 +73,10 @@ const SoilPulseConfig = (() => {
     TEMP: 0x04,  // 温度偏移非 0
   };
 
+  // 设备名限制：BLE 广播包短名段上限 9 字节（见固件 soil_sensor_build_adv_data），
+  // 仅允许可打印 ASCII（0x20~0x7E）；前端输入即做字节数与字符集双重校验
+  const DEV_NAME_MAX_BYTES = 9;
+
   // Bluefy 深链唤起配置：iOS Safari 无 Web Bluetooth 时引导用 Bluefy 打开本 Dashboard，
   // 未安装则回退 App Store（deep link scheme 未公开文档，需真机验证）
   const DASHBOARD_URL = 'https://soilpulse.alinfancy.com';
@@ -90,6 +99,7 @@ const SoilPulseConfig = (() => {
 
   return {
     PAGE_VERSION,
+    DEV_NAME_MAX_BYTES,
     DEVICE_NAME_PREFIX,
     UUIDS,
     FIRMWARE_MANIFEST_URL,

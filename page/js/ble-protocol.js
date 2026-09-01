@@ -5,7 +5,7 @@ const BLEProtocol = (() => {
   'use strict';
 
   // 集中配置统一取自 page/js/config.js，方便后续维护管理
-  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC, FACTORY_RESET_MAGIC, HUM_CALIB_CMD, REFRESH_CMD, TEMP_OFFSET, CALIB_STATUS_FLAGS } = SoilPulseConfig;
+  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC, FACTORY_RESET_MAGIC, HUM_CALIB_CMD, REFRESH_CMD, TEMP_OFFSET, CALIB_STATUS_FLAGS, DEV_NAME_MAX_BYTES } = SoilPulseConfig;
   const RECORD_SIZE = 9;
   const MAX_RECORDS = 5;
   const PACKET_SIZE = 1 + RECORD_SIZE * MAX_RECORDS;
@@ -87,7 +87,7 @@ const BLEProtocol = (() => {
         // 若 iOS 上搜不到设备，退化为 { services:[UUIDS.SERVICE], namePrefix: DEVICE_NAME_PREFIX } 即可。
         { services: [UUIDS.SERVICE] }
       ],
-      optionalServices: [UUIDS.OTA_SERVICE, UUIDS.DIS_SERVICE]
+      optionalServices: [UUIDS.OTA_SERVICE, UUIDS.DIS_SERVICE, UUIDS.GAP_SERVICE]
     });
   }
 
@@ -103,7 +103,7 @@ const BLEProtocol = (() => {
     const dataChar = await service.getCharacteristic(UUIDS.DATA_CHAR);
     const timeChar = await service.getCharacteristic(UUIDS.TIME_CHAR);
 
-    // 同步时间戳
+    // 同步时间戳（设备端会在写时间后切换回省电连接参数，见固件 soil_time_sync_onWrite）
     const now = Math.floor(Date.now() / 1000);
     await timeChar.writeValue(Uint8Array.of(
       now & 0xff, (now >>> 8) & 0xff, (now >>> 16) & 0xff, (now >>> 24) & 0xff
@@ -118,77 +118,38 @@ const BLEProtocol = (() => {
       await dataChar.startNotifications();
     }
 
-    // 日均值特征（0xFFE3），Read Only；生产固件必带，读取失败不影响主流程
-    let dailyChar = null;
-    try {
-      dailyChar = await service.getCharacteristic(UUIDS.DAILY_CHAR);
-    } catch (e) {
-      console.warn('[BLE] daily characteristic not available:', e);
-    }
+    // 非关键特征并行发现（互不依赖，异常彼此隔离）：
+    // 浏览器内部仍会队列化 ATT 请求，但消除了 JS 层逐条 await 的调度停顿；
+    // 配合固件建连期快速连接参数（latency 0），整个初始化可压缩到 1~2 秒内完成
+    const getChar = async (uuid) => {
+      try { return await service.getCharacteristic(uuid); }
+      catch (e) { console.warn(`[BLE] characteristic ${uuid} not available:`, e); return null; }
+    };
 
+    const values = await Promise.allSettled([
+      getChar(UUIDS.DAILY_CHAR),
+      getChar(UUIDS.RESET_CHAR),
+      getChar(UUIDS.CALIB_CHAR),
+      getChar(UUIDS.REFRESH_CHAR),
+      getChar(UUIDS.TEMP_OFFSET_CHAR),
+      getChar(UUIDS.CALIB_STATUS_CHAR),
+      getChar(UUIDS.DEV_NAME_CHAR),
+      // Telink OTA 升级特征（128bit UUID，仅 BLE_OTA_SERVER_ENABLE=1 的固件才有）
+      (async () => {
+        const otaService = await server.getPrimaryService(UUIDS.OTA_SERVICE);
+        return otaService.getCharacteristic(UUIDS.OTA_CHAR);
+      })(),
+      // 标准 DIS 固件版本（Firmware Revision String），连接后用于新版本检测
+      (async () => {
+        const dis = await server.getPrimaryService(UUIDS.DIS_SERVICE);
+        const fwRevChar = await dis.getCharacteristic(UUIDS.DIS_FW_REV_CHAR);
+        return new TextDecoder().decode(await fwRevChar.readValue()).split(String.fromCharCode(0))[0].trim();
+      })(),
+    ]).then(results => results.map(r => (r.status === 'fulfilled' ? r.value : null)));
 
-    // Clear/Reset 写特征（0xFFE5），生产固件必带；获取失败不影响主流程
-    let resetChar = null;
-    try {
-      resetChar = await service.getCharacteristic(UUIDS.RESET_CHAR);
-    } catch (e) {
-      console.warn('[BLE] reset characteristic not available:', e);
-    }
+    const [dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, otaChar, fwVersion] = values;
 
-    // 湿度两点校准写特征（0xFFE6），生产固件必带；获取失败不影响主流程（仅禁用校准按钮）
-    let calibChar = null;
-    try {
-      calibChar = await service.getCharacteristic(UUIDS.CALIB_CHAR);
-    } catch (e) {
-      console.warn('[BLE] calibration characteristic not available:', e);
-    }
-
-    // 立即重新测量写特征（0xFFE7），生产固件必带；获取失败不影响主流程（仅禁用 refresh 按钮）
-    let refreshChar = null;
-    try {
-      refreshChar = await service.getCharacteristic(UUIDS.REFRESH_CHAR);
-    } catch (e) {
-      console.warn('[BLE] refresh characteristic not available:', e);
-    }
-
-    // 温度偏移校准特征（0xFFE8，Read | Write，1 字节 s8 = 0.1℃）；旧固件可能没有，获取失败不影响主流程
-    let tempOffsetChar = null;
-    try {
-      tempOffsetChar = await service.getCharacteristic(UUIDS.TEMP_OFFSET_CHAR);
-    } catch (e) {
-      console.warn('[BLE] temperature offset characteristic not available:', e);
-    }
-
-    // 校准状态读特征（0xFFE9，Read，1 字节标志位：bit0=干点已校准 bit1=湿点已校准 bit2=温度偏移非0），
-    // 告知前端设备上已持久化哪些校准；旧固件可能没有，获取失败不影响主流程（仅不显示"已校准"提示）
-    let calibStatusChar = null;
-    try {
-      calibStatusChar = await service.getCharacteristic(UUIDS.CALIB_STATUS_CHAR);
-    } catch (e) {
-      console.warn('[BLE] calibration status characteristic not available:', e);
-    }
-
-    // Telink OTA 升级特征（128bit UUID，仅 BLE_OTA_SERVER_ENABLE=1 的固件才有）；
-    // 获取失败不影响主流程（仅禁用 firmware update 按钮）
-    let otaChar = null;
-    try {
-      const otaService = await server.getPrimaryService(UUIDS.OTA_SERVICE);
-      otaChar = await otaService.getCharacteristic(UUIDS.OTA_CHAR);
-    } catch (e) {
-      console.warn('[BLE] OTA characteristic not available:', e);
-    }
-
-    // 读取标准 DIS 服务的固件版本（Firmware Revision String），用于连接后新版本检测；失败不影响主流程
-    let fwVersion = null;
-    try {
-      const dis = await server.getPrimaryService(UUIDS.DIS_SERVICE);
-      const fwRevChar = await dis.getCharacteristic(UUIDS.DIS_FW_REV_CHAR);
-      fwVersion = new TextDecoder().decode(await fwRevChar.readValue()).split(String.fromCharCode(0))[0].trim();
-    } catch (e) {
-      console.warn("[BLE] firmware revision not available:", e);
-    }
-
-    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, otaChar, fwVersion };
+    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, otaChar, fwVersion };
   }
 
   /**
@@ -276,6 +237,49 @@ const BLEProtocol = (() => {
     const v = new Uint8Array(1);
     new DataView(v.buffer).setInt8(0, clamped);
     await tempOffsetChar.writeValue(v);
+  }
+
+  /**
+   * 从 GAP 服务读取设备当前名字（Device Name 特征 0x2A00），用于页面展示设备蓝牙名。
+   * @param {BluetoothRemoteGATTServer} server
+   * @returns {Promise<string|null>} 设备名；读取失败返回 null
+   */
+  async function readGattDeviceName(server) {
+    try {
+      const gap = await server.getPrimaryService(UUIDS.GAP_SERVICE);
+      const nameChar = await gap.getCharacteristic('device_name');
+      const val = await nameChar.readValue();
+      return new TextDecoder().decode(val).split(String.fromCharCode(0))[0].trim();
+    } catch (e) {
+      console.warn('[BLE] GAP device name read failed:', e);
+      return null;
+    }
+  }
+
+  /**
+   * 写入 0xFFEA 设备改名：UTF-8 编码后必须 ≤9 字节且全为可打印 ASCII（与固件校验一致）
+   * @param {BluetoothRemoteGATTCharacteristic} devNameChar
+   * @param {string} name - 新名字
+   * @returns {Promise<{ok: boolean, message: string}>}
+   */
+  async function sendDeviceName(devNameChar, name) {
+    if (!devNameChar) {
+      return { ok: false, message: 'device name characteristic unavailable (old firmware?)' };
+    }
+    const bytes = new TextEncoder().encode(name);
+    if (bytes.length === 0) {
+      return { ok: false, message: 'device name cannot be empty' };
+    }
+    if (bytes.length > DEV_NAME_MAX_BYTES) {
+      return { ok: false, message: `device name too long: ${bytes.length}/${DEV_NAME_MAX_BYTES} bytes` };
+    }
+    for (const b of bytes) {
+      if (b < 0x20 || b > 0x7E) {
+        return { ok: false, message: 'only printable ASCII characters are allowed' };
+      }
+    }
+    await devNameChar.writeValue(bytes);
+    return { ok: true, message: 'saved' };
   }
 
   /**
@@ -566,6 +570,8 @@ const BLEProtocol = (() => {
     readTempOffset,
     sendTempOffset,
     readCalibStatus,
+    readGattDeviceName,
+    sendDeviceName,
     performOta,
   };
 })();

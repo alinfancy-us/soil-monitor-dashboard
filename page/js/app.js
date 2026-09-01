@@ -7,6 +7,7 @@
    // 集中配置统一取自 page/js/config.js，方便后续维护管理
    const {
      PAGE_VERSION,
+     DEV_NAME_MAX_BYTES,
      DEBUG_ENABLED, POLL_INTERVAL,
      DASHBOARD_URL, BLUEFY_APPSTORE_URL, BLUEFY_DEEPLINK,
      DAILY_EPOCH_MIN_VALID, DAILY_EPOCH_MAX_VALID, TREND_EPOCH_MAX_VALID,
@@ -91,6 +92,11 @@
      mainTabGuidePanel: document.getElementById('mainTabGuidePanel'),
      pageVersion: document.getElementById('pageVersion'),
      downloadPdfBtn: document.getElementById('downloadPdfBtn'),
+     deviceNameText: document.getElementById('deviceNameText'),
+     devNameInput: document.getElementById('devNameInput'),
+     devNameSaveBtn: document.getElementById('devNameSaveBtn'),
+     devNameByteCount: document.getElementById('devNameByteCount'),
+     devNameStatus: document.getElementById('devNameStatus'),
    };
  
    const state = {
@@ -105,6 +111,7 @@
     tempOffsetX10: 0,
     calibStatusChar: null,
     calibSaved: null,
+    devNameChar: null,
     otaChar: null,
     otaRunning: false,
     otaLastFirmware: null,
@@ -436,6 +443,15 @@
     const trendCtx = els.trendChart?.getContext('2d');
     if (trendCtx) trendCtx.clearRect(0, 0, els.trendChart.width, els.trendChart.height);
     renderDaily([]);
+  }
+
+  // 设备名本地缓存（按 device.id 分区）：系统按 MAC 缓存蓝牙名字，改名后设备选择器可能仍显示旧名；
+  // 页内展示用 GAP 实时值优先，读取失败时用这里的缓存兜底，保证页面始终显示最近一次改名结果
+  function cacheDeviceName(deviceId, name) {
+    try { localStorage.setItem(`${CACHE_PREFIX}deviceName:v1:${deviceId}`, String(name)); } catch (_) {}
+  }
+  function loadCachedDeviceName(deviceId) {
+    try { return localStorage.getItem(`${CACHE_PREFIX}deviceName:v1:${deviceId}`) || null; } catch (_) { return null; }
   }
 
   // 加载指定设备（device.id）自己的历史缓存并回显到图表/表格。
@@ -1057,8 +1073,10 @@
      state.otaRunning = false;
      state.fwUpdate = null;
      renderFirmwareCard();
-     // 断开后隐藏"已校准"徽标（下次连接时按设备回读状态重新渲染）
+     // 断开后隐藏"已校准"徽标与设备名（下次连接时重新读取）
      renderCalibHints(null);
+     if (els.deviceNameText) els.deviceNameText.classList.add('hidden');
+     if (els.devNameStatus) els.devNameStatus.textContent = '';
      log('Device disconnected');
    }
  
@@ -1183,7 +1201,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        if (token !== connectToken) return;   // 期间用户又发起了新连接，丢弃本次
 
        // 阶段2：gatt.connect + 服务/特征发现，由 finishConnect 内部保证 5s 超时
-       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
+       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
          device,
          (records, hex) => {
            log(`Notification: ${hex}`);
@@ -1214,6 +1232,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        state.refreshChar = refreshChar;
        state.tempOffsetChar = tempOffsetChar;
        state.calibStatusChar = calibStatusChar;
+       state.devNameChar = devNameChar;
        state.otaChar = otaChar;
        state.fwVersion = fwVersion;
        checkFirmwareUpdate();
@@ -1245,6 +1264,22 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
 
        // 读取设备已保存的校准状态（0xFFE9），在干/湿校准点展示"已校准"提示（只提示存在性，不展示具体数值）
        await refreshCalibHints();
+
+       // 读取设备名（GAP 0x2A00 实时值）展示在状态栏，并预填 Setting 改名输入框。
+       // 三级优先：GAP 实时 -> 本地缓存（系统可能按 MAC 缓存旧名）-> device.name；
+       // GAP 读到新名即同步写缓存，下次 GAP 偶发失败时仍能显示正确名字
+       let gattName = null;
+       try { gattName = await BLEProtocol.readGattDeviceName(device.gatt); } catch (_) {}
+       if (gattName) cacheDeviceName(device.id, gattName);
+       const displayName = gattName || loadCachedDeviceName(device.id) || device.name || 'SoilPulse';
+       if (els.deviceNameText) {
+         els.deviceNameText.textContent = displayName;
+         els.deviceNameText.classList.remove('hidden');
+       }
+       if (els.devNameInput) {
+         els.devNameInput.value = displayName;
+         updateDevNameByteCount();
+       }
      } catch (err) {
        if (token !== connectToken) return;   // 超时/失败期间用户已重新点击，不被覆盖
        setStatus('disconnected');
@@ -1352,7 +1387,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
   // 校准前强制设备用当前探头状态立即重测，并等待新测量结果到达。
   // 原因：固件校准使用的是"最近一次测量"（s_last_measure），若用户切换探头状态（如浸水）
   // 后设备尚未采样，固件会用旧状态读数做校准，导致"两点过近"被拒绝（gap < 50mV）。
-  async function waitForHumiditySample(timeoutMs = 4000) {
+  async function waitForHumiditySample(timeoutMs = 8000) {
     const t0 = Date.now();
     const prev = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
     while (Date.now() - t0 < timeoutMs) {
@@ -1376,40 +1411,33 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
       return;
     }
 
-    // 先强制设备用当前探头状态立即重测，避免固件用旧状态读数做校准而被"两点过近"拒绝
-    els.calibDryBtn.disabled = true;
-    els.calibWetBtn.disabled = true;
-    els.calibStatus.textContent = 'Measuring current probe state…';
-    if (state.refreshChar) {
-      try { await BLEProtocol.sendRefresh(state.refreshChar); } catch (_) { log('Refresh before calibration failed (ignored)'); }
-    }
-    const latest = await waitForHumiditySample();
-    const humNow = latest ? latest.hum : null;
-
-    // 用最新读数构造确认弹窗，让用户确认探头状态与设备读到的一致（不一致大概率会被固件拒绝）
+    // 确认弹窗：提示设备将先测量当前探头状态，再用本次新鲜采样自动应用校准（取电量稳定采样的值）
     const expectDry = point === 'dry';
-    const mismatch = humNow !== null && (expectDry ? humNow > 35 : humNow < 65);
+    const latest = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
+    const humNow = latest ? latest.hum : null;
     const baseMsg = point === 'dry'
       ? 'Confirm the probe is fully dry in open air, then apply dry (0%) calibration?'
       : 'Confirm the probe is fully submerged in water, then apply wet (100%) calibration?';
     const msg = humNow === null
-      ? baseMsg
-      : `Current moisture reading: ${humNow.toFixed(1)}%. ${expectDry ? 'Dry' : 'Wet'} calibration uses this reading. Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in water'}?`
-        + (mismatch ? '\n\n⚠️ Warning: the current reading looks inconsistent with the expected dry/wet state — the calibration may be rejected. Move the probe and try again.' : '');
-    if (!window.confirm(msg)) {
-      els.calibDryBtn.disabled = false;
-      els.calibWetBtn.disabled = false;
-      return;
-    }
+      ? `${baseMsg}
 
-    els.calibStatus.textContent = `Applying ${label} calibration…`;
+The device will measure the current probe state first, then apply the calibration automatically.`
+      : `Latest reading: ${humNow.toFixed(1)}%.
+
+The device will measure the current probe state first, then apply ${expectDry ? 'dry' : 'wet'} calibration.
+Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in water'}?`;
+    if (!window.confirm(msg)) return;
+
+    els.calibDryBtn.disabled = true;
+    els.calibWetBtn.disabled = true;
+    els.calibStatus.textContent = 'Calibration started — measuring current probe state…';
     try {
+      // 固件 0xFFE6 写回调现在只登记校准点并触发立即测量，测量完成后自动用新鲜采样值应用
       await BLEProtocol.sendHumCalib(state.calibChar, point);
       log(`Moisture ${label} calibration command sent (0xFFE6)`);
-      // 回读设备真实校准状态做二次确认：两点过近时固件会拒绝（设备日志打 rejected）。
-      // 但 0xFFE9 读取不可用（旧固件 / GATT 缓存 / 读取异常）只说明"无法回读"，
-      // 不代表校准被拒绝——设备串口日志 "[SOIL][GATT] hum calib point=X applied" 才是权威结果，
-      // 此处绝不能把读取失败误报成 rejected
+
+      // 等待设备完成新测量（固件随后自动应用校准并推送 Notify），再回读 0xFFE9 确认
+      await waitForHumiditySample();
       const readState = await refreshCalibHints();
       if (readState === 'ok') {
         const ok = point === 'dry' ? !!state.calibSaved?.dry : !!state.calibSaved?.wet;
@@ -1427,6 +1455,49 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
       els.calibWetBtn.disabled = false;
     }
   }
+
+  // ---- 设备改名：字节数/字符集实时校验 + 保存 ----
+  function updateDevNameByteCount() {
+    const v = els.devNameInput?.value || '';
+    const bytes = new TextEncoder().encode(v);
+    if (els.devNameByteCount) els.devNameByteCount.textContent = `${bytes.length} / ${DEV_NAME_MAX_BYTES} bytes`;
+    const okLen = bytes.length >= 1 && bytes.length <= DEV_NAME_MAX_BYTES;
+    const okAscii = bytes.length > 0 && bytes.every(b => b >= 0x20 && b <= 0x7E);
+    if (els.devNameSaveBtn) els.devNameSaveBtn.disabled = !okLen || !okAscii;
+    if (els.devNameStatus && v && (!okLen || !okAscii)) {
+      els.devNameStatus.textContent = 'Only printable ASCII, max 9 bytes';
+    }
+  }
+
+  els.devNameInput.addEventListener('input', updateDevNameByteCount);
+  els.devNameSaveBtn.addEventListener('click', async () => {
+    if (state.otaRunning) {
+      els.devNameStatus.textContent = 'Ignored: OTA update is running';
+      return;
+    }
+    if (!state.device?.gatt.connected || !state.devNameChar) {
+      els.devNameStatus.textContent = 'Connect a device to change its name';
+      return;
+    }
+    const name = (els.devNameInput.value || '').trim();
+    els.devNameSaveBtn.disabled = true;
+    els.devNameStatus.textContent = 'Saving…';
+    try {
+      const res = await BLEProtocol.sendDeviceName(state.devNameChar, name);
+      if (res.ok) {
+        cacheDeviceName(state.device.id, name);
+        if (els.deviceNameText) els.deviceNameText.textContent = name;
+        els.devNameStatus.textContent = 'Name saved. If it still shows the old name, please reconnect to show the new name.';
+        log(`Device name saved: ${name}`);
+      } else {
+        els.devNameStatus.textContent = `Save failed: ${res.message}`;
+      }
+    } catch (err) {
+      els.devNameStatus.textContent = `Save failed: ${err.message || err}`;
+    } finally {
+      updateDevNameByteCount();
+    }
+  });
 
   els.calibDryBtn.addEventListener('click', () => handleCalibClick('dry', 'Dry'));
   els.calibWetBtn.addEventListener('click', () => handleCalibClick('wet', 'Wet'));
