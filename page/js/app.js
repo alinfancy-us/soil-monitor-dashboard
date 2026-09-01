@@ -6,6 +6,7 @@
  
    // 集中配置统一取自 page/js/config.js，方便后续维护管理
    const {
+     PAGE_VERSION,
      DEBUG_ENABLED, POLL_INTERVAL,
      DASHBOARD_URL, BLUEFY_APPSTORE_URL, BLUEFY_DEEPLINK,
      DAILY_EPOCH_MIN_VALID, DAILY_EPOCH_MAX_VALID, TREND_EPOCH_MAX_VALID,
@@ -30,6 +31,8 @@
     calibDryBtn: document.getElementById('calibDryBtn'),
     calibWetBtn: document.getElementById('calibWetBtn'),
     calibStatus: document.getElementById('calibStatus'),
+    calibDryBadge: document.getElementById('calibDryBadge'),
+    calibWetBadge: document.getElementById('calibWetBadge'),
     refreshBtn: document.getElementById('refreshBtn'),
     otaProgressWrap: document.getElementById('otaProgressWrap'),
     otaProgressBar: document.getElementById('otaProgressBar'),
@@ -86,6 +89,7 @@
      mainTabDataPanel: document.getElementById('mainTabDataPanel'),
      mainTabSettingPanel: document.getElementById('mainTabSettingPanel'),
      mainTabGuidePanel: document.getElementById('mainTabGuidePanel'),
+     pageVersion: document.getElementById('pageVersion'),
    };
  
    const state = {
@@ -98,6 +102,8 @@
     refreshChar: null,
     tempOffsetChar: null,
     tempOffsetX10: 0,
+    calibStatusChar: null,
+    calibSaved: null,
     otaChar: null,
     otaRunning: false,
     otaLastFirmware: null,
@@ -1037,10 +1043,13 @@
      state.refreshChar = null;
      state.tempOffsetChar = null;
      state.tempOffsetX10 = 0;
+     state.calibStatusChar = null;
      state.otaChar = null;
      state.otaRunning = false;
      state.fwUpdate = null;
      renderFirmwareCard();
+     // 断开后隐藏"已校准"徽标（下次连接时按设备回读状态重新渲染）
+     renderCalibHints(null);
      log('Device disconnected');
    }
  
@@ -1165,7 +1174,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        if (token !== connectToken) return;   // 期间用户又发起了新连接，丢弃本次
 
        // 阶段2：gatt.connect + 服务/特征发现，由 finishConnect 内部保证 5s 超时
-       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
+       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
          device,
          (records, hex) => {
            log(`Notification: ${hex}`);
@@ -1195,6 +1204,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        state.calibChar = calibChar;
        state.refreshChar = refreshChar;
        state.tempOffsetChar = tempOffsetChar;
+       state.calibStatusChar = calibStatusChar;
        state.otaChar = otaChar;
        state.fwVersion = fwVersion;
        checkFirmwareUpdate();
@@ -1223,6 +1233,9 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        setStatus('connected');
        log('Connected & Listening for updates.');
        startPolling();
+
+       // 读取设备已保存的校准状态（0xFFE9），在干/湿校准点展示"已校准"提示（只提示存在性，不展示具体数值）
+       await refreshCalibHints();
      } catch (err) {
        if (token !== connectToken) return;   // 超时/失败期间用户已重新点击，不被覆盖
        setStatus('disconnected');
@@ -1268,6 +1281,61 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
      }
    });
 
+  // 读取设备 0xFFE9 校准状态并刷新干/湿校准点的"已校准"提示。
+  // 返回 'ok'（成功读到设备真实校准状态，state.calibSaved 有效）或 'unavailable'
+  // （特征缺失/读取失败——常见于设备还是旧固件（无 0xFFE9）、iOS/Bluefy 缓存了旧 GATT
+  //  属性表、或浏览器缓存了旧版页面脚本）。调用方必须区分这两种情况：
+  //  读取通道不可用 ≠ 校准被设备拒绝。
+  async function refreshCalibHints() {
+    if (!state.calibStatusChar) {
+      renderCalibHints(null);
+      log('Calibration status characteristic unavailable: old firmware, cached GATT table or stale page cache');
+      return 'unavailable';
+    }
+    try {
+      const saved = await BLEProtocol.readCalibStatus(state.calibStatusChar);
+      renderCalibHints(saved);
+      log(`Calibration status read (0xFFE9): dry=${saved.dry} wet=${saved.wet} temp=${saved.temp}`);
+      return 'ok';
+    } catch (err) {
+      renderCalibHints(null);
+      log(`Calibration status read failed: ${err.message || err}`);
+      return 'unavailable';
+    }
+  }
+
+  // 渲染干/湿校准点的"已校准"徽标与汇总文案：只提示设备上存在哪些校准，不展示具体校准数值
+  function renderCalibHints(saved) {
+    state.calibSaved = saved;
+    els.calibDryBadge.classList.toggle('hidden', !saved?.dry);
+    els.calibWetBadge.classList.toggle('hidden', !saved?.wet);
+    if (saved === null) return;
+    const parts = [];
+    if (saved.dry) parts.push('dry');
+    if (saved.wet) parts.push('wet');
+    if (saved.temp) parts.push('temperature offset');
+    els.calibStatus.textContent = parts.length
+      ? `Saved on device (survives reboot): ${parts.join(', ')} calibration`
+      : 'No calibration saved on device yet';
+  }
+
+  // 校准前强制设备用当前探头状态立即重测，并等待新测量结果到达。
+  // 原因：固件校准使用的是"最近一次测量"（s_last_measure），若用户切换探头状态（如浸水）
+  // 后设备尚未采样，固件会用旧状态读数做校准，导致"两点过近"被拒绝（gap < 50mV）。
+  async function waitForHumiditySample(timeoutMs = 4000) {
+    const t0 = Date.now();
+    const prev = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
+    while (Date.now() - t0 < timeoutMs) {
+      await new Promise(resolve => setTimeout(resolve, 400));
+      try { await readData(); } catch (_) { /* 单次读取失败不中断，继续等待 */ }
+      const latest = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
+      if (latest && (!prev || latest.timestamp !== prev.timestamp || latest.hum !== prev.hum)) {
+        return latest;
+      }
+    }
+    return state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
+  }
+
   async function handleCalibClick(point, label) {
     if (state.otaRunning) {
       log('Calibration ignored: OTA update is running');
@@ -1277,18 +1345,50 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
       els.calibStatus.textContent = 'Connect a device to enable calibration';
       return;
     }
-    const msg = point === 'dry'
-      ? 'Confirm the probe is fully dry in open air, then apply dry (0%) calibration?'
-      : 'Confirm the probe is fully submerged in water, then apply wet (100%) calibration?';
-    if (!window.confirm(msg)) return;
 
+    // 先强制设备用当前探头状态立即重测，避免固件用旧状态读数做校准而被"两点过近"拒绝
     els.calibDryBtn.disabled = true;
     els.calibWetBtn.disabled = true;
+    els.calibStatus.textContent = 'Measuring current probe state…';
+    if (state.refreshChar) {
+      try { await BLEProtocol.sendRefresh(state.refreshChar); } catch (_) { log('Refresh before calibration failed (ignored)'); }
+    }
+    const latest = await waitForHumiditySample();
+    const humNow = latest ? latest.hum : null;
+
+    // 用最新读数构造确认弹窗，让用户确认探头状态与设备读到的一致（不一致大概率会被固件拒绝）
+    const expectDry = point === 'dry';
+    const mismatch = humNow !== null && (expectDry ? humNow > 35 : humNow < 65);
+    const baseMsg = point === 'dry'
+      ? 'Confirm the probe is fully dry in open air, then apply dry (0%) calibration?'
+      : 'Confirm the probe is fully submerged in water, then apply wet (100%) calibration?';
+    const msg = humNow === null
+      ? baseMsg
+      : `Current moisture reading: ${humNow.toFixed(1)}%. ${expectDry ? 'Dry' : 'Wet'} calibration uses this reading. Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in water'}?`
+        + (mismatch ? '\n\n⚠️ Warning: the current reading looks inconsistent with the expected dry/wet state — the calibration may be rejected. Move the probe and try again.' : '');
+    if (!window.confirm(msg)) {
+      els.calibDryBtn.disabled = false;
+      els.calibWetBtn.disabled = false;
+      return;
+    }
+
     els.calibStatus.textContent = `Applying ${label} calibration…`;
     try {
       await BLEProtocol.sendHumCalib(state.calibChar, point);
-      els.calibStatus.textContent = `${label} calibration applied`;
       log(`Moisture ${label} calibration command sent (0xFFE6)`);
+      // 回读设备真实校准状态做二次确认：两点过近时固件会拒绝（设备日志打 rejected）。
+      // 但 0xFFE9 读取不可用（旧固件 / GATT 缓存 / 读取异常）只说明"无法回读"，
+      // 不代表校准被拒绝——设备串口日志 "[SOIL][GATT] hum calib point=X applied" 才是权威结果，
+      // 此处绝不能把读取失败误报成 rejected
+      const readState = await refreshCalibHints();
+      if (readState === 'ok') {
+        const ok = point === 'dry' ? !!state.calibSaved?.dry : !!state.calibSaved?.wet;
+        els.calibStatus.textContent = ok
+          ? `${label} calibration saved on device`
+          : `${label} calibration rejected (dry/wet points too close)`;
+      } else {
+        els.calibStatus.textContent = `${label} calibration command sent (device calibration status not readable)`;
+      }
     } catch (err) {
       els.calibStatus.textContent = `${label} calibration failed: ${err.message || err}`;
       log(`Moisture calibration failed: ${err.message || err}`);
@@ -1641,6 +1741,9 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
 
    updateDailyMetricButtons();
   updateTempUnitUI();
+  if (els.pageVersion) {
+    els.pageVersion.textContent = `SoilPulse dashboard v${PAGE_VERSION}`;
+  }
   state.activeDeviceId = getLastDeviceId();
   if (state.activeDeviceId) restoreCachedCharts(state.activeDeviceId);
  

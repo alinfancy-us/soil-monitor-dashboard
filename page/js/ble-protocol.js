@@ -5,7 +5,7 @@ const BLEProtocol = (() => {
   'use strict';
 
   // 集中配置统一取自 page/js/config.js，方便后续维护管理
-  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC, FACTORY_RESET_MAGIC, HUM_CALIB_CMD, REFRESH_CMD, TEMP_OFFSET } = SoilPulseConfig;
+  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC, FACTORY_RESET_MAGIC, HUM_CALIB_CMD, REFRESH_CMD, TEMP_OFFSET, CALIB_STATUS_FLAGS } = SoilPulseConfig;
   const RECORD_SIZE = 9;
   const MAX_RECORDS = 5;
   const PACKET_SIZE = 1 + RECORD_SIZE * MAX_RECORDS;
@@ -68,7 +68,7 @@ const BLEProtocol = (() => {
    */
   /** 连接阶段超时（毫秒）：选完设备后，gatt.connect + 服务/特征发现应在 5s 内完成。
    *  蓝牙不可用 / 设备处于睡眠时这一步会挂起，超时后由 app.js 复位 UI。 */
-  const CONNECT_TIMEOUT_MS = 5000;
+  const CONNECT_TIMEOUT_MS = 8000;
 
   /**
    * 阶段1：仅弹出设备选择器（不设超时——用户挑设备时长不受限）。
@@ -159,6 +159,15 @@ const BLEProtocol = (() => {
       console.warn('[BLE] temperature offset characteristic not available:', e);
     }
 
+    // 校准状态读特征（0xFFE9，Read，1 字节标志位：bit0=干点已校准 bit1=湿点已校准 bit2=温度偏移非0），
+    // 告知前端设备上已持久化哪些校准；旧固件可能没有，获取失败不影响主流程（仅不显示"已校准"提示）
+    let calibStatusChar = null;
+    try {
+      calibStatusChar = await service.getCharacteristic(UUIDS.CALIB_STATUS_CHAR);
+    } catch (e) {
+      console.warn('[BLE] calibration status characteristic not available:', e);
+    }
+
     // Telink OTA 升级特征（128bit UUID，仅 BLE_OTA_SERVER_ENABLE=1 的固件才有）；
     // 获取失败不影响主流程（仅禁用 firmware update 按钮）
     let otaChar = null;
@@ -179,7 +188,7 @@ const BLEProtocol = (() => {
       console.warn("[BLE] firmware revision not available:", e);
     }
 
-    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, otaChar, fwVersion };
+    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, otaChar, fwVersion };
   }
 
   /**
@@ -267,6 +276,27 @@ const BLEProtocol = (() => {
     const v = new Uint8Array(1);
     new DataView(v.buffer).setInt8(0, clamped);
     await tempOffsetChar.writeValue(v);
+  }
+
+  /**
+   * 读取 0xFFE9 校准状态标志（1 字节：bit0=干点已校准 bit1=湿点已校准 bit2=温度偏移非0）
+   * @param {BluetoothRemoteGATTCharacteristic} calibStatusChar
+   * @returns {Promise<{dry: boolean, wet: boolean, temp: boolean}>} 设备上已持久化存在的校准项
+   */
+  async function readCalibStatus(calibStatusChar) {
+    if (!calibStatusChar) {
+      throw new Error('calibration status characteristic unavailable');
+    }
+    const val = await calibStatusChar.readValue();
+    if (val.byteLength < 1) {
+      throw new Error('invalid calibration status length');
+    }
+    const flags = new DataView(val.buffer, val.byteOffset, val.byteLength).getUint8(0);
+    return {
+      dry: !!(flags & CALIB_STATUS_FLAGS.DRY),
+      wet: !!(flags & CALIB_STATUS_FLAGS.WET),
+      temp: !!(flags & CALIB_STATUS_FLAGS.TEMP),
+    };
   }
 
   /**
@@ -535,6 +565,7 @@ const BLEProtocol = (() => {
     sendRefresh,
     readTempOffset,
     sendTempOffset,
+    readCalibStatus,
     performOta,
   };
 })();

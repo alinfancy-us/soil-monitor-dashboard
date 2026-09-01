@@ -5,6 +5,10 @@
 const SoilPulseConfig = (() => {
   'use strict';
 
+  // 前端页面版本号：与 index.html 的 <script src="...?v=X"> 保持一致，每次功能变更递增。
+  // 页面底部会显示该值，便于现场确认浏览器实际加载的是哪一版前端（排查缓存问题）
+  const PAGE_VERSION = '1.1.0';
+
   // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致（固件改名须保留此前缀）。
   // 它参与 requestDevice 的过滤（与 services UUID 同一 filter 内 AND 匹配），
   // 用于排除周围其他同样广播 0xFFE0 服务的设备；固件改名后须同步更新此处，否则网页搜不到设备
@@ -20,6 +24,8 @@ const SoilPulseConfig = (() => {
     CALIB_CHAR: '0000ffe6-0000-1000-8000-00805f9b34fb',
     REFRESH_CHAR: '0000ffe7-0000-1000-8000-00805f9b34fb',
     TEMP_OFFSET_CHAR: '0000ffe8-0000-1000-8000-00805f9b34fb',
+    // 校准状态读特征（1 字节标志位），须与固件 app_att.h 的 SOIL_CALIB_STATUS_CHAR_UUID 对齐
+    CALIB_STATUS_CHAR: '0000ffe9-0000-1000-8000-00805f9b34fb',
     // Telink OTA 升级服务（128bit，须与固件 app_att.c 的 TELINK_OTA_UUID_SERVICE / TELINK_SPP_DATA_OTA
     // 的 GATT 小端字节序反转后一致），仅 BLE_OTA_SERVER_ENABLE=1 的固件才有
     OTA_SERVICE: '00010203-0405-0607-0809-0a0b0c0d1912',
@@ -54,6 +60,14 @@ const SoilPulseConfig = (() => {
     STEP_X10: 5,
   };
 
+  // 校准状态标志位（0xFFE9 读特征值），须与固件 bth_soil_sensor.h 的 SOIL_CALIB_FLAG_* 对齐；
+  // 只表示"设备上存在该校准"，用于页面提示，不携带具体校准数值
+  const CALIB_STATUS_FLAGS = {
+    DRY: 0x01,   // 干燥点(0%)已校准
+    WET: 0x02,   // 浸水点(100%)已校准
+    TEMP: 0x04,  // 温度偏移非 0
+  };
+
   // Bluefy 深链唤起配置：iOS Safari 无 Web Bluetooth 时引导用 Bluefy 打开本 Dashboard，
   // 未安装则回退 App Store（deep link scheme 未公开文档，需真机验证）
   const DASHBOARD_URL = 'https://soilpulse.alinfancy.com';
@@ -75,6 +89,7 @@ const SoilPulseConfig = (() => {
   const CACHE_MAX_TOTAL_BYTES = 512 * 1024;
 
   return {
+    PAGE_VERSION,
     DEVICE_NAME_PREFIX,
     UUIDS,
     FIRMWARE_MANIFEST_URL,
@@ -83,6 +98,7 @@ const SoilPulseConfig = (() => {
     HUM_CALIB_CMD,
     REFRESH_CMD,
     TEMP_OFFSET,
+    CALIB_STATUS_FLAGS,
     DASHBOARD_URL,
     BLUEFY_APPSTORE_URL,
     BLUEFY_DEEPLINK,
