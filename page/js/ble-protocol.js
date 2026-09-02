@@ -189,7 +189,7 @@ const BLEProtocol = (() => {
   }
 
   /**
-   * 任务9：向 0xFFE5 写入 4 字节魔术字 "CLR1"，请求设备清空历史/日均值 RAM 缓存
+   * 向 0xFFE5 写入 4 字节魔术字 "CLR1"，请求设备清空历史/日均值 RAM 缓存
    */
   async function sendReset(resetChar) {
     if (!resetChar) {

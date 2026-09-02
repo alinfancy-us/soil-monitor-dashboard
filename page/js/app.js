@@ -1315,7 +1315,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
      const msg = 'Clear cached data on this browser AND reset the connected device history? This cannot be undone.';
      if (!window.confirm(msg)) return;
      clearAllCache();
-     // 任务9：向已连接设备下发 Clear/Reset 指令，清空芯片 RAM 历史/日均值
+     // 向已连接设备下发 Clear/Reset 指令，清空芯片 RAM 历史/日均值
      if (state.resetChar) {
        try {
          await BLEProtocol.sendReset(state.resetChar);

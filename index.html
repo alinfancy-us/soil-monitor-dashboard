@@ -423,13 +423,11 @@
       <div id="settingContent" class="hidden">
         <!-- Device name（最上方） -->
         <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
-          <h2 class="mb-1 text-sm font-semibold text-slate-600">Device name</h2>
+          <h2 class="mb-1 text-sm font-semibold text-slate-600">🏷️ Device name</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-  The name is shown in the Bluetooth device list (advertisement).
-  <b>Up to 9 printable ASCII characters</b> (letters, numbers, <code>-</code> and <code>_</code>).
-  Note: Phones cache device names by MAC address. If the picker still shows the old name after renaming, 
-  <b>this is normal; reconnecting to the device will update the name</b>.
-</p>
+            Shown in the Bluetooth device list. <b>Up to 9 printable ASCII characters</b>.
+            If the phone list still shows the old name after renaming, reconnect once — it refreshes.
+          </p>
           <div class="flex items-center gap-2">
             <input id="devNameInput" type="text" maxlength="9" autocomplete="off" spellcheck="false"
               placeholder="e.g. SoilPulse-1"
@@ -448,7 +446,7 @@
         <!-- Firmware update -->
         <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
           <div class="flex items-center justify-between gap-2">
-            <h2 class="text-sm font-semibold text-slate-600">Firmware</h2>
+            <h2 class="text-sm font-semibold text-slate-600">📦 Firmware</h2>
             <span id="otaCurrentVersionBadge" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-slate-100 text-slate-500">--</span>
           </div>
           <div id="otaUpdateHint" class="hidden mt-3 p-4 rounded-2xl bg-violet-600 text-white">
@@ -481,9 +479,9 @@
 
         <!-- Sensor calibration -->
         <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
-          <h2 class="mb-1 text-sm font-semibold text-slate-600">Sensor calibration</h2>
+          <h2 class="mb-1 text-sm font-semibold text-slate-600">🎯 Sensor calibration</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            <b>Uses the device's live moisture reading. Place the probe first, tap the matching calibration button below, and wait a few minutes to see the updated calibrated moisture.</b>
+            Improves moisture accuracy for your soil. Put the probe in the matching state, tap the button, and the device recalibrates from a fresh reading.
           </p>
           <div class="calibration-grid grid grid-cols-2 gap-3">
             <button id="calibDryBtn" disabled
@@ -506,9 +504,9 @@
 
         <!-- Temperature offset -->
         <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
-          <h2 class="mb-1 text-sm font-semibold text-slate-600">Temperature offset</h2>
+          <h2 class="mb-1 text-sm font-semibold text-slate-600">🌡️ Temperature offset</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            Correct the soil temperature reading by up to ±10 ℃. The offset is stored on the device in memory and cleared after a factory reset or battery replacement.
+            Trim the reading by up to ±10 ℃. Saved on the device until you reset it.
           </p>
           <div class="flex items-center gap-3">
             <input id="tempOffsetSlider" type="range" min="-100" max="100" step="5" value="0" class="flex-1 h-2 rounded-full accent-emerald-600">
@@ -526,9 +524,9 @@
 
         <!-- Reset -->
         <div class="dashboard-card p-4 rounded-2xl border-rose-100 sm:p-5">
-          <h2 class="mb-1 text-sm font-semibold text-rose-600">Reset</h2>
+          <h2 class="mb-1 text-sm font-semibold text-rose-600">♻️ Reset</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            Factory reset clears all stored data (history, daily averages, moisture calibration and temperature offset) and reboots the device. The connection will drop.
+            Clears history, calibration and device name, then reboots. The connection will drop.
           </p>
           <div class="flex justify-end mt-3">
             <button id="factoryResetBtn" disabled
@@ -545,83 +543,87 @@
       <div class="dashboard-card p-5 rounded-2xl sm:p-6">
         <h2 class="text-lg font-bold text-emerald-800">Welcome to SoilPulse 👋</h2>
         <p class="mt-1 text-sm leading-6 text-slate-500">
-          SoilPulse is a Bluetooth soil sensor that measures soil temperature, moisture and battery level. This quick guide helps you get started in a few minutes.
+          This quick guide covers the web dashboard itself — for batteries, planting depth and hardware care, check the quick-start PDF below.
         </p>
 
-        <div class="mt-4">
-          <a id="downloadPdfBtn" href="page/doc/introduction.pdf" download class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98]">
-            📄 Download introduction (PDF)
-          </a>
-          <p class="mt-1 text-xs text-slate-400">A printable quick-start guide — opens or saves as a PDF.</p>
-        </div>
-
-        <div class="mt-6">
-          <h3 class="mb-3 text-sm font-semibold text-slate-600">Getting started</h3>
-          <div class="guide-step">
-            <span class="guide-num">1</span>
-            <div>
-              <p class="text-sm font-medium text-slate-700">Tap “Connect device”</p>
-              <p class="text-xs leading-5 text-slate-500">Your browser opens a Bluetooth device list. Pick the SoilPulse detector closest to you.</p>
-            </div>
-          </div>
-          <div class="guide-step">
-            <span class="guide-num">2</span>
-            <div>
-              <p class="text-sm font-medium text-slate-700">Watch live readings</p>
-              <p class="text-xs leading-5 text-slate-500">Once connected, the <b>Data</b> tab shows temperature, moisture and battery — updated in real time.</p>
-            </div>
-          </div>
-          <div class="guide-step">
-            <span class="guide-num">3</span>
-            <div>
-              <p class="text-sm font-medium text-slate-700">Review trends</p>
-              <p class="text-xs leading-5 text-slate-500">Open the <b>Data</b> tab to browse every measurement and see 5-record or 7-day average charts.</p>
-            </div>
+        <!-- Download 引导：置于 Guide 顶部，紧跟介绍句 -->
+        <div class="mt-4 flex items-center gap-3 p-3 rounded-2xl bg-emerald-50 border border-emerald-100">
+          <span class="text-2xl">📄</span>
+          <div class="flex-1">
+            <p class="text-sm font-semibold text-emerald-800">Quick-start PDF</p>
+            <a id="downloadPdfBtn" href="page/doc/introduction.pdf" download
+              class="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 underline underline-offset-2">Download introduction →</a>
           </div>
         </div>
 
-        <div class="mt-6">
-          <h3 class="mb-3 text-sm font-semibold text-slate-600">Calibration</h3>
-          <p class="text-xs leading-5 text-slate-500">
-            <b>In the Setting tab, place the probe fully dry in open air and tap Dry calibration, then submerge the probe in water and tap Wet calibration. This improves moisture accuracy for the soil you use.</b>
-          </p>
+        <!-- Getting started：三步核心流程 -->
+        <h3 class="mt-6 mb-3 text-sm font-semibold text-slate-600">Getting started</h3>
+        <div class="guide-step">
+          <span class="guide-num">1</span>
+          <p class="text-sm text-slate-600"><b class="text-slate-700">Connect</b> — tap <b>Connect device</b> and pick your SoilPulse detector.</p>
+        </div>
+        <div class="guide-step">
+          <span class="guide-num">2</span>
+          <p class="text-sm text-slate-600"><b class="text-slate-700">Watch</b> — live readings, history and 5-record / 7-day trends update automatically in the <b>Data</b> tab. Toggle °F/°C on the temperature card; tap <b>Refresh</b> for an instant measurement.</p>
+        </div>
+        <div class="guide-step">
+          <span class="guide-num">3</span>
+          <p class="text-sm text-slate-600"><b class="text-slate-700">Fine-tune</b> — the <b>Setting</b> tab unlocks once connected: rename, calibrate, offset, firmware update or reset.</p>
         </div>
 
-        <div class="mt-6">
-          <h3 class="mb-3 text-sm font-semibold text-slate-600">Understanding readings</h3>
-          <ul class="space-y-2 text-xs leading-5 text-slate-500">
-            <li><b class="text-orange-600">🌡️ Temperature</b> — soil temperature, shown in °F by default (switch to °C). Most plants thrive between 59–86 °F (15–30 ℃).</li>
-            <li><b class="text-sky-600">💧 Moisture</b> — relative soil moisture as a percentage. Aim for the sweet spot of your plant.</li>
-            <li><b class="text-emerald-600">🔋 Battery</b> — remaining charge. Recharge before it gets too low.</li>
-          </ul>
-        </div>
+        <!-- Setting tab 速览：与 Setting 面板各卡片一一对应，仅描述网页端行为，细节见 Setting 页 -->
+        <h3 class="mt-6 mb-3 text-sm font-semibold text-slate-600">Inside the Setting tab</h3>
+        <ul class="space-y-2 text-xs leading-5 text-slate-500">
+          <li>🏷️ <b>Device name</b> — shown in the Bluetooth list, up to 9 printable ASCII characters. If the picker still lists the old name after renaming, reconnect once — it refreshes.</li>
+          <li>🎯 <b>Sensor calibration</b> — probe dry in air, tap <b>Dry calibration</b>; then submerged in water, tap <b>Wet calibration</b>. A ✓ Calibrated badge marks each stored point; the device recalibrates from a fresh reading.</li>
+          <li>🌡️ <b>Temperature offset</b> — trim the reading by up to ±10 ℃ with the slider, then <b>Apply offset</b>. Kept on the device until a reset.</li>
+          <li>📦 <b>Firmware</b> — the badge shows the current version. When a new one is out, a NEW dot lights up on the <b>Setting</b> tab and an update card with “What's new” appears — tap <b>Update now</b> and keep the device nearby until it reboots.</li>
+          <li>♻️ <b>Reset</b> — clears history, calibration, name and offset, then reboots. The connection will drop.</li>
+        </ul>
 
-        <div class="mt-6">
-          <h3 class="mb-3 text-sm font-semibold text-slate-600">Firmware update</h3>
-          <p class="text-xs leading-5 text-slate-500">
-            When a newer firmware is available, the <b>Setting</b> tab shows an update hint and a red dot. Open it, read “What's new”, then tap <b>Update now</b> to upgrade over the air — the device reboots automatically after a successful update.
-          </p>
-        </div>
+        <!-- Help：排障 FAQ（自印刷手册 Troubleshooting 迁移至此，避免两处重复维护） -->
+        <h3 class="mt-6 mb-2 text-sm font-semibold text-slate-600">Help</h3>
+        <details class="group rounded-xl border border-slate-100 bg-slate-50/60 px-3 py-2">
+          <summary class="cursor-pointer select-none text-xs font-semibold text-slate-600">Can't connect?</summary>
+          <p class="mt-2 text-xs leading-5 text-slate-500">Tap the <b>touch pad</b> to wake the sensor and keep it nearby, allow Bluetooth permissions, then tap <b>Connect device</b>. If this browser can't use Bluetooth, a prompt with a download link appears automatically.</p>
+        </details>
+        <details class="group mt-2 rounded-xl border border-slate-100 bg-slate-50/60 px-3 py-2">
+          <summary class="cursor-pointer select-none text-xs font-semibold text-slate-600">No new data?</summary>
+          <p class="mt-2 text-xs leading-5 text-slate-500">Connect and tap <b>Refresh</b> — new data should arrive within a few minutes.</p>
+        </details>
+        <details class="group mt-2 rounded-xl border border-slate-100 bg-slate-50/60 px-3 py-2">
+          <summary class="cursor-pointer select-none text-xs font-semibold text-slate-600">Readings look wrong?</summary>
+          <p class="mt-2 text-xs leading-5 text-slate-500">Redo both calibration points in <b>Setting</b> and check the ✓ Calibrated badges. Use <b>Clear data</b> to drop stale cached history, then reconnect.</p>
+        </details>
+        <details class="group mt-2 rounded-xl border border-slate-100 bg-slate-50/60 px-3 py-2">
+          <summary class="cursor-pointer select-none text-xs font-semibold text-slate-600">Odd moisture?</summary>
+          <p class="mt-2 text-xs leading-5 text-slate-500">Insert the probe to the <b>OPTIMAL DEPTH line</b> and avoid loose gaps in the soil.</p>
+        </details>
+        <details class="group mt-2 rounded-xl border border-slate-100 bg-slate-50/60 px-3 py-2">
+          <summary class="cursor-pointer select-none text-xs font-semibold text-slate-600">Shows unavailable in Home Assistant?</summary>
+          <p class="mt-2 text-xs leading-5 text-slate-500">This is normal. The sensor updates every 10 minutes to save power — new data will still arrive automatically.</p>
+        </details>
 
-        <div class="mt-6">
-          <h3 class="mb-3 text-sm font-semibold text-slate-600">Troubleshooting</h3>
-          <ul class="space-y-2 text-xs leading-5 text-slate-500">
-            <li><b>Bluetooth unavailable?</b> Use Google Chrome on desktop or the Bluefy app on iOS. On Android WeChat, tap the menu and choose “Open in Browser”.</li>
-            <li><b>Not connecting?</b> Make sure the sensor is powered on and close to your phone or computer, then tap <b>Refresh</b>.</li>
-            <li><b>Odd data?</b> Use <b>Clear data</b> to remove cached readings for the current device, then reconnect.</li>
-          </ul>
+        <!-- Support：自印刷手册迁移至此，置于 Guide 最底部 -->
+        <div class="mt-6 flex items-center gap-3 p-3 rounded-2xl bg-emerald-50 border border-emerald-100">
+          <span class="text-2xl">📧</span>
+          <div class="flex-1">
+            <p class="text-sm font-semibold text-emerald-800">Support</p>
+            <p class="mt-0.5 text-xs leading-5 text-slate-500">Email: <a href="mailto:support@alinfancy.com" class="font-semibold text-emerald-700 underline underline-offset-2">support@alinfancy.com</a></p>
+            <p class="mt-0.5 text-xs leading-5 text-slate-500">Questions or feedback? Please email us — we're happy to help. Thank you for your support!</p>
+          </div>
         </div>
       </div>
     </section>
 
-    <!-- 前端版本号（仅用于现场排查浏览器实际加载的页面版本，功能变更后随 ?v= 一并递增） -->
+<!-- 前端版本号（仅用于现场排查浏览器实际加载的页面版本，功能变更后随 ?v= 一并递增） -->
     <p id="pageVersion" class="mt-6 text-center text-[10px] text-slate-300 select-none"></p>
   </div>
 
   <!-- 引入业务模块脚本：?v= 版本号用于缓存破坏（cache busting），
        每次前端功能变更后必须递增，否则浏览器会继续运行旧版 JS -->
-  <script src="page/js/config.js?v=1.2.5"></script>
-  <script src="page/js/ble-protocol.js?v=1.2.5"></script>
-  <script src="page/js/app.js?v=1.2.5"></script>
+  <script src="page/js/config.js?v=1.3.3"></script>
+  <script src="page/js/ble-protocol.js?v=1.3.3"></script>
+  <script src="page/js/app.js?v=1.3.3"></script>
 </body>
 </html>
