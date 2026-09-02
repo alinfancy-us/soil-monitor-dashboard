@@ -267,6 +267,28 @@
     </div>
   </div>
 
+  <!-- iOS Bluefy 等（window.open 不可用）专用：页内 PDF 面板。纯 DOM 显隐、不进浏览器历史，
+       自带 Back 按钮，规避 WKWebView 直接导航 PDF 后返回键失效的问题。预览走 Google Docs Viewer。 -->
+  <div id="pdfPanel" class="hidden fixed inset-0 z-50 flex flex-col bg-slate-100" role="dialog" aria-modal="true" aria-label="Quick-start PDF">
+    <div class="flex items-center gap-3 bg-emerald-800 px-4 py-3 text-white">
+      <button id="pdfPanelBackBtn" type="button"
+        class="inline-flex items-center gap-1 rounded-lg bg-white/15 px-3 py-1.5 text-xs font-semibold transition hover:bg-white/25">← Back</button>
+      <p class="flex-1 text-sm font-semibold">Quick-start PDF</p>
+    </div>
+    <iframe id="pdfPanelFrame" title="Quick-start PDF preview" class="w-full flex-1 bg-white"></iframe>
+    <div class="border-t border-slate-200 bg-white px-4 py-3">
+      <p class="text-[11px] leading-4 text-slate-400">
+        Preview blank? (offline or local address) — use “Open / Save PDF”, or copy the link to Safari.
+      </p>
+      <div class="mt-2 flex gap-2">
+        <button id="pdfPanelOpenBtn" type="button"
+          class="action-button flex-1 inline-flex items-center justify-center rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700">Open / Save PDF</button>
+        <button id="pdfPanelCopyBtn" type="button"
+          class="action-button inline-flex items-center justify-center rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-200">Copy link</button>
+      </div>
+    </div>
+  </div>
+
   <div class="dashboard-shell max-w-4xl px-4 py-5 mx-auto sm:px-6 sm:py-10 lg:py-12">
     <!-- Header -->
     <header class="flex items-center gap-4 mb-5 text-left sm:mb-7 sm:justify-center sm:text-center">
@@ -553,7 +575,7 @@
             <p class="text-sm font-semibold text-emerald-800">Quick-start PDF</p>
             <a id="viewPdfBtn" href="page/doc/introduction.pdf" target="_blank" rel="noopener"
               class="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 underline underline-offset-2">View quick-start guide →</a>
-            <p class="mt-0.5 text-[11px] leading-4 text-slate-400">Opens in a new tab — use the viewer's share or save button to keep a copy.</p>
+            <p class="mt-0.5 text-[11px] leading-4 text-slate-400">Opens in a new tab — on iOS Bluefy it opens right here with a Back button.</p>
           </div>
         </div>
 
@@ -623,8 +645,8 @@
 
   <!-- 引入业务模块脚本：?v= 版本号用于缓存破坏（cache busting），
        每次前端功能变更后必须递增，否则浏览器会继续运行旧版 JS -->
-  <script src="page/js/config.js?v=1.3.4"></script>
-  <script src="page/js/ble-protocol.js?v=1.3.4"></script>
-  <script src="page/js/app.js?v=1.3.4"></script>
+  <script src="page/js/config.js?v=1.3.5"></script>
+  <script src="page/js/ble-protocol.js?v=1.3.5"></script>
+  <script src="page/js/app.js?v=1.3.5"></script>
 </body>
 </html>

@@ -92,6 +92,11 @@
      mainTabGuidePanel: document.getElementById('mainTabGuidePanel'),
      pageVersion: document.getElementById('pageVersion'),
      viewPdfBtn: document.getElementById('viewPdfBtn'),
+     pdfPanel: document.getElementById('pdfPanel'),
+     pdfPanelFrame: document.getElementById('pdfPanelFrame'),
+     pdfPanelBackBtn: document.getElementById('pdfPanelBackBtn'),
+     pdfPanelOpenBtn: document.getElementById('pdfPanelOpenBtn'),
+     pdfPanelCopyBtn: document.getElementById('pdfPanelCopyBtn'),
      deviceNameText: document.getElementById('deviceNameText'),
      devNameInput: document.getElementById('devNameInput'),
      devNameSaveBtn: document.getElementById('devNameSaveBtn'),
@@ -1804,12 +1809,12 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
   els.mainTabGuideBtn.addEventListener('click', () => switchMainTab('guide'));
   els.mainTabSettingBtn.addEventListener('click', () => switchMainTab('setting'));
 
-  // Guide 面板 PDF：新标签页打开浏览器内置 PDF 查看器（替代原 fetch→Blob 强制下载）。
-  // 原方案问题：iOS Bluefy(WKWebView) 不支持 blob: 下载且拦截 window.open，点击无反应；
-  // Android 重复强制下载无可见反馈。新标签打开在所有平台均有原生查看器，可反复点击。
-  // 弹窗被拦截/容器不支持新窗口时（window.open 返回 null）回退为当前页直接打开，
-  // WKWebView 原生可渲染 PDF，用户可返回。注意：window.open 必须在点击事件内同步调用，
-  // 且不可传 'noopener' feature（会导致返回值恒为 null、误触发回退），改用 opener 置空。
+  // ===== Guide 面板 PDF：优先新标签打开系统查看器；容器不支持时（如 iOS Bluefy，
+  // window.open 返回 null）打开页内 PDF 面板，全程不做页面跳转 =====
+  // Bluefy 特殊原因：WKWebView 直接导航到 PDF 后返回历史不可靠（返回键失效），
+  // 且 fetch→blob 下载、window.open 均被容器拦截。页内面板纯 DOM 显隐、自带 Back 按钮，
+  // 不进历史栈；预览用 Google Docs Viewer（需公网可访问的 PDF 地址，失败可 Open/Save 或复制链接）。
+  // Android / desktop / iOS Safari 均走新标签，行为不变。window.open 必须同步调用。
   if (els.viewPdfBtn) {
     els.viewPdfBtn.addEventListener('click', (e) => {
       e.preventDefault();
@@ -1819,8 +1824,44 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
         w.opener = null; // 等效 rel="noopener"
         log('PDF opened in new tab');
       } else {
-        window.location.href = url;
-        log('New tab unavailable, opening PDF in current view');
+        openPdfPanel(url); // Bluefy 等容器：无新窗口能力 → 页内面板展示/下载
+        log('New tab unavailable, opened in-app PDF panel');
+      }
+    });
+  }
+
+  function openPdfPanel(absUrl) {
+    els.pdfPanel.classList.remove('hidden');
+    document.body.classList.add('overflow-hidden');
+    els.pdfPanelFrame.src =
+      'https://docs.google.com/viewer?url=' + encodeURIComponent(absUrl) + '&embedded=true';
+    els.pdfPanelCopyBtn.textContent = 'Copy link';
+  }
+
+  function closePdfPanel() {
+    els.pdfPanel.classList.add('hidden');
+    els.pdfPanelFrame.src = 'about:blank'; // 停止预览加载
+    document.body.classList.remove('overflow-hidden');
+  }
+
+  if (els.pdfPanelBackBtn) {
+    els.pdfPanelBackBtn.addEventListener('click', closePdfPanel);
+  }
+  // "Open / Save PDF"：显式交给系统查看器（Safari 预览后可存储到"文件"）
+  if (els.pdfPanelOpenBtn) {
+    els.pdfPanelOpenBtn.addEventListener('click', () => {
+      window.location.href = els.viewPdfBtn.href;
+    });
+  }
+  // 复制链接，便于粘贴到 Safari 打开
+  if (els.pdfPanelCopyBtn) {
+    els.pdfPanelCopyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(els.viewPdfBtn.href);
+        els.pdfPanelCopyBtn.textContent = 'Copied ✓';
+      } catch (err) {
+        els.pdfPanelCopyBtn.textContent = 'Copy failed';
+        log('Copy link failed: ' + err.message);
       }
     });
   }
