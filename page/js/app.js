@@ -91,7 +91,7 @@
      mainTabSettingPanel: document.getElementById('mainTabSettingPanel'),
      mainTabGuidePanel: document.getElementById('mainTabGuidePanel'),
      pageVersion: document.getElementById('pageVersion'),
-     downloadPdfBtn: document.getElementById('downloadPdfBtn'),
+     viewPdfBtn: document.getElementById('viewPdfBtn'),
      deviceNameText: document.getElementById('deviceNameText'),
      devNameInput: document.getElementById('devNameInput'),
      devNameSaveBtn: document.getElementById('devNameSaveBtn'),
@@ -1804,28 +1804,23 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
   els.mainTabGuideBtn.addEventListener('click', () => switchMainTab('guide'));
   els.mainTabSettingBtn.addEventListener('click', () => switchMainTab('setting'));
 
-  // Guide 面板 PDF 下载：原生 <a download> 在 iOS Safari / Bluefy(WebKit) 上常直接打开 PDF 预览。
-  // 改为 fetch -> Blob -> a.download 强制保存；失败时回退为新标签打开预览。
-  if (els.downloadPdfBtn) {
-    els.downloadPdfBtn.addEventListener('click', async (e) => {
+  // Guide 面板 PDF：新标签页打开浏览器内置 PDF 查看器（替代原 fetch→Blob 强制下载）。
+  // 原方案问题：iOS Bluefy(WKWebView) 不支持 blob: 下载且拦截 window.open，点击无反应；
+  // Android 重复强制下载无可见反馈。新标签打开在所有平台均有原生查看器，可反复点击。
+  // 弹窗被拦截/容器不支持新窗口时（window.open 返回 null）回退为当前页直接打开，
+  // WKWebView 原生可渲染 PDF，用户可返回。注意：window.open 必须在点击事件内同步调用，
+  // 且不可传 'noopener' feature（会导致返回值恒为 null、误触发回退），改用 opener 置空。
+  if (els.viewPdfBtn) {
+    els.viewPdfBtn.addEventListener('click', (e) => {
       e.preventDefault();
-      const url = els.downloadPdfBtn.getAttribute('href');
-      try {
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const blob = await resp.blob();
-        const objUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = objUrl;
-        a.download = 'SoilPulse-introduction.pdf';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
-        log('PDF download triggered (blob)');
-      } catch (err) {
-        log(`PDF download failed, opening preview instead: ${err.message}`);
-        window.open(url, '_blank', 'noopener');
+      const url = els.viewPdfBtn.href; // 相对 href 已解析为绝对地址
+      const w = window.open(url, '_blank');
+      if (w) {
+        w.opener = null; // 等效 rel="noopener"
+        log('PDF opened in new tab');
+      } else {
+        window.location.href = url;
+        log('New tab unavailable, opening PDF in current view');
       }
     });
   }
