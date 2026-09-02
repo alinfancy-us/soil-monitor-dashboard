@@ -277,14 +277,16 @@
     </div>
     <iframe id="pdfPanelFrame" title="Quick-start PDF preview" class="w-full flex-1 bg-white"></iframe>
     <div class="border-t border-slate-200 bg-white px-4 py-3">
-      <p class="text-[11px] leading-4 text-slate-400">
-        Preview blank? (offline or local address) — use “Open / Save PDF”, or copy the link to Safari.
+      <p id="pdfPanelHint" class="text-[11px] leading-4 text-slate-400">
+        Preview runs inside this app — nothing to navigate away. To keep a copy: Share / Save (when shown), or Copy link → open in Safari → Share → Save to Files.
       </p>
       <div class="mt-2 flex gap-2">
-        <button id="pdfPanelOpenBtn" type="button"
-          class="action-button flex-1 inline-flex items-center justify-center rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700">Open / Save PDF</button>
+        <button id="pdfPanelShareBtn" type="button"
+          class="hidden action-button flex-1 inline-flex items-center justify-center rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700">Share / Save</button>
+        <button id="pdfPanelReloadBtn" type="button"
+          class="action-button inline-flex items-center justify-center rounded-xl bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-200">Reload</button>
         <button id="pdfPanelCopyBtn" type="button"
-          class="action-button inline-flex items-center justify-center rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-200">Copy link</button>
+          class="action-button inline-flex items-center justify-center rounded-xl bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-200">Copy link</button>
       </div>
     </div>
   </div>
@@ -645,8 +647,8 @@
 
   <!-- 引入业务模块脚本：?v= 版本号用于缓存破坏（cache busting），
        每次前端功能变更后必须递增，否则浏览器会继续运行旧版 JS -->
-  <script src="page/js/config.js?v=1.3.5"></script>
-  <script src="page/js/ble-protocol.js?v=1.3.5"></script>
-  <script src="page/js/app.js?v=1.3.5"></script>
+  <script src="page/js/config.js?v=1.3.6"></script>
+  <script src="page/js/ble-protocol.js?v=1.3.6"></script>
+  <script src="page/js/app.js?v=1.3.6"></script>
 </body>
 </html>

@@ -95,7 +95,9 @@
      pdfPanel: document.getElementById('pdfPanel'),
      pdfPanelFrame: document.getElementById('pdfPanelFrame'),
      pdfPanelBackBtn: document.getElementById('pdfPanelBackBtn'),
-     pdfPanelOpenBtn: document.getElementById('pdfPanelOpenBtn'),
+     pdfPanelShareBtn: document.getElementById('pdfPanelShareBtn'),
+     pdfPanelReloadBtn: document.getElementById('pdfPanelReloadBtn'),
+     pdfPanelHint: document.getElementById('pdfPanelHint'),
      pdfPanelCopyBtn: document.getElementById('pdfPanelCopyBtn'),
      deviceNameText: document.getElementById('deviceNameText'),
      devNameInput: document.getElementById('devNameInput'),
@@ -1811,9 +1813,10 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
 
   // ===== Guide 面板 PDF：优先新标签打开系统查看器；容器不支持时（如 iOS Bluefy，
   // window.open 返回 null）打开页内 PDF 面板，全程不做页面跳转 =====
-  // Bluefy 特殊原因：WKWebView 直接导航到 PDF 后返回历史不可靠（返回键失效），
-  // 且 fetch→blob 下载、window.open 均被容器拦截。页内面板纯 DOM 显隐、自带 Back 按钮，
-  // 不进历史栈；预览用 Google Docs Viewer（需公网可访问的 PDF 地址，失败可 Open/Save 或复制链接）。
+  // Bluefy 限制：WKWebView 直接导航到 PDF 后返回历史不可靠（返回键失效），且
+  // window.open / <a download> / blob 下载均被容器拦截——故面板内绝不做 location 跳转。
+  // 预览用 Google Docs Viewer（需公网可访问的 PDF 地址）；保存能力走 navigator.share
+  // 系统分享面板（可“存储到文件”），canShare 特性检测不支持时自动隐藏 Share 按钮。
   // Android / desktop / iOS Safari 均走新标签，行为不变。window.open 必须同步调用。
   if (els.viewPdfBtn) {
     els.viewPdfBtn.addEventListener('click', (e) => {
@@ -1824,7 +1827,7 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
         w.opener = null; // 等效 rel="noopener"
         log('PDF opened in new tab');
       } else {
-        openPdfPanel(url); // Bluefy 等容器：无新窗口能力 → 页内面板展示/下载
+        openPdfPanel(url); // Bluefy 等容器：无新窗口能力 → 页内面板展示/保存
         log('New tab unavailable, opened in-app PDF panel');
       }
     });
@@ -1836,6 +1839,15 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
     els.pdfPanelFrame.src =
       'https://docs.google.com/viewer?url=' + encodeURIComponent(absUrl) + '&embedded=true';
     els.pdfPanelCopyBtn.textContent = 'Copy link';
+    // 拉取 PDF 文件并做 canShare 特性检测：容器支持分享 PDF 文件时才显示 Share / Save
+    loadPdfFile().then((file) => {
+      if (els.pdfPanel.classList.contains('hidden')) return; // 面板已被用户关闭
+      const shareable = !!(navigator.share && navigator.canShare
+        && navigator.canShare({ files: [file] }));
+      els.pdfPanelShareBtn.classList.toggle('hidden', !shareable);
+    }).catch((err) => {
+      log('PDF file check failed: ' + err.message);
+    });
   }
 
   function closePdfPanel() {
@@ -1844,16 +1856,47 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
     document.body.classList.remove('overflow-hidden');
   }
 
+  // 拉取 PDF 并包装为 File（供 navigator.share 分享与 canShare 检测；结果缓存复用）
+  let pdfFilePromise = null;
+  function loadPdfFile() {
+    if (!pdfFilePromise) {
+      pdfFilePromise = fetch(els.viewPdfBtn.href)
+        .then((resp) => {
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          return resp.blob();
+        })
+        .then((blob) => new File([blob], 'SoilPulse-introduction.pdf', { type: 'application/pdf' }))
+        .catch((err) => { pdfFilePromise = null; throw err; }); // 失败后允许重试
+    }
+    return pdfFilePromise;
+  }
+
   if (els.pdfPanelBackBtn) {
     els.pdfPanelBackBtn.addEventListener('click', closePdfPanel);
   }
-  // "Open / Save PDF"：显式交给系统查看器（Safari 预览后可存储到"文件"）
-  if (els.pdfPanelOpenBtn) {
-    els.pdfPanelOpenBtn.addEventListener('click', () => {
-      window.location.href = els.viewPdfBtn.href;
+  // Reload：重载 Google Docs Viewer iframe（预览加载慢/失败时重试，不离开面板）
+  if (els.pdfPanelReloadBtn) {
+    els.pdfPanelReloadBtn.addEventListener('click', () => {
+      const src = els.pdfPanelFrame.src;
+      els.pdfPanelFrame.src = 'about:blank';
+      setTimeout(() => { els.pdfPanelFrame.src = src; }, 100);
     });
   }
-  // 复制链接，便于粘贴到 Safari 打开
+  // Share / Save：唤起系统分享面板，可“存储到文件”/隔空投送/发邮件（不离开页面）
+  if (els.pdfPanelShareBtn) {
+    els.pdfPanelShareBtn.addEventListener('click', async () => {
+      try {
+        const file = await loadPdfFile();
+        await navigator.share({ files: [file], title: 'SoilPulse quick-start guide' });
+        log('PDF shared via system share sheet');
+      } catch (err) {
+        if (err && err.name === 'AbortError') return; // 用户关闭分享面板，非错误
+        els.pdfPanelHint.textContent = 'Sharing not available here — use Copy link, then open in Safari.';
+        log('Share failed: ' + err.message);
+      }
+    });
+  }
+  // 复制链接，便于粘贴到 Safari 打开（Safari 的预览与返回均完善）
   if (els.pdfPanelCopyBtn) {
     els.pdfPanelCopyBtn.addEventListener('click', async () => {
       try {
