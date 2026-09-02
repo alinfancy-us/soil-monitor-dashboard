@@ -445,14 +445,8 @@
     renderDaily([]);
   }
 
-  // 设备名本地缓存（按 device.id 分区）：系统按 MAC 缓存蓝牙名字，改名后设备选择器可能仍显示旧名；
-  // 页内展示用 GAP 实时值优先，读取失败时用这里的缓存兜底，保证页面始终显示最近一次改名结果
-  function cacheDeviceName(deviceId, name) {
-    try { localStorage.setItem(`${CACHE_PREFIX}deviceName:v1:${deviceId}`, String(name)); } catch (_) {}
-  }
-  function loadCachedDeviceName(deviceId) {
-    try { return localStorage.getItem(`${CACHE_PREFIX}deviceName:v1:${deviceId}`) || null; } catch (_) { return null; }
-  }
+  // 设备名不做本地缓存：页内展示直接使用浏览器连接对象自带的名字（device.name），
+  // 不通过 GAP 服务读取设备名
 
   // 加载指定设备（device.id）自己的历史缓存并回显到图表/表格。
   function restoreCachedCharts(deviceId) {
@@ -1265,27 +1259,13 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        // 读取设备已保存的校准状态（0xFFE9），在干/湿校准点展示"已校准"提示（只提示存在性，不展示具体数值）
        await refreshCalibHints();
 
-       // 读取设备名（GAP 0x2A00 实时值）展示在状态栏，并预填 Setting 改名输入框。
-       // 三级优先：GAP 实时 -> 本地缓存（系统可能按 MAC 缓存旧名）-> device.name；
-       // GAP 读到新名即同步写缓存，下次 GAP 偶发失败时仍能显示正确名字
-       let gattName = null;
-       try { gattName = await BLEProtocol.readGattDeviceName(device.gatt); } catch (_) {}
-       if (gattName) cacheDeviceName(device.id, gattName);
-       const displayName = gattName || loadCachedDeviceName(device.id) || device.name || 'SoilPulse';
-       if (els.deviceNameText) {
-         els.deviceNameText.textContent = displayName;
-         els.deviceNameText.classList.remove('hidden');
-       }
-       if (els.devNameInput) {
-         els.devNameInput.value = displayName;
-         updateDevNameByteCount();
-       }
+       
      } catch (err) {
        if (token !== connectToken) return;   // 超时/失败期间用户已重新点击，不被覆盖
        setStatus('disconnected');
        if (String(err && err.message).includes('CONNECT_TIMEOUT')) {
          els.statusText.textContent = 'Connect timed out — device may be sleeping (touch it to wake) or Bluetooth is off';
-         log('Connection timed out after 5s');
+         log('Connection timed out after 10s');
        } else {
          log(`Connection failed: ${err.message || err}`);
        }
@@ -1485,7 +1465,6 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
     try {
       const res = await BLEProtocol.sendDeviceName(state.devNameChar, name);
       if (res.ok) {
-        cacheDeviceName(state.device.id, name);
         if (els.deviceNameText) els.deviceNameText.textContent = name;
         els.devNameStatus.textContent = 'Name saved. If it still shows the old name, please reconnect to show the new name.';
         log(`Device name saved: ${name}`);

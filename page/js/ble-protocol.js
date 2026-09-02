@@ -68,7 +68,7 @@ const BLEProtocol = (() => {
    */
   /** 连接阶段超时（毫秒）：选完设备后，gatt.connect + 服务/特征发现应在 5s 内完成。
    *  蓝牙不可用 / 设备处于睡眠时这一步会挂起，超时后由 app.js 复位 UI。 */
-  const CONNECT_TIMEOUT_MS = 8000;
+  const CONNECT_TIMEOUT_MS = 10000;
 
   /**
    * 阶段1：仅弹出设备选择器（不设超时——用户挑设备时长不受限）。
@@ -87,7 +87,7 @@ const BLEProtocol = (() => {
         // 若 iOS 上搜不到设备，退化为 { services:[UUIDS.SERVICE], namePrefix: DEVICE_NAME_PREFIX } 即可。
         { services: [UUIDS.SERVICE] }
       ],
-      optionalServices: [UUIDS.OTA_SERVICE, UUIDS.DIS_SERVICE, UUIDS.GAP_SERVICE]
+      optionalServices: [UUIDS.OTA_SERVICE, UUIDS.DIS_SERVICE]
     });
   }
 
@@ -237,23 +237,6 @@ const BLEProtocol = (() => {
     const v = new Uint8Array(1);
     new DataView(v.buffer).setInt8(0, clamped);
     await tempOffsetChar.writeValue(v);
-  }
-
-  /**
-   * 从 GAP 服务读取设备当前名字（Device Name 特征 0x2A00），用于页面展示设备蓝牙名。
-   * @param {BluetoothRemoteGATTServer} server
-   * @returns {Promise<string|null>} 设备名；读取失败返回 null
-   */
-  async function readGattDeviceName(server) {
-    try {
-      const gap = await server.getPrimaryService(UUIDS.GAP_SERVICE);
-      const nameChar = await gap.getCharacteristic('device_name');
-      const val = await nameChar.readValue();
-      return new TextDecoder().decode(val).split(String.fromCharCode(0))[0].trim();
-    } catch (e) {
-      console.warn('[BLE] GAP device name read failed:', e);
-      return null;
-    }
   }
 
   /**
@@ -570,7 +553,6 @@ const BLEProtocol = (() => {
     readTempOffset,
     sendTempOffset,
     readCalibStatus,
-    readGattDeviceName,
     sendDeviceName,
     performOta,
   };

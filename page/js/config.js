@@ -7,7 +7,7 @@ const SoilPulseConfig = (() => {
 
   // 前端页面版本号：与 index.html 的 <script src="...?v=X"> 保持一致，每次功能变更递增。
   // 页面底部会显示该值，便于现场确认浏览器实际加载的是哪一版前端（排查缓存问题）
-  const PAGE_VERSION = '1.2.1';
+  const PAGE_VERSION = '1.2.5';
 
   // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致（固件改名须保留此前缀）。
   // 它参与 requestDevice 的过滤（与 services UUID 同一 filter 内 AND 匹配），
@@ -34,9 +34,6 @@ const SoilPulseConfig = (() => {
     OTA_CHAR: '00010203-0405-0607-0809-0a0b0c0d2b12',
     // 标准 Device Information Service，读 Firmware Revision String(0x2A26) 获取设备固件版本，须与固件 SOIL_FW_VERSION 编译值一致
     DIS_SERVICE: '0000180a-0000-1000-8000-00805f9b34fb',
-    // Generic Access 服务（0x1800）：读 GAP 设备名特征(0x2A00)展示设备蓝牙名，
-    // 必须列入 requestDevice optionalServices 才能访问（Web Bluetooth 安全模型）
-    GAP_SERVICE: '00001800-0000-1000-8000-00805f9b34fb',
     DIS_FW_REV_CHAR: '00002a26-0000-1000-8000-00805f9b34fb',
   };
 
