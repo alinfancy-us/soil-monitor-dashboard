@@ -7,10 +7,36 @@ on:
         description: '请输入发布版本号 (例如 1.3.8 或 v1.3.8)'
         required: true
         default: '1.3.8'
+      fw_version:
+        description: '固件版本号，写入 firmware.json (留空则不更新，例如 2.1.1 或 v2.1.1)'
+        required: false
+        default: ''
+      fw_bin:
+        description: '固件 bin 文件名 (留空则按 SoilPulse_v<固件版本>.bin 自动推导)'
+        required: false
+        default: ''
+      fw_notes:
+        description: '固件升级说明 (留空则保持 firmware.json 原值)'
+        required: false
+        default: ''
+
+# GitHub Pages 部署所需权限
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只允许一个 Pages 部署，避免并发互相覆盖
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -33,6 +59,43 @@ jobs:
           # 验证替换结果
           grep "PAGE_VERSION" page/js/config.js
 
+      - name: Sync firmware.json from Input
+        if: ${{ github.event.inputs.fw_version != '' }}
+        env:
+          FW_RAW_VERSION: ${{ github.event.inputs.fw_version }}
+          FW_RAW_BIN: ${{ github.event.inputs.fw_bin }}
+          FW_RAW_NOTES: ${{ github.event.inputs.fw_notes }}
+        run: |
+          # 去掉用户输入可能带有的 v 前缀
+          FW_VERSION=${FW_RAW_VERSION#v}
+
+          # bin 文件名：未指定时按约定 SoilPulse_v<固件版本>.bin 推导
+          FW_BIN=${FW_RAW_BIN:-SoilPulse_v${FW_VERSION}.bin}
+
+          # 校验 bin 文件确实存在，避免发布出指向缺失文件的升级清单
+          if [ ! -f "page/firmware/${FW_BIN}" ]; then
+            echo "::error::找不到固件文件 page/firmware/${FW_BIN}，请确认文件已提交且文件名正确"
+            exit 1
+          fi
+
+          echo "Syncing firmware.json -> version=${FW_VERSION}, bin=${FW_BIN}, size=$(stat -c%s page/firmware/${FW_BIN})..."
+
+          # 用 node 原子更新 JSON 字段（size 从实际 bin 文件大小计算，notes 可选更新）
+          node -e '
+            const fs = require("fs");
+            const manifestPath = "page/firmware/firmware.json";
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+            const [, version, bin, notes] = process.argv;
+            manifest.version = version;
+            manifest.bin = bin;
+            manifest.size = fs.statSync("page/firmware/" + bin).size;
+            if (notes !== "") manifest.notes = notes;
+            fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+          ' "$FW_VERSION" "$FW_BIN" "$FW_RAW_NOTES"
+
+          # 验证更新结果
+          cat page/firmware/firmware.json
+
       - name: Assemble clean dist
         run: |
           mkdir -p dist
@@ -40,9 +103,17 @@ jobs:
           cp -R page dist/page
           ls -la dist
 
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=soil-monitor-dashboard --branch=preview
+          # 仓库尚未开启 Pages 时自动开启（Source: GitHub Actions）
+          enablement: true
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
