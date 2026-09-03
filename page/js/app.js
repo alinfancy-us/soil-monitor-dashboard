@@ -1532,12 +1532,12 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
   //      或超时兜底解锁——突变/快采轮不写历史也不推通知，必须靠超时解锁，避免按钮永久锁死；
   //   2) 解锁后仍有 COOLDOWN 冷却窗：两次手动重测至少间隔 3 秒，进一步限制重测频率。
   const REFRESH_RESULT_TIMEOUT_MS = 6000;
-  const REFRESH_COOLDOWN_MS = 3000;
+  // const REFRESH_COOLDOWN_MS = 3000;
   const REFRESH_LABEL_IDLE = '🔄 Refresh';
   const REFRESH_LABEL_BUSY = '⏳ Measuring…';
   let refreshBusy = false;          // 一次 refresh 从点击到"通知到达或超时"期间为 true
   let refreshUnlockTimer = null;    // 超时兜底解锁定时器
-  let refreshLastStart = 0;         // 上次 refresh 发起时刻（冷却窗计时基准）
+  // let refreshLastStart = 0;         // 上次 refresh 发起时刻（冷却窗计时基准）
 
   function setRefreshUiBusy(busy) {
     els.refreshBtn.textContent = busy ? REFRESH_LABEL_BUSY : REFRESH_LABEL_IDLE;
@@ -1579,12 +1579,12 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
       return;
     }
     // 防连点 2：冷却窗内（数据已到但间隔太近），同样忽略，限制手动重测频率
-    const sinceLast = Date.now() - refreshLastStart;
-    if (refreshLastStart && sinceLast < REFRESH_COOLDOWN_MS) {
-      log(`Refresh ignored: please wait ${Math.ceil((REFRESH_COOLDOWN_MS - sinceLast) / 1000)}s between refreshes`);
-      return;
-    }
-    refreshLastStart = Date.now();
+    // const sinceLast = Date.now() - refreshLastStart;
+    // if (refreshLastStart && sinceLast < REFRESH_COOLDOWN_MS) {
+    //   log(`Refresh ignored: please wait ${Math.ceil((REFRESH_COOLDOWN_MS - sinceLast) / 1000)}s between refreshes`);
+    //   return;
+    // }
+    // refreshLastStart = Date.now();
     refreshBusy = true;
     setRefreshUiBusy(true);
     try {
