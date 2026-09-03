@@ -1,0 +1,48 @@
+name: Deploy Dashboard (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '请输入发布版本号 (例如 1.3.8 或 v1.3.8)'
+        required: true
+        default: '1.3.8'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Sync PAGE_VERSION from Input
+        run: |
+          # 去掉用户输入可能带有的 v 前缀
+          RAW_VERSION="${{ github.event.inputs.version }}"
+          VERSION=${RAW_VERSION#v}
+          echo "Syncing PAGE_VERSION to $VERSION..."
+          
+          # 自动替换 page/js/config.js 中的 PAGE_VERSION
+          sed -i "s/const PAGE_VERSION = '[^']*';/const PAGE_VERSION = '$VERSION';/g" page/js/config.js
+          
+          # 验证替换结果
+          grep "PAGE_VERSION" page/js/config.js
+
+      - name: Assemble clean dist
+        run: |
+          mkdir -p dist
+          cp index.html dist/
+          cp -R page dist/page
+          ls -la dist
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=soil-monitor-dashboard
