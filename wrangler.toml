@@ -1,0 +1,12 @@
+name = "soilpulse-dashboard"
+compatibility_date = "2025-01-01"
+
+# 自定义域名：部署时自动把 soilpulse.alinfancy.com 绑定到该 Worker
+# （前提：alinfancy.com 的 zone 在同一 Cloudflare 账号；注释掉此段则走 *.workers.dev 子域）
+routes = [
+  { pattern = "soilpulse.alinfancy.com", custom_domain = true }
+]
+
+# 静态资产目录：GitHub Actions 会先组装干净的 dist（只含 index.html + page/）
+[assets]
+directory = "./dist"
