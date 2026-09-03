@@ -78,7 +78,13 @@ const SoilPulseConfig = (() => {
   // 未安装则回退 App Store（deep link scheme 未公开文档，需真机验证）
   const DASHBOARD_URL = 'https://soilpulse.alinfancy.com';
   const BLUEFY_APPSTORE_URL = 'https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055';
-  const BLUEFY_DEEPLINK = `bluefy://open?url=${encodeURIComponent(DASHBOARD_URL)}`;
+
+  // 2. 将 PAGE_VERSION 追加到 DASHBOARD_URL 中
+  const targetUrl = new URL(DASHBOARD_URL);
+  targetUrl.searchParams.set('v', PAGE_VERSION); // 生成 https://soilpulse.alinfancy.com/?v=1.0.1
+
+  // 3. 对带版本号的完整 URL 进行 encodeURIComponent
+  const BLUEFY_DEEPLINK = `bluefy://open?url=${encodeURIComponent(targetUrl.toString())}`;
 
   // 调试日志 / 轮询间隔（毫秒）
   const DEBUG_ENABLED = true;
