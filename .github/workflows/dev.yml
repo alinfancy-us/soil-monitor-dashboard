@@ -46,7 +46,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: Sync PAGE_VERSION from Input
+      - name: Sync PAGE_VERSION / DASHBOARD_URL from Input
         run: |
           # 去掉用户输入可能带有的 v 前缀
           RAW_VERSION="${{ github.event.inputs.version }}"
@@ -56,8 +56,13 @@ jobs:
           # 自动替换 page/js/config.js 中的 PAGE_VERSION
           sed -i "s/const PAGE_VERSION = '[^']*';/const PAGE_VERSION = '$VERSION';/g" page/js/config.js
           
+          # dev 预览发布到 GitHub Pages，Bluefy 深链落地页须同步替换为 Pages 地址
+          # （生产 deploy.yml 发布到 Cloudflare，固定为自定义域名 https://soilpulse.alinfancy.com）
+          echo "Syncing DASHBOARD_URL to GitHub Pages URL..."
+          sed -i "s|const DASHBOARD_URL = '[^']*';|const DASHBOARD_URL = 'https://alinfancy-us.github.io/soil-monitor-dashboard/';|g" page/js/config.js
+
           # 验证替换结果
-          grep "PAGE_VERSION" page/js/config.js
+          grep -E "PAGE_VERSION|DASHBOARD_URL" page/js/config.js
 
       - name: Sync firmware.json from Input
         if: ${{ github.event.inputs.fw_version != '' }}
