@@ -18,7 +18,19 @@ jobs:
         with:
           node-version: 22
 
-      - name: Assemble clean dist (index.html + page/)
+      - name: Sync PAGE_VERSION from Git Tag
+        run: |
+          # 获取去掉了 v 前缀的版本号（例如从 v1.3.8 提取 1.3.8）
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "Syncing PAGE_VERSION to $VERSION..."
+          
+          # 自动替换 page/js/config.js 中的 PAGE_VERSION
+          sed -i "s/const PAGE_VERSION = '[^']*';/const PAGE_VERSION = '$VERSION';/g" page/js/config.js
+          
+          # 验证替换结果
+          grep "PAGE_VERSION" page/js/config.js
+
+      - name: Assemble clean dist
         run: |
           mkdir -p dist
           cp index.html dist/
