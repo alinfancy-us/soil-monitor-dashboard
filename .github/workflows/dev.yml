@@ -1,4 +1,4 @@
-name: Deploy Dashboard (Manual)
+name: github-pages-deploy
 
 on:
   workflow_dispatch:
