@@ -8,6 +8,7 @@
    const {
      PAGE_VERSION,
      DEV_NAME_MAX_BYTES,
+     DEVICE_NAME,
      DEBUG_ENABLED, POLL_INTERVAL,
      DASHBOARD_URL, BLUEFY_APPSTORE_URL, BLUEFY_DEEPLINK,
      DAILY_EPOCH_MIN_VALID, DAILY_EPOCH_MAX_VALID, TREND_EPOCH_MAX_VALID,
@@ -1263,6 +1264,9 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        // 读取设备已保存的校准状态（0xFFE9），在干/湿校准点展示"已校准"提示（只提示存在性，不展示具体数值）
        await refreshCalibHints();
 
+       // 读取设备侧存储的网页展示名（0xFFEA）：仅在连接与初始化全部完成后读取，不使用选择器里的蓝牙名
+       await refreshDeviceNameFromDevice();
+
        
      } catch (err) {
        if (token !== connectToken) return;   // 超时/失败期间用户已重新点击，不被覆盖
@@ -1449,8 +1453,37 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
     const okAscii = bytes.length > 0 && bytes.every(b => b >= 0x20 && b <= 0x7E);
     if (els.devNameSaveBtn) els.devNameSaveBtn.disabled = !okLen || !okAscii;
     if (els.devNameStatus && v && (!okLen || !okAscii)) {
-      els.devNameStatus.textContent = 'Only printable ASCII, max 9 bytes';
+      els.devNameStatus.textContent = 'Only printable ASCII, max 20 bytes';
     }
+  }
+
+  // ---- 设备名：连接与初始化全部完成后，经 GATT 0xFFEA 读取设备侧存储的网页展示名 ----
+  // 读不到（旧固件只写特征 / 读取失败 / 未命名）时回退 config.js 的 DEVICE_NAME，展示永不留空；
+  // 注意：不使用选择器里的蓝牙名（device.name）；改名不影响蓝牙名，因此也无需重扫/重连
+  async function refreshDeviceNameFromDevice() {
+    let name = null;
+    let fromGatt = true;
+    if (state.devNameChar) {
+      try {
+        name = await BLEProtocol.readDeviceName(state.devNameChar);
+      } catch (err) {
+        log(`Device name read failed: ${err.message || err}`);
+      }
+    }
+    if (name === null || name === '') {
+      fromGatt = false;
+      name = DEVICE_NAME;   // config.js 中与固件 app_config.h BLE_DEVICE_NAME 保持一致
+      log('Device name unavailable via GATT, fallback to config DEVICE_NAME');
+    }
+    if (els.deviceNameText) {
+      els.deviceNameText.textContent = name;
+      els.deviceNameText.classList.remove('hidden');
+    }
+    if (els.devNameInput) {
+      els.devNameInput.value = name;
+      updateDevNameByteCount();
+    }
+    log(`Device display name (${fromGatt ? 'GATT' : 'config default'}): ${name}`);
   }
 
   els.devNameInput.addEventListener('input', updateDevNameByteCount);
@@ -1470,7 +1503,7 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
       const res = await BLEProtocol.sendDeviceName(state.devNameChar, name);
       if (res.ok) {
         if (els.deviceNameText) els.deviceNameText.textContent = name;
-        els.devNameStatus.textContent = 'Name saved. If it still shows the old name, please reconnect to show the new name.';
+        els.devNameStatus.textContent = 'Name saved — shown in this dashboard only (Bluetooth name unchanged).';
         log(`Device name saved: ${name}`);
       } else {
         els.devNameStatus.textContent = `Save failed: ${res.message}`;

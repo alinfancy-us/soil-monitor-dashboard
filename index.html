@@ -518,20 +518,19 @@
         <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
           <h2 class="mb-1 text-sm font-semibold text-slate-600">🏷️ Device name</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            Shown in the Bluetooth device list. <b>Up to 9 printable ASCII characters</b>.
-            If the phone list still shows the old name after renaming, reconnect once — it refreshes.
+            A display name kept on the device and shown in this dashboard. <b>Up to 20 printable ASCII characters</b>.
+            It does <b>not</b> change the name in your phone's Bluetooth list.
           </p>
-          <!-- 注意框：改名保存后生成新的蓝牙公开 MAC（下次冷启动生效），等于一台新设备，已绑定 Home Assistant 的需重新绑定 -->
+          <!-- 说明：该名字仅是"网页展示名"（GATT 0xFFEA 读写），不改变蓝牙名，无需重新绑定 Home Assistant -->
           <div class="mb-3 flex items-start gap-2 p-3 rounded-xl bg-amber-50 border border-amber-200">
-            <span class="text-base leading-none">⚠️</span>
+            <span class="text-base leading-none">ℹ️</span>
             <p class="text-xs leading-5 text-amber-700">
-              Heads-up: after renaming, the device comes back with a <b>new Bluetooth address</b>
-              (applied at next boot) — it acts as a brand-new device. If it was previously bound to
-              <b>Home Assistant</b>, remove the old entry and pair it again.
+              This name is for the dashboard display only — your phone's Bluetooth list keeps the
+              built-in name “SoilPulse”, so nothing needs to be re-paired in Home Assistant.
             </p>
           </div>
           <div class="flex items-center gap-2">
-            <input id="devNameInput" type="text" maxlength="9" autocomplete="off" spellcheck="false"
+            <input id="devNameInput" type="text" maxlength="20" autocomplete="off" spellcheck="false"
               placeholder="e.g. SoilPulse-1"
               class="flex-1 min-w-0 px-3 py-2 text-sm font-medium rounded-xl bg-slate-100 text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500">
             <button id="devNameSaveBtn" disabled
@@ -540,7 +539,7 @@
             </button>
           </div>
           <div class="flex justify-between mt-1 text-[11px] text-slate-400">
-            <span id="devNameByteCount">0 / 9 bytes</span>
+            <span id="devNameByteCount">0 / 20 bytes</span>
             <span id="devNameStatus"></span>
           </div>
         </div>
@@ -602,7 +601,7 @@
           <li>📦 <b>Firmware</b> — the badge shows the current version. When a new one is out, a NEW dot lights up on the <b>Setting</b> tab and an update card with “What's new” appears — tap <b>Update now</b> and keep the device nearby until it reboots.</li>
           <li>🎯 <b>Sensor calibration</b> — probe dry in air, tap <b>Dry calibration</b>; then submerged in water, tap <b>Wet calibration</b>. A ✓ Calibrated badge marks each stored point; the device recalibrates from a fresh reading.</li>
           <li>🌡️ <b>Temperature offset</b> — trim the reading by up to ±10 ℃ with the slider, then <b>Apply offset</b>. Kept on the device until a reset.</li>
-          <li>🏷️ <b>Device name</b> — shown in the Bluetooth list, up to 9 printable ASCII characters. Renaming applies a new Bluetooth address at next boot, so the device counts as new — re-bind it in <b>Home Assistant</b> if previously paired. If the picker still lists the old name, reconnect once.</li>
+          <li>🏷️ <b>Device name</b> — up to 20 printable ASCII characters. Read from the device over GATT right after connecting and shown in this dashboard only; the Bluetooth list keeps the built-in name, so no re-pairing is needed anywhere.</li>
           <li>♻️ <b>Reset</b> — clears history, calibration, name and offset, then reboots. The connection will drop.</li>
         </ul>
 
@@ -647,8 +646,8 @@
 
   <!-- 引入业务模块脚本：?v= 版本号用于缓存破坏（cache busting），
        每次前端功能变更后必须递增，否则浏览器会继续运行旧版 JS -->
-  <script src="page/js/config.js?v=1.3.8"></script>
-  <script src="page/js/ble-protocol.js?v=1.3.8"></script>
-  <script src="page/js/app.js?v=1.3.8"></script>
+  <script src="page/js/config.js?v=1.3.10"></script>
+  <script src="page/js/ble-protocol.js?v=1.3.10"></script>
+  <script src="page/js/app.js?v=1.3.10"></script>
 </body>
 </html>

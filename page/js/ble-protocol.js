@@ -5,7 +5,7 @@ const BLEProtocol = (() => {
   'use strict';
 
   // 集中配置统一取自 page/js/config.js，方便后续维护管理
-  const { DEVICE_NAME_PREFIX, UUIDS, RESET_MAGIC, FACTORY_RESET_MAGIC, HUM_CALIB_CMD, REFRESH_CMD, TEMP_OFFSET, CALIB_STATUS_FLAGS, DEV_NAME_MAX_BYTES } = SoilPulseConfig;
+  const { DEVICE_NAME, UUIDS, RESET_MAGIC, FACTORY_RESET_MAGIC, HUM_CALIB_CMD, REFRESH_CMD, TEMP_OFFSET, CALIB_STATUS_FLAGS, DEV_NAME_MAX_BYTES } = SoilPulseConfig;
   const RECORD_SIZE = 9;
   const MAX_RECORDS = 5;
   const PACKET_SIZE = 1 + RECORD_SIZE * MAX_RECORDS;
@@ -84,7 +84,7 @@ const BLEProtocol = (() => {
         // 0x0AFE 是扫描响应包里的厂商数据公司码（见 app.c soil_app_build_scan_rsp：04 FF FE 0A 01），
         // 常量定义在 config.js 的 MANUFACTURER_COMPANY_CODE。
         // 注意：Bluefy(iOS WebKit) 对 manufacturerData 过滤的完整支持不确定，需真机验证；
-        // 若 iOS 上搜不到设备，退化为 { services:[UUIDS.SERVICE], namePrefix: DEVICE_NAME_PREFIX } 即可。
+        // 若 iOS 上搜不到设备，退化为 { services:[UUIDS.SERVICE], namePrefix: DEVICE_NAME } 即可。
         { services: [UUIDS.SERVICE] }
       ],
       optionalServices: [UUIDS.OTA_SERVICE, UUIDS.DIS_SERVICE]
@@ -240,7 +240,7 @@ const BLEProtocol = (() => {
   }
 
   /**
-   * 写入 0xFFEA 设备改名：UTF-8 编码后必须 ≤9 字节且全为可打印 ASCII（与固件校验一致）
+   * 写入 0xFFEA 设备名（网页展示名）：UTF-8 编码后必须 ≤20 字节且全为可打印 ASCII（与固件校验一致）
    * @param {BluetoothRemoteGATTCharacteristic} devNameChar
    * @param {string} name - 新名字
    * @returns {Promise<{ok: boolean, message: string}>}
@@ -263,6 +263,25 @@ const BLEProtocol = (() => {
     }
     await devNameChar.writeValue(bytes);
     return { ok: true, message: 'saved' };
+  }
+
+  /**
+   * 读取 0xFFEA 设备名（设备侧存储的网页展示名）。
+   * 旧固件该特征只写不可读、或读取失败时返回 null；设备未改名时返回默认名（如 "SoilPulse"）。
+   * @param {BluetoothRemoteGATTCharacteristic|null} devNameChar
+   * @returns {Promise<string|null>}
+   */
+  async function readDeviceName(devNameChar) {
+    if (!devNameChar) {
+      return null;
+    }
+    try {
+      const val = await devNameChar.readValue();
+      return new TextDecoder().decode(val).split(String.fromCharCode(0))[0].trim();
+    } catch (err) {
+      console.warn('[BLE] device name read failed:', err);
+      return null;
+    }
   }
 
   /**
@@ -539,7 +558,7 @@ const BLEProtocol = (() => {
 
   return {
     UUIDS,
-    DEVICE_NAME_PREFIX,
+    DEVICE_NAME,
     parsePacket,
     parseDailyPacket,
     hexDump,
@@ -553,6 +572,7 @@ const BLEProtocol = (() => {
     readTempOffset,
     sendTempOffset,
     readCalibStatus,
+    readDeviceName,
     sendDeviceName,
     performOta,
   };
