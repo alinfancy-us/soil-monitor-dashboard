@@ -1058,6 +1058,7 @@
      // 避免重复 setStatus / 重复日志
      if (state.characteristic === null) return;
      stopPolling();
+     cancelRefreshWait();   // 若 refresh 正在等待测量结果，断连后立即恢复按钮
      state.otaRunning = false;
      setOtaUiLock(false);
      setStatus('disconnected');
@@ -1204,6 +1205,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
          device,
          (records, hex) => {
            log(`Notification: ${hex}`);
+           releaseRefreshOnData();   // 新数据已到：若 refresh 正在等待测量结果，立即解锁按钮
            render(records);
          },
          onDisconnected
@@ -1518,6 +1520,51 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
   els.calibDryBtn.addEventListener('click', () => handleCalibClick('dry', 'Dry'));
   els.calibWetBtn.addEventListener('click', () => handleCalibClick('wet', 'Wet'));
 
+  // ===== Refresh 防连点 =====
+  // 设备端一轮测量（电池/NTC/湿度三通道 ADC 采样 + 滤波稳定等待 + 0xFFE1 历史通知回传）
+  // 通常需要几百毫秒到 1~2 秒，而 0xFFE7 的 GATT 写入本身几十毫秒即完成：
+  // 若写完立刻恢复按钮，用户在这段窗口里看不到任何反馈，极易连续点击。
+  // 连点危害：设备端 s_force_measure_pending 是二值标志，同窗口内的连点会合并成一次测量，
+  // 但测量完成后再点仍会再测一次并写入一条历史记录（历史环仅 SOIL_HISTORY_MAX=5 条），
+  // 连续手动重测会把"最近 5 次趋势"刷成几乎相同的值，挤掉真实历史。
+  // 策略：
+  //   1) 点击后锁定按钮并显示 Measuring…，直到收到 0xFFE1 新数据通知（数据已到，无需再等）
+  //      或超时兜底解锁——突变/快采轮不写历史也不推通知，必须靠超时解锁，避免按钮永久锁死；
+  //   2) 解锁后仍有 COOLDOWN 冷却窗：两次手动重测至少间隔 3 秒，进一步限制重测频率。
+  const REFRESH_RESULT_TIMEOUT_MS = 6000;
+  const REFRESH_COOLDOWN_MS = 3000;
+  const REFRESH_LABEL_IDLE = '🔄 Refresh';
+  const REFRESH_LABEL_BUSY = '⏳ Measuring…';
+  let refreshBusy = false;          // 一次 refresh 从点击到"通知到达或超时"期间为 true
+  let refreshUnlockTimer = null;    // 超时兜底解锁定时器
+  let refreshLastStart = 0;         // 上次 refresh 发起时刻（冷却窗计时基准）
+
+  function setRefreshUiBusy(busy) {
+    els.refreshBtn.textContent = busy ? REFRESH_LABEL_BUSY : REFRESH_LABEL_IDLE;
+    els.refreshBtn.disabled = busy || !state.device?.gatt.connected;
+  }
+
+  // 收到 0xFFE1 数据通知时调用：refresh 若在等待新数据则立即解锁
+  function releaseRefreshOnData() {
+    if (!refreshBusy) return;
+    if (refreshUnlockTimer) {
+      clearTimeout(refreshUnlockTimer);
+      refreshUnlockTimer = null;
+    }
+    refreshBusy = false;
+    setRefreshUiBusy(false);
+  }
+
+  // 断连 / 写失败等异常路径：清等待状态并恢复按钮
+  function cancelRefreshWait() {
+    if (refreshUnlockTimer) {
+      clearTimeout(refreshUnlockTimer);
+      refreshUnlockTimer = null;
+    }
+    refreshBusy = false;
+    setRefreshUiBusy(false);
+  }
+
   async function handleRefreshClick() {
     if (state.otaRunning) {
       log('Refresh ignored: OTA update is running');
@@ -1526,14 +1573,33 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
     if (!state.device?.gatt.connected || !state.refreshChar) {
       return;
     }
-    els.refreshBtn.disabled = true;
+    // 防连点 1：上一次测量仍在进行（未收到新数据也未超时），忽略本次点击
+    if (refreshBusy) {
+      log('Refresh ignored: measurement already in progress');
+      return;
+    }
+    // 防连点 2：冷却窗内（数据已到但间隔太近），同样忽略，限制手动重测频率
+    const sinceLast = Date.now() - refreshLastStart;
+    if (refreshLastStart && sinceLast < REFRESH_COOLDOWN_MS) {
+      log(`Refresh ignored: please wait ${Math.ceil((REFRESH_COOLDOWN_MS - sinceLast) / 1000)}s between refreshes`);
+      return;
+    }
+    refreshLastStart = Date.now();
+    refreshBusy = true;
+    setRefreshUiBusy(true);
     try {
       await BLEProtocol.sendRefresh(state.refreshChar);
       log('Refresh command sent (0xFFE7), measuring now');
+      // 锁定到新数据通知到达为止（见 handleConnect 通知回调里的 releaseRefreshOnData）；超时兜底解锁
+      refreshUnlockTimer = setTimeout(() => {
+        refreshUnlockTimer = null;
+        refreshBusy = false;
+        setRefreshUiBusy(false);
+        log('Refresh: no new-data notification within 6s, button unlocked');
+      }, REFRESH_RESULT_TIMEOUT_MS);
     } catch (err) {
+      cancelRefreshWait();
       log(`Refresh failed: ${err.message || err}`);
-    } finally {
-      els.refreshBtn.disabled = !state.device?.gatt.connected;
     }
   }
 
