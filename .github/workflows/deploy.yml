@@ -5,15 +5,6 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      fw_tag:
-        description: '固件 release tag (例如 v2.1.1，留空则不更新固件)'
-        required: false
-        default: ''
-      fw_notes:
-        description: '固件升级说明 (可选，留空则保持 firmware.json 原值)'
-        required: false
-        default: ''
 
 jobs:
   deploy:
@@ -41,11 +32,14 @@ jobs:
 
       # 从 SoilPulse 固件仓库 Release 拉取固件并更新升级清单：
       # https://github.com/alinfancy-us/bth_soil_sensor/releases/download/<tag>/SoilPulse_<tag>.bin
+      # 固件 tag / 说明直接读取仓库 Actions Variables（FW_TAG / FW_NOTES）。
+      # 在仓库 Settings -> Secrets and variables -> Actions -> Variables 中配置 FW_TAG（如 v2.1.1）
+      # 与 FW_NOTES 后自动执行；若未配置 FW_TAG 则跳过固件更新。
       - name: Download firmware & Sync firmware.json
-        if: ${{ github.event.inputs.fw_tag != '' }}
+        if: ${{ vars.FW_TAG != '' }}
         env:
-          FW_RAW_TAG: ${{ github.event.inputs.fw_tag }}
-          FW_RAW_NOTES: ${{ github.event.inputs.fw_notes }}
+          FW_RAW_TAG: ${{ vars.FW_TAG }}
+          FW_RAW_NOTES: ${{ vars.FW_NOTES }}
           FW_TOKEN: ${{ secrets.FW_REPO_TOKEN }}
         run: |
           # 规范化 release tag：去掉可能输入的 v 前缀后统一补回，得到 v2.1.1 形式
