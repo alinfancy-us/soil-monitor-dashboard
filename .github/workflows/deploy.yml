@@ -31,7 +31,6 @@ jobs:
           grep "PAGE_VERSION" page/js/config.js
 
       # 从 SoilPulse 固件仓库 Release 拉取固件并更新升级清单：
-      # https://github.com/alinfancy-us/bth_soil_sensor/releases/download/<tag>/SoilPulse_<tag>.bin
       # 固件 tag / 说明直接读取仓库 Actions Variables（FW_TAG / FW_NOTES）。
       # 在仓库 Settings -> Secrets and variables -> Actions -> Variables 中配置 FW_TAG（如 v2.1.1）
       # 与 FW_NOTES 后自动执行；若未配置 FW_TAG 则跳过固件更新。
@@ -40,7 +39,8 @@ jobs:
         env:
           FW_RAW_TAG: ${{ vars.FW_TAG }}
           FW_RAW_NOTES: ${{ vars.FW_NOTES }}
-          FW_TOKEN: ${{ secrets.FW_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.FW_REPO_TOKEN }}
+          REPO_PATH: "alinfancy-us/bth_soil_sensor"
         run: |
           # 规范化 release tag：去掉可能输入的 v 前缀后统一补回，得到 v2.1.1 形式
           FW_NUM=$(echo "$FW_RAW_TAG" | sed 's/^[vV]//')
@@ -52,25 +52,39 @@ jobs:
 
           # bin 文件名与 Release 资产命名一致：SoilPulse_v<版本>.bin
           FW_BIN="SoilPulse_${FW_TAG}.bin"
-          FW_URL="https://github.com/alinfancy-us/bth_soil_sensor/releases/download/${FW_TAG}/${FW_BIN}"
 
           mkdir -p page/firmware
-          echo "Downloading ${FW_URL} ..."
-          # 私有仓库 Release 资产需 token：仅当 fw_url 指向 github.com 且配置了 FW_REPO_TOKEN secret 时附加，
-          # 避免 token 发往第三方下载主机
-          CURL_AUTH=()
-          case "$FW_URL" in
-            https://github.com/*)
-              if [ -n "$FW_TOKEN" ]; then CURL_AUTH=(-H "Authorization: Bearer $FW_TOKEN"); fi
-              ;;
-          esac
-          curl --fail --location --silent --show-error --retry 3 "${CURL_AUTH[@]}" --output "page/firmware/${FW_BIN}" "$FW_URL"
+          echo "Downloading ${FW_BIN} from repo: ${REPO_PATH}, tag: ${FW_TAG} using gh cli..."
 
-          # 校验下载结果非空，避免发布出损坏的固件升级清单
+          # 使用 gh cli 进行安全的权限重定向与资产下载
+          gh release download "$FW_TAG" \
+            --repo "$REPO_PATH" \
+            --pattern "$FW_BIN" \
+            --dir page/firmware/ \
+            --clobber
+
+          # ===== 校验下载产物（非空、二进制固件、文件名） =====
           if [ ! -s "page/firmware/${FW_BIN}" ]; then
-            echo "::error::固件下载失败或文件为空: ${FW_URL}，请确认 Release ${FW_TAG} 已发布且包含资产 ${FW_BIN}"
+            echo "::error::固件下载失败或文件为空，请确认 Release ${FW_TAG} 已发布且包含资产 ${FW_BIN}"
             exit 1
           fi
+
+          # 内容校验：拒绝空文件 / HTML 错误页
+          ARTIFACT_RC=0
+          node -e '
+            const b = require("fs").readFileSync(process.argv[1]);
+            if (b.length === 0) process.exit(1);
+            const head = b.subarray(0, 512).toString("latin1").toLowerCase();
+            if (head.includes("<!doctype html") || head.includes("<html")) process.exit(2);
+            if (!b.includes(0)) process.exit(3);
+          ' "page/firmware/${FW_BIN}" || ARTIFACT_RC=$?
+          case "$ARTIFACT_RC" in
+            0) : ;;
+            1) echo "::error::下载产物为空文件"; exit 1 ;;
+            2) echo "::error::下载产物是 HTML 页面而非固件二进制（请确认 Token 是否具备权限或 Release Tag 是否正确）"; exit 1 ;;
+            3) echo "::error::下载产物不是二进制固件（未检测到二进制特征）"; exit 1 ;;
+            *) echo "::error::下载产物校验失败 (rc=${ARTIFACT_RC})"; exit 1 ;;
+          esac
 
           # 清理旧版本固件 bin，只保留本次清单指向的固件，避免 dist 残留历史文件
           find page/firmware -maxdepth 1 -type f -name 'SoilPulse_*.bin' ! -name "${FW_BIN}" -delete

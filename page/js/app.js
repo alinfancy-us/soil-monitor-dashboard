@@ -63,9 +63,6 @@
      lastUpdate: document.getElementById('lastUpdate'),
      historyBody: document.getElementById('historyBody'),
      trendChart: document.getElementById('trendChart'),
-    trendTempLatest: document.getElementById('trendTempLatest'),
-    trendHumLatest: document.getElementById('trendHumLatest'),
-    trendBattLatest: document.getElementById('trendBattLatest'),
     trendRangeText: document.getElementById('trendRangeText'),
      trendTabBtn: document.getElementById('trendTabBtn'),
      trendTabPanel: document.getElementById('trendTabPanel'),
@@ -75,9 +72,6 @@
     dailyMetricHumBtn: document.getElementById('dailyMetricHumBtn'),
     dailyMetricBattBtn: document.getElementById('dailyMetricBattBtn'),
     dailyMetricHint: document.getElementById('dailyMetricHint'),
-    dailyLatestValue: document.getElementById('dailyLatestValue'),
-    dailyAvgValue: document.getElementById('dailyAvgValue'),
-    dailyChangeValue: document.getElementById('dailyChangeValue'),
      modal: document.getElementById('compatibilityModal'),
      modalIcon: document.getElementById('modalIcon'),
      modalTitle: document.getElementById('modalTitle'),
@@ -604,20 +598,16 @@
      drawChart(records);
    }
 
+   // Data 面板改版后图下 3 个统计块(trend/dailyLatestValue 等)已从 index.html 移除，
+   // 本函数仅维护仍存在的 trendRangeText 时间范围文案；勿再引用已删除的元素
    function updateTrendSummary(records) {
      if (!records || !records.length) {
-       els.trendTempLatest.textContent = '--';
-       els.trendHumLatest.textContent = '--';
-       els.trendBattLatest.textContent = '--';
        els.trendRangeText.textContent = 'Waiting for device data';
        return;
      }
 
      const latest = records[records.length - 1];
      const first = records[0];
-     els.trendTempLatest.textContent = fmtTemp(latest.temp);
-     els.trendHumLatest.textContent = `${latest.hum.toFixed(1)}%`;
-     els.trendBattLatest.textContent = `${latest.batt.toFixed(0)}%`;
      els.trendRangeText.textContent = `Time range: ${formatShortTime(first.timestamp)} - ${formatShortTime(latest.timestamp)}`;
    }
  
@@ -894,11 +884,6 @@
      if (state.lastDailyRecords) renderDaily(state.lastDailyRecords);
    }
 
-   function formatSignedMetricValue(cfg, value) {
-     if (value === 0) return cfg.formatValue(0);
-     const sign = value > 0 ? '+' : '-';
-     return `${sign}${cfg.formatValue(Math.abs(value))}`;
-   }
 
    function renderDaily(records) {
     records = sanitizeDailyRecords(records);
@@ -908,12 +893,6 @@
 
      if (!records || !records.length) {
        els.dailyEmpty.classList.remove('hidden');
-       els.dailyLatestValue.textContent = '--';
-       els.dailyAvgValue.textContent = '--';
-       els.dailyChangeValue.textContent = '--';
-       els.dailyLatestValue.style.color = '';
-       els.dailyAvgValue.style.color = '';
-       els.dailyChangeValue.style.color = '';
        els.dailyMetricHint.textContent = 'Single metric view for clear comparison';
        const ctx = els.dailyChart.getContext('2d');
        if (ctx) ctx.clearRect(0, 0, els.dailyChart.width, els.dailyChart.height);
@@ -925,9 +904,6 @@
      const xLabels = records.map(r => formatMonthDay(r.dateEpoch));
      let values = records.map(r => Number(r[cfg.key]) || 0);
      if (cfg.key === 'temp') values = values.map(tempVal);
-     const latest = values[values.length - 1];
-     const first = values[0];
-     const avg = values.reduce((sum, v) => sum + v, 0) / values.length;
 
      drawMultiSeriesChart(els.dailyChart, [
        { values, color: cfg.color },
@@ -940,12 +916,6 @@
        leftAxisFormatter: cfg.axisFormatter,
      });
 
-     els.dailyLatestValue.textContent = cfg.formatValue(latest);
-     els.dailyAvgValue.textContent = cfg.formatValue(avg);
-     els.dailyChangeValue.textContent = formatSignedMetricValue(cfg, latest - first);
-     els.dailyLatestValue.style.color = cfg.color;
-     els.dailyAvgValue.style.color = cfg.color;
-     els.dailyChangeValue.style.color = cfg.color;
      els.dailyMetricHint.textContent = `${cfg.title}${cfg.key === 'temp' ? ` (${tempUnitSymbol()})` : ''} · ${xLabels[0]} - ${xLabels[xLabels.length - 1]}`;
     saveDailyRecordsCache(records, state.activeDeviceId);
    }
