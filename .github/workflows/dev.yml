@@ -60,45 +60,92 @@ jobs:
           # 验证替换结果
           grep -E "PAGE_VERSION|DASHBOARD_URL" page/js/config.js
 
-      # 从 fw_url 拉取固件并更新升级清单，isforce=true 强制提醒升级：
-      # 用于验证非正式测试固件（commit 哈希命名）；后续把 fw_url 换成正式版 Release URL，
-      # 同样强制提醒，即可把刷了测试固件的设备覆盖回正式版。
-      # 浏览器 OTA 始终从 page/firmware/<bin> 同源下载，fw_url 仅在 CI 下载阶段使用
+      # 从 fw_url 拉取固件并更新升级清单，isforce=true 强制提醒升级
+      # 支持 Actions Artifact zip 链接、Release Asset 链接以及常规 HTTP 链接
       - name: Download firmware & Sync firmware.json
         if: ${{ github.event.inputs.fw_url != '' }}
         env:
           FW_URL: ${{ github.event.inputs.fw_url }}
           FW_RAW_NOTES: ${{ github.event.inputs.fw_notes }}
-          FW_TOKEN: ${{ secrets.FW_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.FW_REPO_TOKEN }}
         run: |
-          # bin 文件名取 URL 路径最后一段（去掉查询参数），作为本地保存文件名（不预校验 URL）
-          FW_BIN="${FW_URL%%\?*}"
-          FW_BIN="${FW_BIN##*/}"
-          if [ -z "$FW_BIN" ]; then
-            echo "::error::无法从 fw_url 解析出 bin 文件名: ${FW_URL}"
-            exit 1
+          mkdir -p page/firmware
+
+          # 提取 URL 中的 repo 路径 (如 alinfancy-us/bth_soil_sensor)
+          REPO_PATH=$(echo "$FW_URL" | sed -E 's|https://github\.com/([^/]+/[^/]+)/.*|\1|')
+
+          # 1. 情况一：判断是否为 Actions Artifact 链接 (/artifacts/xxxx)
+          if [[ "$FW_URL" =~ /artifacts/([0-9]+) ]]; then
+            ARTIFACT_ID="${BASH_REMATCH[1]}"
+            API_URL="https://api.github.com/repos/${REPO_PATH}/actions/artifacts/${ARTIFACT_ID}/zip"
+            
+            echo "Detected Actions Artifact link. Downloading via API: ${API_URL}"
+            if [ -z "$GH_TOKEN" ]; then
+              echo "::error::下载私有 Actions Artifact 必须配置 FW_REPO_TOKEN"
+              exit 1
+            fi
+
+            # 下载 zip 并解压
+            curl --fail --location --silent --show-error --retry 3 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              --output "page/firmware/artifact.zip" "$API_URL"
+
+            unzip -o page/firmware/artifact.zip -d page/firmware/
+            rm page/firmware/artifact.zip
+            FW_BIN=$(basename $(ls page/firmware/*.bin | head -n 1))
+
+          # 2. 情况二：判断是否为 GitHub Release 链接 (/releases/download/xxx 或 /releases/tag/xxx)
+          elif [[ "$FW_URL" =~ /releases/ ]]; then
+            echo "Detected GitHub Release link. Downloading using gh cli..."
+            
+            # 从 URL 中提取 tag (例如 /releases/download/v1.1.1/xxx.bin -> v1.1.1)
+            TAG_NAME=$(echo "$FW_URL" | sed -E 's|.*/releases/(download|tag)/([^/]+).*|\2|')
+            
+            # 解析要下载的文件名 pattern (若 URL 带具体文件名则匹配文件名，否则匹配 .bin)
+            FILE_PATTERN="${FW_URL%%\?*}"
+            FILE_PATTERN="${FILE_PATTERN##*/}"
+            if [[ ! "$FILE_PATTERN" =~ \.bin$ ]]; then
+              FILE_PATTERN="*.bin"
+            fi
+
+            echo "Fetching asset from repo: ${REPO_PATH}, tag: ${TAG_NAME}, pattern: ${FILE_PATTERN}"
+            
+            # 使用 gh release download 工具下载，原生处理权限与重定向
+            gh release download "$TAG_NAME" \
+              --repo "$REPO_PATH" \
+              --pattern "$FILE_PATTERN" \
+              --dir page/firmware/ \
+              --clobber
+
+            FW_BIN=$(basename $(ls page/firmware/*.bin | head -n 1))
+
+          # 3. 情况三：普通外网/直链 URL
+          else
+            FW_BIN="${FW_URL%%\?*}"
+            FW_BIN="${FW_BIN##*/}"
+            if [ -z "$FW_BIN" ]; then
+              echo "::error::无法从 fw_url 解析出 bin 文件名: ${FW_URL}"
+              exit 1
+            fi
+
+            echo "Downloading ${FW_URL} ..."
+            CURL_AUTH=()
+            case "$FW_URL" in
+              https://github.com/*)
+                if [ -n "$GH_TOKEN" ]; then CURL_AUTH=(-H "Authorization: Bearer $GH_TOKEN"); fi
+                ;;
+            esac
+            curl --fail --location --silent --show-error --retry 3 "${CURL_AUTH[@]}" --output "page/firmware/${FW_BIN}" "$FW_URL"
           fi
 
-          mkdir -p page/firmware
-          echo "Downloading ${FW_URL} ..."
-          # 私有仓库 Release 资产需 token：仅当 fw_url 指向 github.com 且配置了 FW_REPO_TOKEN secret 时附加，
-          # 避免 token 发往第三方下载主机
-          CURL_AUTH=()
-          case "$FW_URL" in
-            https://github.com/*)
-              if [ -n "$FW_TOKEN" ]; then CURL_AUTH=(-H "Authorization: Bearer $FW_TOKEN"); fi
-              ;;
-          esac
-          curl --fail --location --silent --show-error --retry 3 "${CURL_AUTH[@]}" --output "page/firmware/${FW_BIN}" "$FW_URL"
-
-          # ===== 校验下载产物（而非校验 URL）：非空、是二进制固件、文件名符合命名约定 =====
+          # ===== 校验下载产物（非空、二进制固件、文件名） =====
           if [ ! -s "page/firmware/${FW_BIN}" ]; then
             echo "::error::固件下载失败或文件为空: ${FW_URL}"
             exit 1
           fi
 
-          # 内容校验：拒绝空文件 / HTML 错误页（URL 指向网页或登录页时的典型情况）/ 纯文本；
-          # 固件二进制必然包含 NUL 字节，以此与文本内容区分
+          # 内容校验：拒绝空文件 / HTML 错误页
           ARTIFACT_RC=0
           node -e '
             const b = require("fs").readFileSync(process.argv[1]);
@@ -110,31 +157,28 @@ jobs:
           case "$ARTIFACT_RC" in
             0) : ;;
             1) echo "::error::下载产物为空文件: ${FW_URL}"; exit 1 ;;
-            2) echo "::error::下载产物是 HTML 页面而非固件二进制（URL 可能指向网页/登录页）: ${FW_URL}"; exit 1 ;;
-            3) echo "::error::下载产物不是二进制固件（未检测到二进制特征），请确认 URL 直接指向 .bin 文件: ${FW_URL}"; exit 1 ;;
+            2) echo "::error::下载产物是 HTML 页面而非固件二进制（请确认 Token 是否具备权限或 URL 是否正确）: ${FW_URL}"; exit 1 ;;
+            3) echo "::error::下载产物不是二进制固件（未检测到二进制特征）: ${FW_URL}"; exit 1 ;;
             *) echo "::error::下载产物校验失败 (rc=${ARTIFACT_RC}): ${FW_URL}"; exit 1 ;;
           esac
 
-          # 清理旧版本固件 bin，只保留本次清单指向的固件，避免 dist 残留历史文件
+          # 清理旧版本固件 bin，只保留本次清单指向的固件
           find page/firmware -maxdepth 1 -type f -name '*.bin' ! -name "${FW_BIN}" -delete
 
-          # 从下载产物文件名解析清单版本号：正式版 SoilPulse_v<版本>.bin（如 SoilPulse_v2.1.1.bin）；
-          # 非正式测试版用 commit 哈希 <哈希>.bin（如 SoilPulse_a1b2c3.bin 或 a1b2c3.bin）
+          # 从下载产物文件名解析清单版本号
           if [[ "$FW_BIN" =~ ^(SoilPulse_)?[vV]([0-9]+(\.[0-9]+)+)\.bin$ ]]; then
             FW_VERSION="${BASH_REMATCH[2]}"
           elif [[ "$FW_BIN" =~ ^(SoilPulse_)?([0-9a-fA-F]{6,40})\.bin$ ]]; then
             FW_VERSION="${BASH_REMATCH[2]}"
           else
-            echo "::error::下载产物文件名 ${FW_BIN} 不符合命名约定，无法解析版本号：正式版请按 SoilPulse_v<版本>.bin（如 SoilPulse_v2.1.1.bin），测试版请按 SoilPulse_<commit哈希>.bin（如 SoilPulse_a1b2c3.bin）命名"
+            echo "::error::下载产物文件名 ${FW_BIN} 不符合命名约定，无法解析版本号"
             exit 1
           fi
 
-          # dev 渠道为强制升级清单（isforce=true）；notes 未填时默认标记为 test firmware
           FW_NOTES=${FW_RAW_NOTES:-test firmware}
 
           echo "Syncing firmware.json -> version=${FW_VERSION}, bin=${FW_BIN}, size=$(stat -c%s page/firmware/${FW_BIN}), isforce=true..."
 
-          # 用 node 原子更新 JSON 字段（size 从实际 bin 文件大小计算，清单缺失时自动初始化）
           node -e '
             const fs = require("fs");
             const manifestPath = "page/firmware/firmware.json";
@@ -149,7 +193,6 @@ jobs:
             fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
           ' "$FW_VERSION" "$FW_BIN" "$FW_NOTES"
 
-          # 验证更新结果
           cat page/firmware/firmware.json
           ls -la page/firmware
 
