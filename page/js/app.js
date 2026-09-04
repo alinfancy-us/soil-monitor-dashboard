@@ -71,7 +71,7 @@
     dailyMetricTempBtn: document.getElementById('dailyMetricTempBtn'),
     dailyMetricHumBtn: document.getElementById('dailyMetricHumBtn'),
     dailyMetricBattBtn: document.getElementById('dailyMetricBattBtn'),
-    dailyMetricHint: document.getElementById('dailyMetricHint'),
+    // dailyMetricHint: document.getElementById('dailyMetricHint'),
      modal: document.getElementById('compatibilityModal'),
      modalIcon: document.getElementById('modalIcon'),
      modalTitle: document.getElementById('modalTitle'),
@@ -893,7 +893,7 @@
 
      if (!records || !records.length) {
        els.dailyEmpty.classList.remove('hidden');
-       els.dailyMetricHint.textContent = 'Single metric view for clear comparison';
+       // els.dailyMetricHint.textContent = 'Single metric view for clear comparison';
        const ctx = els.dailyChart.getContext('2d');
        if (ctx) ctx.clearRect(0, 0, els.dailyChart.width, els.dailyChart.height);
        return;
@@ -916,7 +916,7 @@
        leftAxisFormatter: cfg.axisFormatter,
      });
 
-     els.dailyMetricHint.textContent = `${cfg.title}${cfg.key === 'temp' ? ` (${tempUnitSymbol()})` : ''} · ${xLabels[0]} - ${xLabels[xLabels.length - 1]}`;
+     // els.dailyMetricHint.textContent = `${cfg.title}${cfg.key === 'temp' ? ` (${tempUnitSymbol()})` : ''} · ${xLabels[0]} - ${xLabels[xLabels.length - 1]}`;
     saveDailyRecordsCache(records, state.activeDeviceId);
    }
  
