@@ -99,8 +99,13 @@ jobs:
           elif [[ "$FW_URL" =~ /releases/ ]]; then
             echo "Detected GitHub Release link. Downloading using gh cli..."
             
-            # 从 URL 中提取 tag (例如 /releases/download/v1.1.1/xxx.bin -> v1.1.1)
-            TAG_NAME=$(echo "$FW_URL" | sed -E 's|.*/releases/(download|tag)/([^/]+).*|\2|')
+            # 使用 Bash 内置正则提取 Tag 名称
+            if [[ "$FW_URL" =~ /releases/(download|tag)/([^/]+) ]]; then
+              TAG_NAME="${BASH_REMATCH[2]}"
+            else
+              echo "::error::无法从 Release URL 解析出 Tag 名称: ${FW_URL}"
+              exit 1
+            fi
             
             # 解析要下载的文件名 pattern (若 URL 带具体文件名则匹配文件名，否则匹配 .bin)
             FILE_PATTERN="${FW_URL%%\?*}"
