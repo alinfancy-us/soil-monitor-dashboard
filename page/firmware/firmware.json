@@ -1,6 +1,0 @@
-{
-  "version": "0.0.0",
-  "bin": "SoilPulse_v2.1.0.bin",
-  "size": 67252,
-  "notes": "SoilPulse soil sensor firmware (TLSR8258). Bump SOIL_FW_VERSION in app_config.h, rebuild, copy the new bin here and update this manifest to publish an OTA update."
-}

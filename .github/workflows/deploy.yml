@@ -5,6 +5,15 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      fw_tag:
+        description: '固件 release tag (例如 v2.1.1，留空则不更新固件)'
+        required: false
+        default: ''
+      fw_notes:
+        description: '固件升级说明 (可选，留空则保持 firmware.json 原值)'
+        required: false
+        default: ''
 
 jobs:
   deploy:
@@ -29,6 +38,70 @@ jobs:
           
           # 验证替换结果
           grep "PAGE_VERSION" page/js/config.js
+
+      # 从 SoilPulse 固件仓库 Release 拉取固件并更新升级清单：
+      # https://github.com/alinfancy-us/bth_soil_sensor/releases/download/<tag>/SoilPulse_<tag>.bin
+      - name: Download firmware & Sync firmware.json
+        if: ${{ github.event.inputs.fw_tag != '' }}
+        env:
+          FW_RAW_TAG: ${{ github.event.inputs.fw_tag }}
+          FW_RAW_NOTES: ${{ github.event.inputs.fw_notes }}
+          FW_TOKEN: ${{ secrets.FW_REPO_TOKEN }}
+        run: |
+          # 规范化 release tag：去掉可能输入的 v 前缀后统一补回，得到 v2.1.1 形式
+          FW_NUM=$(echo "$FW_RAW_TAG" | sed 's/^[vV]//')
+          if [ -z "$FW_NUM" ]; then
+            echo "::error::固件 release tag 不能为空"
+            exit 1
+          fi
+          FW_TAG="v${FW_NUM}"
+
+          # bin 文件名与 Release 资产命名一致：SoilPulse_v<版本>.bin
+          FW_BIN="SoilPulse_${FW_TAG}.bin"
+          FW_URL="https://github.com/alinfancy-us/bth_soil_sensor/releases/download/${FW_TAG}/${FW_BIN}"
+
+          mkdir -p page/firmware
+          echo "Downloading ${FW_URL} ..."
+          # 私有仓库 Release 资产需 token：仅当 fw_url 指向 github.com 且配置了 FW_REPO_TOKEN secret 时附加，
+          # 避免 token 发往第三方下载主机
+          CURL_AUTH=()
+          case "$FW_URL" in
+            https://github.com/*)
+              if [ -n "$FW_TOKEN" ]; then CURL_AUTH=(-H "Authorization: Bearer $FW_TOKEN"); fi
+              ;;
+          esac
+          curl --fail --location --silent --show-error --retry 3 "${CURL_AUTH[@]}" --output "page/firmware/${FW_BIN}" "$FW_URL"
+
+          # 校验下载结果非空，避免发布出损坏的固件升级清单
+          if [ ! -s "page/firmware/${FW_BIN}" ]; then
+            echo "::error::固件下载失败或文件为空: ${FW_URL}，请确认 Release ${FW_TAG} 已发布且包含资产 ${FW_BIN}"
+            exit 1
+          fi
+
+          # 清理旧版本固件 bin，只保留本次清单指向的固件，避免 dist 残留历史文件
+          find page/firmware -maxdepth 1 -type f -name 'SoilPulse_*.bin' ! -name "${FW_BIN}" -delete
+
+          echo "Syncing firmware.json -> version=${FW_TAG#v}, bin=${FW_BIN}, size=$(stat -c%s page/firmware/${FW_BIN}), isforce=false..."
+
+          # 用 node 原子更新 JSON 字段（version 去掉 v 前缀，size 从实际 bin 文件大小计算，
+          # isforce 置 false——生产渠道只按版本号正常提醒，不做强制升级，notes 可选更新）
+          node -e '
+            const fs = require("fs");
+            const manifestPath = "page/firmware/firmware.json";
+            let manifest = {};
+            try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); } catch (_) {}
+            const [, version, bin, notes] = process.argv;
+            manifest.version = version;
+            manifest.bin = bin;
+            manifest.size = fs.statSync("page/firmware/" + bin).size;
+            manifest.isforce = false;
+            if (notes !== "") manifest.notes = notes;
+            fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+          ' "${FW_TAG#v}" "${FW_BIN}" "$FW_RAW_NOTES"
+
+          # 验证更新结果
+          cat page/firmware/firmware.json
+          ls -la page/firmware
 
       - name: Assemble clean dist
         run: |

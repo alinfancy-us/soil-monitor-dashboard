@@ -1803,7 +1803,7 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
     return 0;
   }
 
-  // 连接后检测新版本：fetch page/firmware/firmware.json 与设备固件版本（DIS 0x2A26）比较，更高则在 Setting 显示升级提示
+  // 连接后检测新版本：fetch page/firmware/firmware.json 与设备固件版本（DIS 0x2A26）比较，更高则提示升级；清单带 isforce:true 时跳过比较强制提醒
   async function checkFirmwareUpdate() {
     state.fwUpdate = null;
     renderFirmwareCard();
@@ -1814,7 +1814,12 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
       const raw = await res.json();
       const m = normalizeManifest(raw);
       if (!m) return;
-      if (compareVersions(m.latest.version, state.fwVersion) <= 0) {
+      // isforce：dev 渠道发布的强制升级清单，跳过版本号比较直接提醒升级（用于测试固件下发，
+      // 以及填入正式版 URL 后把测试固件覆盖回正式版）；设备已在该版本上时（字符串相等，
+      // 测试固件版本为 commit hash）仍不提醒，避免重复打扰
+      const isForce = m.latest.isforce === true;
+      if (String(state.fwVersion || "") === String(m.latest.version)
+        || (!isForce && compareVersions(m.latest.version, state.fwVersion) <= 0)) {
         renderFirmwareCard();
         return;
       }

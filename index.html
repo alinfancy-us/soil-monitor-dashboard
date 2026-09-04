@@ -351,25 +351,7 @@
       </div>
       <p id="lastUpdate" class="mb-5 text-xs text-center text-slate-400 sm:mb-6">No measurement received yet</p>
 
-      <!-- History & trend charts（原 History 面板内容已并入 Data 面板） -->
-      <!-- History table -->
-      <div class="dashboard-card p-4 mb-5 overflow-hidden rounded-2xl sm:p-5 sm:mb-6">
-        <h2 class="mb-3 text-sm font-semibold text-slate-600">Measurement history</h2>
-        <table class="history-table w-full text-sm">
-          <thead>
-            <tr class="text-left border-b text-slate-400 border-slate-100">
-              <th class="py-2 pr-2">#</th>
-              <th class="py-2 pr-2">Date</th>
-              <th class="py-2 pr-2">Temperature</th>
-              <th class="py-2 pr-2">Moisture</th>
-              <th class="py-2">Battery</th>
-            </tr>
-          </thead>
-          <tbody id="historyBody">
-            <tr><td colspan="5" class="py-6 text-center text-slate-300">Connect a device to view history</td></tr>
-          </tbody>
-        </table>
-      </div>
+      
 
       <!-- Trend charts (tabbed: recent records / 7-day daily average) -->
       <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5 sm:mb-0">
@@ -381,20 +363,6 @@
         <div id="trendTabPanel">
           <div class="relative h-56 sm:h-60">
             <canvas id="trendChart" class="w-full h-full"></canvas>
-          </div>
-          <div class="grid grid-cols-3 gap-2 mt-3 text-xs">
-            <div class="rounded-lg bg-orange-50 px-2.5 py-2 text-center">
-              <div id="trendTempLatest" class="text-sm font-semibold text-orange-600">--</div>
-              <div class="mt-0.5 text-slate-500">Temperature</div>
-            </div>
-            <div class="rounded-lg bg-sky-50 px-2.5 py-2 text-center">
-              <div id="trendHumLatest" class="text-sm font-semibold text-sky-600">--</div>
-              <div class="mt-0.5 text-slate-500">Moisture (%)</div>
-            </div>
-            <div class="rounded-lg bg-emerald-50 px-2.5 py-2 text-center">
-              <div id="trendBattLatest" class="text-sm font-semibold text-emerald-600">--</div>
-              <div class="mt-0.5 text-slate-500">Battery (%)</div>
-            </div>
           </div>
           <p id="trendRangeText" class="mt-2 text-xs text-center text-slate-400">Waiting for device data</p>
         </div>
@@ -411,22 +379,29 @@
           <div class="relative h-56 sm:h-60">
             <canvas id="dailyChart" class="w-full h-full"></canvas>
           </div>
-          <div class="grid grid-cols-3 gap-2 mt-3 text-xs">
-            <div class="rounded-lg bg-slate-50 px-2.5 py-2 text-center">
-              <div id="dailyLatestValue" class="text-sm font-semibold text-slate-700">--</div>
-              <div class="mt-0.5 text-slate-500">Latest</div>
-            </div>
-            <div class="rounded-lg bg-slate-50 px-2.5 py-2 text-center">
-              <div id="dailyAvgValue" class="text-sm font-semibold text-slate-700">--</div>
-              <div class="mt-0.5 text-slate-500">7-day average</div>
-            </div>
-            <div class="rounded-lg bg-slate-50 px-2.5 py-2 text-center">
-              <div id="dailyChangeValue" class="text-sm font-semibold text-slate-700">--</div>
-              <div class="mt-0.5 text-slate-500">Change vs first</div>
-            </div>
-          </div>
+          
           <p id="dailyEmpty" class="mt-2 text-xs text-center text-slate-300">No daily data yet</p>
         </div>
+      </div>
+
+      <!-- History & trend charts（原 History 面板内容已并入 Data 面板） -->
+      <!-- History table -->
+      <div class="dashboard-card p-4 mb-5 overflow-hidden rounded-2xl sm:p-5 sm:mb-6 mt-6">
+        <h2 class="mb-3 text-sm font-semibold text-slate-600">Measurement history</h2>
+        <table class="history-table w-full text-sm">
+          <thead>
+            <tr class="text-left border-b text-slate-400 border-slate-100">
+              <th class="py-2 pr-2">#</th>
+              <th class="py-2 pr-2">Date</th>
+              <th class="py-2 pr-2">Temperature</th>
+              <th class="py-2 pr-2">Moisture</th>
+              <th class="py-2">Battery</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody">
+            <tr><td colspan="5" class="py-6 text-center text-slate-300">Connect a device to view history</td></tr>
+          </tbody>
+        </table>
       </div>
     </section>
     <!-- ================= Panel: Setting ================= -->
@@ -539,7 +514,7 @@
               class="flex-1 min-w-0 px-3 py-2 text-sm font-medium rounded-xl bg-slate-100 text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500">
             <button id="devNameSaveBtn" disabled
               class="action-button inline-flex items-center px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">
-              Save name
+              Save
             </button>
           </div>
           <div class="flex justify-between mt-1 text-[11px] text-slate-400">
@@ -652,6 +627,6 @@
        每次前端功能变更后必须递增，否则浏览器会继续运行旧版 JS -->
   <script src="page/js/config.js?v=1.3.10"></script>
   <script src="page/js/ble-protocol.js?v=1.3.10"></script>
-  <script src="page/js/app.js?v=1.3.11"></script>
+  <script src="page/js/app.js?v=1.3.12"></script>
 </body>
 </html>

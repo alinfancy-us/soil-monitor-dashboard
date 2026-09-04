@@ -37,7 +37,7 @@ const SoilPulseConfig = (() => {
     DIS_FW_REV_CHAR: '00002a26-0000-1000-8000-00805f9b34fb',
   };
 
-  // 固件升级清单（version/bin/size），与固件 .bin 一起托管在 page/firmware/；连接后 fetch 与设备固件版本比较，更高则提示一键升级
+  // 固件升级清单（version/bin/size/isforce），与固件 .bin 一起托管在 page/firmware/；连接后 fetch 与设备固件版本比较，更高则提示一键升级（isforce:true 为 dev 渠道强制升级，跳过版本比较）
   const FIRMWARE_MANIFEST_URL = 'page/firmware/firmware.json';
 
   // 湿度两点校准指令（1 字节），须与固件 soil_calib_point_t 严格对齐

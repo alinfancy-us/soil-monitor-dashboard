@@ -7,16 +7,12 @@ on:
         description: '请输入发布版本号 (例如 1.3.8 或 v1.3.8)'
         required: true
         default: '1.3.8'
-      fw_version:
-        description: '固件版本号，写入 firmware.json (留空则不更新，例如 2.1.1 或 v2.1.1)'
-        required: false
-        default: ''
-      fw_bin:
-        description: '固件 bin 文件名 (留空则按 SoilPulse_v<固件版本>.bin 自动推导)'
+      fw_url:
+        description: '固件 bin 下载 URL (留空则不更新固件，文件名须按 SoilPulse_v<版本>.bin 或 SoilPulse_<commit哈希>.bin 命名)'
         required: false
         default: ''
       fw_notes:
-        description: '固件升级说明 (留空则保持 firmware.json 原值)'
+        description: '固件升级说明 (可选，留空默认写入 test firmware)'
         required: false
         default: ''
 
@@ -64,42 +60,80 @@ jobs:
           # 验证替换结果
           grep -E "PAGE_VERSION|DASHBOARD_URL" page/js/config.js
 
-      - name: Sync firmware.json from Input
-        if: ${{ github.event.inputs.fw_version != '' }}
+      # 从 fw_url 拉取固件并更新升级清单，isforce=true 强制提醒升级：
+      # 用于验证非正式测试固件（commit 哈希命名）；后续把 fw_url 换成正式版 Release URL，
+      # 同样强制提醒，即可把刷了测试固件的设备覆盖回正式版。
+      # 浏览器 OTA 始终从 page/firmware/<bin> 同源下载，fw_url 仅在 CI 下载阶段使用
+      - name: Download firmware & Sync firmware.json
+        if: ${{ github.event.inputs.fw_url != '' }}
         env:
-          FW_RAW_VERSION: ${{ github.event.inputs.fw_version }}
-          FW_RAW_BIN: ${{ github.event.inputs.fw_bin }}
+          FW_URL: ${{ github.event.inputs.fw_url }}
           FW_RAW_NOTES: ${{ github.event.inputs.fw_notes }}
+          FW_TOKEN: ${{ secrets.FW_REPO_TOKEN }}
         run: |
-          # 去掉用户输入可能带有的 v 前缀
-          FW_VERSION=${FW_RAW_VERSION#v}
-
-          # bin 文件名：未指定时按约定 SoilPulse_v<固件版本>.bin 推导
-          FW_BIN=${FW_RAW_BIN:-SoilPulse_v${FW_VERSION}.bin}
-
-          # 校验 bin 文件确实存在，避免发布出指向缺失文件的升级清单
-          if [ ! -f "page/firmware/${FW_BIN}" ]; then
-            echo "::error::找不到固件文件 page/firmware/${FW_BIN}，请确认文件已提交且文件名正确"
+          # bin 文件名取 URL 路径最后一段（去掉查询参数）
+          FW_BIN="${FW_URL%%\?*}"
+          FW_BIN="${FW_BIN##*/}"
+          if [ -z "$FW_BIN" ]; then
+            echo "::error::无法从 fw_url 解析出 bin 文件名: ${FW_URL}"
             exit 1
           fi
 
-          echo "Syncing firmware.json -> version=${FW_VERSION}, bin=${FW_BIN}, size=$(stat -c%s page/firmware/${FW_BIN})..."
+          # 从文件名解析清单版本号：正式版 SoilPulse_v<版本>.bin（如 SoilPulse_v2.1.1.bin）；
+          # 非正式测试版用 commit 哈希 <哈希>.bin（如 SoilPulse_a1b2c3.bin 或 a1b2c3.bin）
+          if [[ "$FW_BIN" =~ ^(SoilPulse_)?[vV]([0-9]+(\.[0-9]+)+)\.bin$ ]]; then
+            FW_VERSION="${BASH_REMATCH[2]}"
+          elif [[ "$FW_BIN" =~ ^(SoilPulse_)?([0-9a-fA-F]{6,40})\.bin$ ]]; then
+            FW_VERSION="${BASH_REMATCH[2]}"
+          else
+            echo "::error::固件文件名 ${FW_BIN} 无法解析版本号：正式版请按 SoilPulse_v<版本>.bin（如 SoilPulse_v2.1.1.bin），测试版请按 SoilPulse_<commit哈希>.bin（如 SoilPulse_a1b2c3.bin）命名"
+            exit 1
+          fi
 
-          # 用 node 原子更新 JSON 字段（size 从实际 bin 文件大小计算，notes 可选更新）
+          mkdir -p page/firmware
+          echo "Downloading ${FW_URL} ..."
+          # 私有仓库 Release 资产需 token：仅当 fw_url 指向 github.com 且配置了 FW_REPO_TOKEN secret 时附加，
+          # 避免 token 发往第三方下载主机
+          CURL_AUTH=()
+          case "$FW_URL" in
+            https://github.com/*)
+              if [ -n "$FW_TOKEN" ]; then CURL_AUTH=(-H "Authorization: Bearer $FW_TOKEN"); fi
+              ;;
+          esac
+          curl --fail --location --silent --show-error --retry 3 "${CURL_AUTH[@]}" --output "page/firmware/${FW_BIN}" "$FW_URL"
+
+          # 校验下载结果非空，避免发布出损坏的固件升级清单
+          if [ ! -s "page/firmware/${FW_BIN}" ]; then
+            echo "::error::固件下载失败或文件为空: ${FW_URL}"
+            exit 1
+          fi
+
+          # 清理旧版本固件 bin，只保留本次清单指向的固件，避免 dist 残留历史文件
+          find page/firmware -maxdepth 1 -type f -name '*.bin' ! -name "${FW_BIN}" -delete
+
+          # dev 渠道为强制升级清单（isforce=true）；notes 未填时默认标记为 test firmware
+          FW_NOTES=${FW_RAW_NOTES:-test firmware}
+
+          echo "Syncing firmware.json -> version=${FW_VERSION}, bin=${FW_BIN}, size=$(stat -c%s page/firmware/${FW_BIN}), isforce=true..."
+
+          # 用 node 原子更新 JSON 字段（size 从实际 bin 文件大小计算，清单缺失时自动初始化）
           node -e '
             const fs = require("fs");
             const manifestPath = "page/firmware/firmware.json";
-            const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+            let manifest = {};
+            try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); } catch (_) {}
             const [, version, bin, notes] = process.argv;
             manifest.version = version;
             manifest.bin = bin;
             manifest.size = fs.statSync("page/firmware/" + bin).size;
-            if (notes !== "") manifest.notes = notes;
+            manifest.isforce = true;
+            manifest.notes = notes;
             fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
-          ' "$FW_VERSION" "$FW_BIN" "$FW_RAW_NOTES"
+          ' "$FW_VERSION" "$FW_BIN" "$FW_NOTES"
 
           # 验证更新结果
           cat page/firmware/firmware.json
+          ls -la page/firmware
 
       - name: Assemble clean dist
         run: |
