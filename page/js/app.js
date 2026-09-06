@@ -53,6 +53,8 @@
     tempOffsetValue: document.getElementById('tempOffsetValue'),
     tempOffsetApplyBtn: document.getElementById('tempOffsetApplyBtn'),
     tempOffsetStatus: document.getElementById('tempOffsetStatus'),
+    tempOffsetScaleMin: document.getElementById('tempOffsetScaleMin'),
+    tempOffsetScaleMax: document.getElementById('tempOffsetScaleMax'),
     factoryResetBtn: document.getElementById('factoryResetBtn'),
     factoryResetStatus: document.getElementById('factoryResetStatus'),
      tempValue: document.getElementById('tempValue'),
@@ -129,6 +131,10 @@
    function tempUnitSymbol() { return state.tempUnit === 'F' ? '°F' : '°C'; }
    function tempVal(c) { return state.tempUnit === 'F' ? cToF(c) : c; }
    function fmtTemp(c, decimals = 1) { return `${tempVal(c).toFixed(decimals)}${tempUnitSymbol()}`; }
+   // 温差（偏移量）换算：℃→℉ 只乘 9/5、不加 32（偏移是差值不是绝对温度），保证单位切换时与设备 0.1℃ 内部单位计算一致
+   function tempDeltaVal(deltaC) { return state.tempUnit === 'F' ? deltaC * 9 / 5 : deltaC; }
+   function tempDeltaSymbol() { return state.tempUnit === 'F' ? '°F' : '℃'; }
+   function fmtTempDelta(deltaC, decimals = 1) { return `${tempDeltaVal(deltaC).toFixed(decimals)} ${tempDeltaSymbol()}`; }
 
    const DAILY_METRICS = {
      temp: {
@@ -877,6 +883,10 @@
        els.tempValue.textContent = '--';
      }
      if (state.lastDailyRecords) renderDaily(state.lastDailyRecords);
+     // Setting 温度偏移的数值与刻度同步跟随单位（温差换算 ×9/5、不加 32；±10℃ = ±18℉）
+     renderTempOffset();
+     if (els.tempOffsetScaleMin) els.tempOffsetScaleMin.textContent = fmtTempDelta(-10);
+     if (els.tempOffsetScaleMax) els.tempOffsetScaleMax.textContent = `+${fmtTempDelta(10)}`;
    }
 
 
@@ -1570,10 +1580,11 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
 
   els.refreshBtn.addEventListener('click', handleRefreshClick);
 
-  // 温度偏移：滑杆实时预览，Apply 写入 0xFFE8 后请求一次重测
+  // 温度偏移：滑杆实时预览（显示单位跟随 °F/°C 切换，温差换算 ×9/5 不加 32），
+  // Apply 写入 0xFFE8 —— 滑杆与写入设备始终使用 0.1℃ 内部单位，与固件语义一致
   els.tempOffsetSlider.addEventListener('input', () => {
     const x10 = Number(els.tempOffsetSlider.value);
-    els.tempOffsetValue.textContent = `${(x10 / 10).toFixed(1)} ℃`;
+    els.tempOffsetValue.textContent = fmtTempDelta(x10 / 10);
   });
 
   els.tempOffsetApplyBtn.addEventListener('click', async () => {
@@ -1591,7 +1602,7 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
     try {
       await BLEProtocol.sendTempOffset(state.tempOffsetChar, x10);
       state.tempOffsetX10 = x10;
-      els.tempOffsetStatus.textContent = `Temperature offset set to ${(x10 / 10).toFixed(1)} ℃`;
+      els.tempOffsetStatus.textContent = `Temperature offset set to ${fmtTempDelta(x10 / 10)}`;
       log(`Temperature offset sent (0xFFE8): ${x10 / 10}℃`);
       // 立即重测，让 Data 面板尽快反映修正后的温度
       if (state.refreshChar) {
@@ -1855,11 +1866,11 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
     els.otaChangelogList.innerHTML = items.map(t => `<li>${escapeHtml(t)}</li>`).join('');
   }
 
-  // 渲染温度偏移滑杆与数值
+  // 渲染温度偏移滑杆与数值（显示单位跟随 °F/°C 切换；滑杆/写入设备始终保持 0.1℃ 内部单位）
   function renderTempOffset() {
     const x10 = state.tempOffsetX10 || 0;
     els.tempOffsetSlider.value = String(x10);
-    els.tempOffsetValue.textContent = `${(x10 / 10).toFixed(1)} ℃`;
+    els.tempOffsetValue.textContent = fmtTempDelta(x10 / 10);
   }
 
   els.trendTabBtn.addEventListener('click', () => switchChartTab('trend'));
