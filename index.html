@@ -441,7 +441,7 @@
         <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
           <h2 class="mb-1 text-sm font-semibold text-slate-600">🌡️ Temperature offset</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            Fine-tune the reported temperature with an adjustable offset from -10 ℃ to +10 ℃ (-18 °F to +18 °F). Saved on the device until you reset it.
+            Fine-tune the reported temperature with an adjustable offset from -18 °F to +18 °F (-10 ℃ to +10 ℃). Saved on the device until you reset it.
           </p>
           <div class="flex items-center gap-3">
             <input id="tempOffsetSlider" type="range" min="-100" max="100" step="5" value="0" class="flex-1 h-2 rounded-full accent-emerald-600">
@@ -462,16 +462,9 @@
           <h2 class="mb-1 text-sm font-semibold text-slate-600">🏷️ Device name</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
             A display name kept on the device and shown in this dashboard. <b>Up to 20 printable ASCII characters</b>.
-            It does <b>not</b> change the name in your phone's Bluetooth list.
+            It does <b>not</b> change the name in your phone's Bluetooth list. So nothing needs to be re-paired in Home Assistant.
           </p>
-          <!-- 说明：该名字仅是"网页展示名"（GATT 0xFFEA 读写），不改变蓝牙名，无需重新绑定 Home Assistant -->
-          <div class="mb-3 flex items-start gap-2 p-3 rounded-xl bg-amber-50 border border-amber-200">
-            <span class="text-base leading-none">ℹ️</span>
-            <p class="text-xs leading-5 text-amber-700">
-              This name is for the dashboard display only — your phone's Bluetooth list keeps the
-              built-in name “SoilPulse”, so nothing needs to be re-paired in Home Assistant.
-            </p>
-          </div>
+          
           <div class="flex items-center gap-2">
             <input id="devNameInput" type="text" maxlength="20" autocomplete="off" autocapitalize="off" spellcheck="false"
               placeholder="e.g. SoilPulse-1"
