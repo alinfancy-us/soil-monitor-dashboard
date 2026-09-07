@@ -1382,7 +1382,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
     const humNow = latest ? latest.hum : null;
     const baseMsg = point === 'dry'
       ? 'Confirm the probe is fully dry in open air, then apply dry (0%) calibration?'
-      : 'Confirm the probe is fully submerged in water, then apply wet (100%) calibration?';
+      : 'Confirm the probe is in water up to the OPTIMAL DEPTH line, then apply wet (100%) calibration?';
     const msg = humNow === null
       ? `${baseMsg}
 
@@ -1390,7 +1390,7 @@ The device will measure the current probe state first, then apply the calibratio
       : `Latest reading: ${humNow.toFixed(1)}%.
 
 The device will measure the current probe state first, then apply ${expectDry ? 'dry' : 'wet'} calibration.
-Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in water'}?`;
+Confirm the probe is ${expectDry ? 'fully dry in open air' : 'in water up to the OPTIMAL DEPTH line'}?`;
     if (!window.confirm(msg)) return;
 
     els.calibDryBtn.disabled = true;
@@ -1626,7 +1626,7 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'fully submerged in
       els.factoryResetStatus.textContent = 'Connect a device to reset';
       return;
     }
-    const msg = 'Factory reset the device? All stored data (history, daily averages, moisture calibration and temperature offset) will be cleared and the device will reboot. The connection will drop.';
+    const msg = 'Factory reset the device? All stored data (history, daily averages, moisture calibration, temperature offset and device name) will be cleared and the device will reboot. The connection will drop.';
     if (!window.confirm(msg)) return;
     els.factoryResetBtn.disabled = true;
     els.factoryResetStatus.textContent = 'Sending factory reset… the device will reboot';

@@ -416,7 +416,7 @@
         <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
           <h2 class="mb-1 text-sm font-semibold text-slate-600">🎯 Sensor calibration</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            Improves moisture accuracy for your soil. Put the probe in the matching state, tap the button, and the device recalibrates from a fresh reading.
+            Two-point calibration adapts moisture readings to your soil type. Put the probe in the matching condition, tap the button, and the device recalibrates from a fresh measurement.
           </p>
           <div class="calibration-grid grid grid-cols-2 gap-3">
             <button id="calibDryBtn" disabled
@@ -430,7 +430,7 @@
               class="flex flex-col items-center gap-1 px-3 py-3 transition border rounded-xl border-sky-100 bg-sky-50 text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40">
               <span class="text-xl">💦</span>
               <span class="text-sm font-semibold">Wet calibration (100%)</span>
-              <span class="text-[11px] text-sky-500 text-center leading-tight">Probe fully submerged in water</span>
+              <span class="text-[11px] text-sky-500 text-center leading-tight">Probe in water up to the OPTIMAL DEPTH line</span>
               <span id="calibWetBadge" class="hidden mt-0.5 inline-flex items-center px-2 py-0.5 text-[10px] font-bold leading-none text-emerald-700 bg-emerald-100 rounded-full">✓ Calibrated</span>
             </button>
           </div>
@@ -441,7 +441,7 @@
         <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
           <h2 class="mb-1 text-sm font-semibold text-slate-600">🌡️ Temperature offset</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            Trim the reading by up to ±10 ℃ (±18 °F). Saved on the device until you reset it.
+            Fine-tune the reported temperature with an adjustable offset from -10 ℃ to +10 ℃ (-18 °F to +18 °F). Saved on the device until you reset it.
           </p>
           <div class="flex items-center gap-3">
             <input id="tempOffsetSlider" type="range" min="-100" max="100" step="5" value="0" class="flex-1 h-2 rounded-full accent-emerald-600">
@@ -489,10 +489,10 @@
 
         <!-- Reset -->
         <div class="dashboard-card p-4 rounded-2xl border-rose-100 sm:p-5">
-          <h2 class="mb-1 text-sm font-semibold text-rose-600">♻️ Reset</h2>
+          <h2 class="mb-1 text-sm font-semibold text-rose-600">⚠️ Reset</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            Clears history, calibration, device name and the renamed Bluetooth address (back to the
-            factory MAC), then reboots. The connection will drop.
+            Clears history, calibration, temperature offset and device name, then reboots.
+            The connection will drop.
           </p>
           <div class="flex justify-end mt-3">
             <button id="factoryResetBtn" disabled
@@ -600,6 +600,6 @@
        每次前端功能变更后必须递增，否则浏览器会继续运行旧版 JS -->
   <script src="page/js/config.js?v=1.3.10"></script>
   <script src="page/js/ble-protocol.js?v=1.3.10"></script>
-  <script src="page/js/app.js?v=1.3.16"></script>
+  <script src="page/js/app.js?v=1.3.17"></script>
 </body>
 </html>
