@@ -55,11 +55,15 @@ const SoilPulseConfig = (() => {
   // Factory reset & reboot 指令 4 字节魔术字 "RST1"，清空设备全部业务数据（RAM/校准/偏移）并重启
   const FACTORY_RESET_MAGIC = Uint8Array.of(0x52, 0x53, 0x54, 0x31);
 
-  // 温度偏移校准参数（单位 0.1℃，±10℃ 内，须与固件 SOIL_TEMP_OFFSET_* 对齐）
+  // 温度偏移校准参数（设备存储恒为 0.1℃，s8 范围 ±10℃，须与固件 SOIL_TEMP_OFFSET_* 对齐）。
+  // 滑杆刻度恒为"当前显示单位的 0.1"：℃ 模式 ±100 格（0.1℃/格），
+  // ℉ 模式 ±180 格（0.1℉/格，±18℉ = ±10℃）；℉ 格写入设备时四舍五入到 0.1℃ 网格
   const TEMP_OFFSET = {
     MIN_X10: -100,
     MAX_X10: 100,
-    STEP_X10: 5,
+    STEP_X10: 1,
+    MIN_F: -180,
+    MAX_F: 180,
   };
 
   // 校准状态标志位（0xFFE9 读特征值），须与固件 bth_soil_sensor.h 的 SOIL_CALIB_FLAG_* 对齐；

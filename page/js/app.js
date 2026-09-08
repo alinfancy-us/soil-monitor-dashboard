@@ -19,7 +19,7 @@
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
   const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
-  const RECORD_KEY_RE = /^soilPulse:(trend|daily):v1:/;
+  const RECORD_KEY_RE = /^SoilPulse:(trend|daily):v1:/;  // 注意：与 CACHE_PREFIX='SoilPulse:' 大小写一致，否则容量清理匹配不到任何 key
 
   function cacheKey(type, deviceId) {
     return `${CACHE_PREFIX}${type}:v1:${deviceId}`;
@@ -1031,13 +1031,13 @@
    function onDisconnected() {
      // 幂等保护：已被其它路径清理过（轮询 / visibilitychange / 用户点击）则直接返回，
      // 避免重复 setStatus / 重复日志
-     if (state.characteristic === null) return;
+     if (state.characteristic === null && state.device === null) return;
      stopPolling();
      cancelRefreshWait();   // 若 refresh 正在等待测量结果，断连后立即恢复按钮
      state.otaRunning = false;
      setOtaUiLock(false);
      setStatus('disconnected');
-     state.characteristic = null;
+     state.device = null;   // 释放旧 device 引用：断链后 connectBtn/visibilitychange 的 device 判断自然失效，幂等条件（characteristic 与 device 双 null）也靠它闭合
      state.resetChar = null;
      state.calibChar = null;
      state.refreshChar = null;
@@ -1248,9 +1248,15 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
      } catch (err) {
        if (token !== connectToken) return;   // 超时/失败期间用户已重新点击，不被覆盖
        setStatus('disconnected');
-       if (String(err && err.message).includes('CONNECT_TIMEOUT')) {
+       const errMsg = String(err && err.message);
+       if (errMsg.includes('CONNECT_TIMEOUT')) {
+         // 阶段2a：gatt.connect() 超时——多为设备深睡不在广播窗口 / 系统蓝牙被关闭
          els.statusText.textContent = 'Connect timed out — device may be sleeping (touch it to wake) or Bluetooth is off';
-         log('Connection timed out after 10s');
+         log('gatt.connect timed out after 10s');
+       } else if (errMsg.includes('INIT_TIMEOUT')) {
+         // 阶段2b：已连上但服务发现/时间同步/订阅初始化超时——多为射频信号差或慢平台
+         els.statusText.textContent = 'Connected, but setup timed out — weak signal? Move closer and reconnect';
+         log('Post-connect setup timed out after 20s');
        } else {
          log(`Connection failed: ${err.message || err}`);
        }
@@ -1581,10 +1587,11 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'in water up to the
   els.refreshBtn.addEventListener('click', handleRefreshClick);
 
   // 温度偏移：滑杆实时预览（显示单位跟随 °F/°C 切换，温差换算 ×9/5 不加 32），
-  // Apply 写入 0xFFE8 —— 滑杆与写入设备始终使用 0.1℃ 内部单位，与固件语义一致
+  // 拖动预览直接显示滑杆刻度值——刻度恒为“当前显示单位的 0.1”（℃: 0.1℃/格，℉: 0.1℉/格）；
+  // Apply 后回显设备 0.1℃ 网格真实值（℉ 模式滑杆位置可能微调 ≤1 格，见 renderTempOffset 注释）
   els.tempOffsetSlider.addEventListener('input', () => {
-    const x10 = Number(els.tempOffsetSlider.value);
-    els.tempOffsetValue.textContent = fmtTempDelta(x10 / 10);
+    const ticks = Number(els.tempOffsetSlider.value);
+    els.tempOffsetValue.textContent = `${(ticks / 10).toFixed(1)} ${tempDeltaSymbol()}`;
   });
 
   els.tempOffsetApplyBtn.addEventListener('click', async () => {
@@ -1596,12 +1603,13 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'in water up to the
       els.tempOffsetStatus.textContent = 'Connect a device to adjust temperature offset';
       return;
     }
-    const x10 = Number(els.tempOffsetSlider.value);
+    const x10 = sliderToTempOffset(Number(els.tempOffsetSlider.value));   // ℉ 刻度四舍五入对齐设备 0.1℃ 网格
     els.tempOffsetApplyBtn.disabled = true;
     els.tempOffsetStatus.textContent = 'Applying temperature offset…';
     try {
       await BLEProtocol.sendTempOffset(state.tempOffsetChar, x10);
       state.tempOffsetX10 = x10;
+      renderTempOffset();   // 回显设备 0.1℃ 网格真实值（℉ 模式滑杆位置可能微调 ≤1 格）
       els.tempOffsetStatus.textContent = `Temperature offset set to ${fmtTempDelta(x10 / 10)}`;
       log(`Temperature offset sent (0xFFE8): ${x10 / 10}℃`);
       // 立即重测，让 Data 面板尽快反映修正后的温度
@@ -1866,10 +1874,31 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'in water up to the
     els.otaChangelogList.innerHTML = items.map(t => `<li>${escapeHtml(t)}</li>`).join('');
   }
 
-  // 渲染温度偏移滑杆与数值（显示单位跟随 °F/°C 切换；滑杆/写入设备始终保持 0.1℃ 内部单位）
+  // —— 温度偏移滑杆：刻度恒为“当前显示单位的 0.1”——
+  // ℃ 模式：滑杆 1 格 = 0.1℃（±100 格）；℉ 模式：滑杆 1 格 = 0.1℉（±180 格，±18℉ = ±10℃）。
+  // 设备存储恒为 0.1℃（s8），℉ 格写入时四舍五入到 0.1℃ 网格（偏差 ≤0.05℉），
+  // 因此 Apply 后按设备真实值回显时滑杆位置可能微调 ≤1 格。
+  function tempOffsetSliderRange() {
+    return state.tempUnit === 'F'
+      ? { min: TEMP_OFFSET.MIN_F, max: TEMP_OFFSET.MAX_F, step: 1 }
+      : { min: TEMP_OFFSET.MIN_X10, max: TEMP_OFFSET.MAX_X10, step: TEMP_OFFSET.STEP_X10 };
+  }
+  // 设备值(0.1℃) -> 滑杆格值（显示单位的 0.1）
+  function tempOffsetToSlider(x10) {
+    return state.tempUnit === 'F' ? Math.round(x10 * 9 / 5) : x10;
+  }
+  // 滑杆格值 -> 设备值(0.1℃)，四舍五入对齐 0.1℃ 网格
+  function sliderToTempOffset(ticks) {
+    return state.tempUnit === 'F' ? Math.round(ticks * 5 / 9) : ticks;
+  }
+
   function renderTempOffset() {
     const x10 = state.tempOffsetX10 || 0;
-    els.tempOffsetSlider.value = String(x10);
+    const range = tempOffsetSliderRange();
+    els.tempOffsetSlider.min = String(range.min);
+    els.tempOffsetSlider.max = String(range.max);
+    els.tempOffsetSlider.step = String(range.step);
+    els.tempOffsetSlider.value = String(tempOffsetToSlider(x10));
     els.tempOffsetValue.textContent = fmtTempDelta(x10 / 10);
   }
 

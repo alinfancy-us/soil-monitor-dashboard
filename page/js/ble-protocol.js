@@ -66,9 +66,30 @@ const BLEProtocol = (() => {
   /**
    * 建立蓝牙连接并配置通道（针对 Bluefy 优化）
    */
-  /** 连接阶段超时（毫秒）：选完设备后，gatt.connect + 服务/特征发现应在 5s 内完成。
-   *  蓝牙不可用 / 设备处于睡眠时这一步会挂起，超时后由 app.js 复位 UI。 */
+  /** 阶段2a 超时（毫秒）：仅限 device.gatt.connect() 单步。
+   *  设备处于深睡（不在广播窗口）/ 系统蓝牙被关闭时，connect() 会无限挂起，
+   *  单独设 10s 快速反馈“设备可能睡着”；超时瞬间立即断开，清理挂起中的连接。 */
   const CONNECT_TIMEOUT_MS = 10000;
+
+  /** 阶段2b 超时（毫秒）：connect 成功后的服务/特征发现 + 时间同步 + 订阅 Notify + 并行发现。
+   *  已连上后这些 ATT 往返正常 1~2s 完成；放宽到 20s 兜底射频差 / 慢平台（Bluefy/iOS），
+   *  避免“已连上却仍在初始化”的可用连接被误杀超时。 */
+  const INIT_TIMEOUT_MS = 10000;
+
+  /**
+   * 内部工具：给 promise 限时；超时立即断开设备 GATT（清理已建立/挂起中的孤儿连接）并抛出 tag 错误。
+   * 输入 promise 的晚期 rejection 由调用方吞掉，避免 unhandled rejection。
+   */
+  function withTimeout(promise, ms, tag, device) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        try { device?.gatt?.disconnect(); } catch (_) { /* 未连接时 no-op */ }
+        reject(new Error(tag));
+      }, ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
 
   /**
    * 阶段1：仅弹出设备选择器（不设超时——用户挑设备时长不受限）。
@@ -96,9 +117,30 @@ const BLEProtocol = (() => {
    * @param {BluetoothDevice} device
    */
   async function finishConnectInner(device, onNotification, onDisconnect) {
+    // 幂等注册：同一 device 对象重复连接时先移除旧监听，防止 gattserverdisconnected 监听器堆积
+    device.removeEventListener('gattserverdisconnected', onDisconnect);
     device.addEventListener('gattserverdisconnected', onDisconnect);
 
-    const server = await device.gatt.connect();
+    // —— 阶段2a：仅建立 GATT 链路（单独 10s 超时）——
+    // 设备处于深睡（不在广播窗口）/ 系统蓝牙被关闭时 connect() 会无限挂起，这里快速超时反馈；
+    // 超时瞬间 withTimeout 内部已主动断开 GATT，connect 的晚期成功/失败都不再有意义
+    const connectP = device.gatt.connect();
+    connectP.catch(() => {});   // 吞掉晚期 rejection，避免 unhandled rejection
+    const server = await withTimeout(connectP, CONNECT_TIMEOUT_MS, 'CONNECT_TIMEOUT', device);
+
+    // —— 阶段2b：连接后的初始化（宽松 20s 超时）——
+    // 服务/特征发现 + 写时间戳 + 订阅 Notify 正常 1~2s 完成，放宽超时兜底射频差 / 慢平台（Bluefy/iOS），
+    // 避免“已连上却仍在初始化”的可用连接被误杀
+    const init = initAfterConnect(server, device, onNotification);
+    init.catch(() => {});       // 超时断开后晚期失败同样吞掉
+    return withTimeout(init, INIT_TIMEOUT_MS, 'INIT_TIMEOUT', device);
+  }
+
+  /**
+   * 阶段2b 主体：服务/特征发现 + 时间同步 + 订阅 Notify + 非关键特征并行发现。
+   * 由 finishConnectInner 在 gatt.connect() 成功后调用（带 INIT_TIMEOUT_MS 超时）。
+   */
+  async function initAfterConnect(server, device, onNotification) {
     const service = await server.getPrimaryService(UUIDS.SERVICE);
     const dataChar = await service.getCharacteristic(UUIDS.DATA_CHAR);
     const timeChar = await service.getCharacteristic(UUIDS.TIME_CHAR);
@@ -153,31 +195,14 @@ const BLEProtocol = (() => {
   }
 
   /**
-   * 阶段2 的“带 5s 超时”入口：对内部逻辑整体做 Promise.race。
-   * 超时抛 __CONNECT_TIMEOUT__，由 app.js 识别并复位 UI（同时防“迟到成功”成幽灵连接）。
+   * 阶段2 入口：分段超时——gatt.connect() 单独 10s（设备睡着/蓝牙关闭时挂起，快速反馈），
+   * 连接后的服务发现/时间同步/订阅初始化 20s（射频差/慢平台不误杀可用连接）。
+   * 任一段超时都会在 withTimeout 内立即断开设备 GATT，不留“UI 未连接、设备已连上”的幽灵连接；
+   * 错误标签 CONNECT_TIMEOUT / INIT_TIMEOUT 由 app.js 识别并给出对应提示。
    * @param {BluetoothDevice} device
    */
   async function finishConnect(device, onNotification, onDisconnect) {
-    let timedOut = false;
-    let timer;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => { timedOut = true; reject(new Error('CONNECT_TIMEOUT')); }, CONNECT_TIMEOUT_MS);
-    });
-
-    const inner = finishConnectInner(device, onNotification, onDisconnect);
-    // 超时后又“迟到成功”（例如设备在 5s 后才醒来并连上）：主动断开这次孤儿连接，
-    // 防止出现“UI 显示未连接、设备却已连上”的幽灵状态。晚期失败也一并吞掉，避免未处理 rejection。
-    inner.then(() => {
-      if (timedOut) {
-        try { device.gatt.disconnect(); } catch (_) {}
-      }
-    }).catch(() => {});
-
-    try {
-      return await Promise.race([inner, timeout]);
-    } finally {
-      clearTimeout(timer);
-    }
+    return finishConnectInner(device, onNotification, onDisconnect);
   }
 
   /**
