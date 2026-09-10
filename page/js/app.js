@@ -1384,20 +1384,12 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
     }
 
     // 确认弹窗：提示设备将先测量当前探头状态，再用本次新鲜采样自动应用校准（取电量稳定采样的值）
-    const expectDry = point === 'dry';
-    const latest = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
-    const humNow = latest ? latest.hum : null;
     const baseMsg = point === 'dry'
       ? 'Confirm the probe is fully dry in open air, then apply dry (0%) calibration?'
       : 'Confirm the probe is in water up to the OPTIMAL DEPTH line, then apply wet (100%) calibration?';
-    const msg = humNow === null
-      ? `${baseMsg}
+    const msg = `${baseMsg}
 
-The device will measure the current probe state first, then apply the calibration automatically.`
-      : `Latest reading: ${humNow.toFixed(1)}%.
-
-The device will measure the current probe state first, then apply ${expectDry ? 'dry' : 'wet'} calibration.
-Confirm the probe is ${expectDry ? 'fully dry in open air' : 'in water up to the OPTIMAL DEPTH line'}?`;
+The device will measure the current probe state first, then apply the calibration automatically.`;
     if (!window.confirm(msg)) return;
 
     els.calibDryBtn.disabled = true;
