@@ -43,6 +43,15 @@
       white-space: nowrap;
     }
 
+    /* 连续点按按钮（如温度偏移 ±0.1 微调）时禁止 iOS Safari 的双击缩放页面：
+       touch-action: manipulation 仅关闭双击缩放，保留滚动与捏合缩放 */
+    button {
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
     .chart-tab-btn,
     .daily-metric-btn {
       min-height: 36px;
@@ -254,7 +263,7 @@
       <img src="page/images/alinfancy-logo.svg" alt="Alinfancy" class="object-contain w-[90px] h-[90px] shrink-0 sm:w-24 sm:h-24">
       <div>
         <h1 class="text-2xl font-bold sm:text-3xl text-emerald-800">SoilPulse</h1>
-        <p class="mt-0.5 max-w-md text-sm leading-5 text-slate-500 sm:mt-1 sm:text-base">Soil temperature, moisture and battery dashboard</p>
+        <p class="mt-0.5 max-w-md text-sm leading-5 text-slate-500 sm:mt-1 sm:text-base">Soil Temperature, Moisture, and Battery Dashboard</p>
       </div>
     </header>
 
@@ -268,14 +277,14 @@
       <div class="grid grid-cols-2 gap-2 sm:flex sm:gap-2">
         <button id="clearCacheBtn" disabled
           class="action-button inline-flex items-center px-3 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-rose-100 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-40 sm:px-4">
-          🗑 Clear data
+          🗑 Clear Data
         </button>
         <button id="refreshBtn" disabled
           class="action-button inline-flex items-center px-3 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-sky-100 hover:text-sky-600 disabled:cursor-not-allowed disabled:opacity-40 sm:px-4">
           🔄 Refresh
         </button>
         <button id="connectBtn" class="action-button inline-flex items-center px-5 py-2 text-sm font-semibold text-white transition shadow-sm rounded-xl bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] w-full col-span-2 sm:w-auto">
-          Connect device
+          Connect Device
         </button>
       </div>
     </div>
@@ -285,7 +294,7 @@
       <button id="mainTabDataBtn" class="main-tab-btn main-tab-active" role="tab" aria-selected="true">📊 Data</button>
       <button id="mainTabGuideBtn" class="main-tab-btn" role="tab" aria-selected="false">📘 Guide</button>
       <button id="mainTabSettingBtn" class="main-tab-btn" role="tab" aria-selected="false" disabled>
-        <span>⚙️ Setting</span>
+        <span>⚙️ Settings</span>
         <span id="settingUpdateDot" class="hidden update-badge inline-flex items-center px-1.5 py-0.5 text-[9px] font-bold leading-none text-white bg-violet-600 rounded-full">NEW</span>
       </button>
     </nav>
@@ -305,7 +314,7 @@
         <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #0ea5e9">
           <div class="text-xl sm:text-3xl">💧</div>
           <div id="humValue" class="metric-value mt-1 text-3xl font-bold text-sky-600 sm:text-4xl">--</div>
-          <div class="metric-label text-xs text-slate-500 mt-0.5">Moisture %RH</div>
+          <div class="metric-label text-xs text-slate-500 mt-0.5">Moisture %</div>
         </div>
         <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #16a34a">
           <div class="text-xl sm:text-3xl">🔋</div>
@@ -320,8 +329,8 @@
       <!-- Trend charts (tabbed: recent records / 7-day daily average) -->
       <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5 sm:mb-0">
         <div class="chart-tabs flex items-stretch gap-2 mb-4">
-          <button id="trendTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-emerald-600 text-white transition">Recent 5-record trend</button>
-          <button id="dailyTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-slate-100 text-slate-500 transition">7-day daily average</button>
+          <button id="trendTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-emerald-600 text-white transition">Recent 5 Records</button>
+          <button id="dailyTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-slate-100 text-slate-500 transition">7-Day Daily Average</button>
         </div>
 
         <div id="trendTabPanel">
@@ -351,12 +360,12 @@
       <!-- History & trend charts（原 History 面板内容已并入 Data 面板） -->
       <!-- History table -->
       <div class="dashboard-card p-4 mb-5 overflow-hidden rounded-2xl sm:p-5 sm:mb-6 mt-6">
-        <h2 class="mb-3 text-sm font-semibold text-slate-600">Measurement history</h2>
+        <h2 class="mb-3 text-sm font-semibold text-slate-600">Measurement History</h2>
         <table class="history-table w-full text-sm">
           <thead>
             <tr class="text-left border-b text-slate-400 border-slate-100">
               <th class="py-2 pr-2">#</th>
-              <th class="py-2 pr-2">Date</th>
+              <th class="py-2 pr-2">Timestamp</th>
               <th class="py-2 pr-2">Temperature</th>
               <th class="py-2 pr-2">Moisture</th>
               <th class="py-2">Battery</th>
@@ -412,25 +421,25 @@
         </div>
 
         
-        <!-- Sensor calibration -->
+        <!-- Sensor Calibration -->
         <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
-          <h2 class="mb-1 text-sm font-semibold text-slate-600">🎯 Sensor calibration</h2>
+          <h2 class="mb-1 text-sm font-semibold text-slate-600">🎯 Sensor Calibration</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            Two-point calibration adapts moisture readings to your soil type. Put the probe in the matching condition, tap the button, and the device recalibrates from a fresh measurement.
+            Two-point calibration reduces measurement errors and improves soil moisture accuracy.Place the probe in the matching condition, click the button, and the device will recalibrate using a new reading.
           </p>
           <div class="calibration-grid grid grid-cols-2 gap-3">
             <button id="calibDryBtn" disabled
               class="flex flex-col items-center gap-1 px-3 py-3 text-orange-700 transition border border-orange-100 rounded-xl bg-orange-50 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-40">
               <span class="text-xl">🏜️</span>
-              <span class="text-sm font-semibold">Dry calibration (0%)</span>
+              <span class="text-sm font-semibold">Dry Calibration (0%)</span>
               <span class="text-[11px] text-orange-500 text-center leading-tight">Probe in open air, fully dry</span>
               <span id="calibDryBadge" class="hidden mt-0.5 inline-flex items-center px-2 py-0.5 text-[10px] font-bold leading-none text-emerald-700 bg-emerald-100 rounded-full">✓ Calibrated</span>
             </button>
             <button id="calibWetBtn" disabled
               class="flex flex-col items-center gap-1 px-3 py-3 transition border rounded-xl border-sky-100 bg-sky-50 text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40">
               <span class="text-xl">💦</span>
-              <span class="text-sm font-semibold">Wet calibration (100%)</span>
-              <span class="text-[11px] text-sky-500 text-center leading-tight">Probe in water up to the OPTIMAL DEPTH line</span>
+              <span class="text-sm font-semibold">Wet Calibration (100%)</span>
+              <span class="text-[11px] text-sky-500 text-center leading-tight">Place probe in water to the OPTIMAL DEPTH line</span>
               <span id="calibWetBadge" class="hidden mt-0.5 inline-flex items-center px-2 py-0.5 text-[10px] font-bold leading-none text-emerald-700 bg-emerald-100 rounded-full">✓ Calibrated</span>
             </button>
           </div>
@@ -439,28 +448,35 @@
 
         <!-- Temperature offset -->
         <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
-          <h2 class="mb-1 text-sm font-semibold text-slate-600">🌡️ Temperature offset</h2>
+          <h2 class="mb-1 text-sm font-semibold text-slate-600">🌡️ Temperature Offset</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            Fine-tune the reported temperature with an adjustable offset from -18 °F to +18 °F (-10 ℃ to +10 ℃). Saved on the device until you reset it.
+            Fine-tune the reported temperature with an adjustable offset from -18 °F to +18 °F (-10 ℃ to +10 ℃). Saved on device (persists across reboots).
+            Use the <b>− / +</b> buttons for precise 0.1 steps, or type an exact value in the box.
           </p>
-          <div class="flex items-center gap-3">
-            <input id="tempOffsetSlider" type="range" min="-100" max="100" step="1" value="0" class="flex-1 h-2 rounded-full accent-emerald-600">
-<span id="tempOffsetValue" class="w-20 px-2 py-1 text-sm font-semibold text-center rounded-lg bg-slate-100 text-slate-700">0.0 ℃</span>          </div>
-          <div class="flex justify-between mt-1 text-[11px] text-slate-400"><span id="tempOffsetScaleMin">-10.0 ℃</span><span id="tempOffsetScaleMax">+10.0 ℃</span></div>
-          <div class="flex justify-end mt-3">
+          <!-- 控制行：− / 数值 / 单位 / + 与 Apply offset 同组（滑杆已移除：手机上拖动精度不足，
+               ±0.1 按钮 + 直接键入是最可靠的精调方式；手机上 Apply 换行铺满，≥sm 与微调按钮同行） -->
+          <div class="flex flex-wrap items-center gap-2">
+            <button id="tempOffsetDecBtn" type="button" aria-label="Decrease offset by 0.1"
+              class="action-button inline-flex w-11 shrink-0 items-center justify-center rounded-xl bg-slate-100 px-0 py-0 text-xl font-bold text-slate-700 transition hover:bg-slate-200 active:bg-emerald-100 active:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">−</button>
+            <input id="tempOffsetInput" type="number" inputmode="decimal" step="0.1" min="-10" max="10" value="0" autocomplete="off" aria-label="Temperature offset value"
+              class="min-w-0 flex-1 rounded-xl bg-slate-100 px-2 py-2 text-center text-base font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40">
+            <span id="tempOffsetUnitSpan" class="w-7 shrink-0 text-center text-sm font-semibold text-slate-500">℃</span>
+            <button id="tempOffsetIncBtn" type="button" aria-label="Increase offset by 0.1"
+              class="action-button inline-flex w-11 shrink-0 items-center justify-center rounded-xl bg-slate-100 px-0 py-0 text-xl font-bold text-slate-700 transition hover:bg-slate-200 active:bg-emerald-100 active:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">+</button>
             <button id="tempOffsetApplyBtn" disabled
-              class="action-button inline-flex items-center w-full px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">
-              Apply offset
+              class="action-button inline-flex w-full shrink-0 items-center px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 sm:ml-6 sm:w-auto">
+              Apply Offset
             </button>
           </div>
+          <div class="mt-2 text-center text-[11px] text-slate-400"><span id="tempOffsetScaleMin">-10.0 ℃</span> ~ <span id="tempOffsetScaleMax">+10.0 ℃</span></div>
           <p id="tempOffsetStatus" class="mt-2 text-xs text-center text-slate-400"></p>
         </div>
 
         <!-- Device name（Reset 卡片上方：改名保存后会更换蓝牙公开 MAC，涉及 Home Assistant 重新绑定） -->
         <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
-          <h2 class="mb-1 text-sm font-semibold text-slate-600">🏷️ Device name</h2>
+          <h2 class="mb-1 text-sm font-semibold text-slate-600">🏷️ Device Name</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            A display name kept on the device and shown in this dashboard. <b>Up to 20 printable ASCII characters</b>.
+            A display name kept on the device and shown in this dashboard. <b>Up to 20 ASCII characters</b>.
             It does <b>not</b> change the name in your phone's Bluetooth list. So nothing needs to be re-paired in Home Assistant.
           </p>
           
@@ -474,7 +490,7 @@
             </button>
           </div>
           <div class="flex justify-between mt-1 text-[11px] text-slate-400">
-            <span id="devNameByteCount">0 / 20 bytes</span>
+            <span id="devNameByteCount">0 / 20 characters</span>
             <span id="devNameStatus"></span>
           </div>
         </div>
@@ -483,13 +499,13 @@
         <div class="dashboard-card p-4 rounded-2xl border-rose-100 sm:p-5">
           <h2 class="mb-1 text-sm font-semibold text-rose-600">⚠️ Reset</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            Clears history, calibration, temperature offset and device name, then reboots.
+            Clears history, calibration, temperature offset, and device name, then reboots the device.
             The connection will drop.
           </p>
           <div class="flex justify-end mt-3">
             <button id="factoryResetBtn" disabled
               class="action-button inline-flex items-center w-full px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-rose-600 hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">
-              Factory reset & reboot
+              Factory Reset & Reboot
             </button>
           </div>
           <p id="factoryResetStatus" class="mt-2 text-xs text-center text-slate-400"></p>
@@ -501,7 +517,7 @@
       <div class="dashboard-card p-5 rounded-2xl sm:p-6">
         <!-- Introduction（内容自印刷手册 introduction.pdf 迁入，取代原 quick-start PDF 跳转展示） -->
         <h2 class="text-base font-bold text-emerald-800">Introduction</h2>
-        <p class="mt-1 text-sm leading-6 text-slate-500">SoilPulse watches your soil — moisture, temperature and battery. Just plant, connect, and check on the spot.</p>
+        <p class="mt-1 text-sm leading-6 text-slate-500">SoilPulse monitors your soil — moisture, temperature and battery. Just plant, connect, and check on the spot.</p>
         <ul class="mt-2 space-y-1.5 list-disc pl-4 text-xs leading-5 text-slate-500">
           <li><b class="text-slate-700">Live soil metrics</b> — true root-zone moisture &amp; temperature (not surface estimates), plus battery status.</li>
           <li><b class="text-slate-700">No app required</b> — open directly in the Bluetooth-enabled browser.</li>
@@ -516,9 +532,9 @@
         <!-- Setup -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Setup</h2>
         <ol class="mt-2 space-y-1.5 list-decimal pl-4 text-xs leading-5 text-slate-500">
-          <li><b class="text-slate-700">Insert 2× AAA</b> batteries, matching +/−.</li>
+          <li><b class="text-slate-700">Insert 2× AAA</b> batteries.</li>
           <li><b class="text-slate-700">Plant the probe</b> to the OPTIMAL DEPTH line (≈ 2.4 in).</li>
-          <li><b class="text-slate-700">Tap the touch pad</b> once to wake it.</li>
+          <li><b class="text-slate-700">Tap the touch pad</b> to wake it.</li>
           <li><b class="text-slate-700">Choose your setup method</b> — follow the guides below to connect via <b class="text-slate-700">Web Dashboard</b> or <b class="text-slate-700">Home Assistant</b>.</li>
         </ol>
 
@@ -535,14 +551,14 @@
           </div>
         </div>
         <div class="mt-2 rounded-xl border border-orange-100 bg-orange-50 p-3 text-xs leading-5 text-orange-700">
-          <b>Can't find it?</b> Tap <b>Connect device</b> and allow Bluetooth permissions.<br>
+          <b>Can't find it?</b> Tap <b>touch pad</b> to wake device and allow Bluetooth permissions.<br>
           • <b>Android / PC:</b> Use <b>Chrome</b>.<br>
-          • <b>iPhone / iPad:</b> Download &amp; use <b>Bluefy</b> (Safari/Chrome on iOS don't support Web Bluetooth).
+          • <b>iPhone / iPad:</b> Download &amp; use <b>Bluefy app</b> (iOS Safari/Chrome does not support Web Bluetooth).
         </div>
 
         <!-- Connect — Home Assistant -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Connect — Home Assistant</h2>
-        <p class="mt-1 text-xs leading-5 text-slate-500">Speaks <b class="text-slate-700">BTHome</b>, so it connects with no hub.</p>
+        <p class="mt-1 text-xs leading-5 text-slate-500">Uses <b class="text-slate-700">BTHome</b>— <b class="text-slate-700">Requires Bluetooth enabled</b> in Home Assistant.</p>
         <ol class="mt-2 space-y-1.5 list-decimal pl-4 text-xs leading-5 text-slate-500">
           <li>Settings → Devices &amp; Services → <b class="text-slate-700">Add device</b>.</li>
           <li>Tap the sensor's <b class="text-slate-700">touch pad</b> to wake it.</li>
@@ -553,14 +569,27 @@
         <h2 class="mt-6 text-base font-bold text-emerald-800">Using the Web Dashboard</h2>
         <ul class="mt-2 space-y-2 text-xs leading-5 text-slate-500">
           <li><b class="text-slate-700">Data Tab</b> — live temperature, moisture &amp; battery; history with last 5 readings and 7-day average charts.</li>
-          <li><b class="text-slate-700">Refresh &amp; Clear</b> — Refresh triggers an immediate measurement. Clear data clears local history data.</li>
-          <li><b class="text-slate-700">Setting Tab</b> — dry/wet calibration for moisture sensors, temperature offset adjustments, factory reset to restore defaults, and firmware updates (shows automatically when a new version is available).</li>
+          <li>
+            <b class="text-slate-700">Refresh &amp; Clear</b>
+            <ul class="mt-1 space-y-1 list-disc pl-4">
+              <li><b class="text-slate-700">Refresh</b>: triggers an immediate measurement.</li>
+              <li><b class="text-slate-700">Clear Data</b>: clears local &amp; history data.</li>
+            </ul>
+          </li>
+          <li>
+            <b class="text-slate-700">Setting Tab</b>
+            <ul class="mt-1 space-y-1 list-disc pl-4">
+              <li><b class="text-slate-700">Calibration &amp; Temperature</b>: Dry/Wet moisture calibration &amp; temperature offset adjustments.</li>
+              <li><b class="text-slate-700">Device Management</b>: Custom device renaming &amp; factory reset.</li>
+              <li><b class="text-slate-700">Firmware Updates</b>: Displays a prompt when new updates are available.</li>
+            </ul>
+          </li>
         </ul>
 
         <!-- Troubleshooting -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Troubleshooting</h2>
         <ul class="mt-2 space-y-2 text-xs leading-5 text-slate-500">
-          <li><b class="text-slate-700">Can't connect?</b> Tap the touch pad to wake it, allow Bluetooth permissions, then tap <b class="text-slate-700">Connect device</b>.</li>
+          <li><b class="text-slate-700">Can't connect?</b> Tap the touch pad to wake it, allow Bluetooth permissions, then click <b class="text-slate-700">Connect Device</b>.</li>
           <li><b class="text-slate-700">No new data?</b> Connect and tap <b class="text-slate-700">Refresh</b> — new data should arrive within a few minutes.</li>
           <li><b class="text-slate-700">Odd moisture?</b> Insert the probe to the <b class="text-slate-700">OPTIMAL DEPTH line</b> without leaving loose gaps in soil.</li>
           <li><b class="text-slate-700">Shows unavailable in Home Assistant?</b> This is normal. The sensor updates every 10 minutes to save power — new data will still arrive automatically.</li>
@@ -590,8 +619,8 @@
 
   <!-- 引入业务模块脚本：?v= 版本号用于缓存破坏（cache busting），
        每次前端功能变更后必须递增，否则浏览器会继续运行旧版 JS -->
-  <script src="page/js/config.js?v=1.3.11"></script>
+  <script src="page/js/config.js?v=1.3.20"></script>
   <script src="page/js/ble-protocol.js?v=1.3.11"></script>
-  <script src="page/js/app.js?v=1.3.18"></script>
+  <script src="page/js/app.js?v=1.3.20"></script>
 </body>
 </html>

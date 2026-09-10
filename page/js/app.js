@@ -49,8 +49,10 @@
     settingUpdateDot: document.getElementById('settingUpdateDot'),
     settingLockedHint: document.getElementById('settingLockedHint'),
     settingContent: document.getElementById('settingContent'),
-    tempOffsetSlider: document.getElementById('tempOffsetSlider'),
-    tempOffsetValue: document.getElementById('tempOffsetValue'),
+    tempOffsetInput: document.getElementById('tempOffsetInput'),
+    tempOffsetUnitSpan: document.getElementById('tempOffsetUnitSpan'),
+    tempOffsetDecBtn: document.getElementById('tempOffsetDecBtn'),
+    tempOffsetIncBtn: document.getElementById('tempOffsetIncBtn'),
     tempOffsetApplyBtn: document.getElementById('tempOffsetApplyBtn'),
     tempOffsetStatus: document.getElementById('tempOffsetStatus'),
     tempOffsetScaleMin: document.getElementById('tempOffsetScaleMin'),
@@ -204,7 +206,9 @@
      if (!connected && !els.mainTabSettingPanel.classList.contains('hidden')) {
        switchMainTab('data');
      }
-     els.tempOffsetSlider.disabled = !connected || !state.tempOffsetChar;
+     els.tempOffsetInput.disabled = !connected || !state.tempOffsetChar;
+     els.tempOffsetDecBtn.disabled = !connected || !state.tempOffsetChar;
+     els.tempOffsetIncBtn.disabled = !connected || !state.tempOffsetChar;
      els.tempOffsetApplyBtn.disabled = !connected || !state.tempOffsetChar;
      els.factoryResetBtn.disabled = !connected || !state.resetChar;
      if (!connected) {
@@ -226,7 +230,9 @@
     els.calibDryBtn.disabled = lock || !connected;
     els.calibWetBtn.disabled = lock || !connected;
     els.otaUpdateNowBtn.disabled = lock || !connected || !state.fwUpdate;
-    els.tempOffsetSlider.disabled = lock || !connected || !state.tempOffsetChar;
+    els.tempOffsetInput.disabled = lock || !connected || !state.tempOffsetChar;
+    els.tempOffsetDecBtn.disabled = lock || !connected || !state.tempOffsetChar;
+    els.tempOffsetIncBtn.disabled = lock || !connected || !state.tempOffsetChar;
     els.tempOffsetApplyBtn.disabled = lock || !connected || !state.tempOffsetChar;
     els.factoryResetBtn.disabled = lock || !connected || !state.resetChar;
     els.mainTabSettingBtn.disabled = lock || !connected;
@@ -609,7 +615,7 @@
 
      const latest = records[records.length - 1];
      const first = records[0];
-     els.trendRangeText.textContent = `Time range: ${formatShortTime(first.timestamp)} - ${formatShortTime(latest.timestamp)}`;
+     els.trendRangeText.textContent = `Time Range: ${formatShortTime(first.timestamp)} - ${formatShortTime(latest.timestamp)}`;
    }
  
    /**
@@ -1345,13 +1351,8 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
     state.calibSaved = saved;
     els.calibDryBadge.classList.toggle('hidden', !saved?.dry);
     els.calibWetBadge.classList.toggle('hidden', !saved?.wet);
-    if (saved === null) return;
-    const parts = [];
-    if (saved.dry) parts.push('dry');
-    if (saved.wet) parts.push('wet');
-    if (saved.temp) parts.push('temperature offset');
-    els.calibStatus.textContent = parts.length
-      ? `Saved on device (survives reboot): ${parts.join(', ')} calibration`
+    els.calibStatus.textContent = saved?.dry || saved?.wet
+      ? `Saved on device (persists across reboots)`
       : 'No calibration saved on device yet';
   }
 
@@ -1436,7 +1437,7 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'in water up to the
     const okAscii = bytes.length > 0 && bytes.every(b => b >= 0x20 && b <= 0x7E);
     if (els.devNameSaveBtn) els.devNameSaveBtn.disabled = !okLen || !okAscii;
     if (els.devNameStatus && v && (!okLen || !okAscii)) {
-      els.devNameStatus.textContent = 'Only printable ASCII, max 20 bytes';
+      els.devNameStatus.textContent = 'Only printable ASCII, max 20 characters';
     }
   }
 
@@ -1586,12 +1587,22 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'in water up to the
 
   els.refreshBtn.addEventListener('click', handleRefreshClick);
 
-  // 温度偏移：滑杆实时预览（显示单位跟随 °F/°C 切换，温差换算 ×9/5 不加 32），
-  // 拖动预览直接显示滑杆刻度值——刻度恒为“当前显示单位的 0.1”（℃: 0.1℃/格，℉: 0.1℉/格）；
-  // Apply 后回显设备 0.1℃ 网格真实值（℉ 模式滑杆位置可能微调 ≤1 格，见 renderTempOffset 注释）
-  els.tempOffsetSlider.addEventListener('input', () => {
-    const ticks = Number(els.tempOffsetSlider.value);
-    els.tempOffsetValue.textContent = `${(ticks / 10).toFixed(1)} ${tempDeltaSymbol()}`;
+  // 温度偏移：数字输入框是“待应用值”的唯一来源（滑杆已移除——手机上拖动精度不足，
+  // ±0.1 按钮 + 直接键入是最可靠的精调方式）。℃ 量程 ±10.0，℉ 量程 ±18.0，Apply 时才换算到设备 0.1℃ 网格。
+  // ±0.1 微调按钮：每按一次 ±1 格（当前单位 0.1），到量程端点自动停；
+  // 连续快点不会触发 iOS 双击缩放（全局 button 样式已设 touch-action: manipulation）
+  els.tempOffsetDecBtn.addEventListener('click', () => {
+    if (!els.tempOffsetInput.disabled) setTempOffsetTicks(tempOffsetTicksFromInput() - 1);
+  });
+  els.tempOffsetIncBtn.addEventListener('click', () => {
+    if (!els.tempOffsetInput.disabled) setTempOffsetTicks(tempOffsetTicksFromInput() + 1);
+  });
+
+  // 手动输入：输入过程不拦截（避免打断打字）；失焦/回车（change）时按 0.1 网格取整并夹取量程；
+  // 清空/非法输入时还原为设备当前值。兼容小数逗号（"0,2"）
+  els.tempOffsetInput.addEventListener('change', () => {
+    const raw = parseFloat(String(els.tempOffsetInput.value).replace(',', '.'));
+    setTempOffsetTicks(Number.isFinite(raw) ? Math.round(raw * 10) : tempOffsetToTicks(state.tempOffsetX10 || 0));
   });
 
   els.tempOffsetApplyBtn.addEventListener('click', async () => {
@@ -1603,7 +1614,7 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'in water up to the
       els.tempOffsetStatus.textContent = 'Connect a device to adjust temperature offset';
       return;
     }
-    const x10 = sliderToTempOffset(Number(els.tempOffsetSlider.value));   // ℉ 刻度四舍五入对齐设备 0.1℃ 网格
+    const x10 = ticksToTempOffset(tempOffsetTicksFromInput());   // ℉ 格四舍五入对齐设备 0.1℃ 网格
     els.tempOffsetApplyBtn.disabled = true;
     els.tempOffsetStatus.textContent = 'Applying temperature offset…';
     try {
@@ -1874,32 +1885,47 @@ Confirm the probe is ${expectDry ? 'fully dry in open air' : 'in water up to the
     els.otaChangelogList.innerHTML = items.map(t => `<li>${escapeHtml(t)}</li>`).join('');
   }
 
-  // —— 温度偏移滑杆：刻度恒为“当前显示单位的 0.1”——
-  // ℃ 模式：滑杆 1 格 = 0.1℃（±100 格）；℉ 模式：滑杆 1 格 = 0.1℉（±180 格，±18℉ = ±10℃）。
+  // —— 温度偏移取值：待应用值恒为“当前显示单位的 0.1”格数——
+  // ℃ 模式：1 格 = 0.1℃（±100 格）；℉ 模式：1 格 = 0.1℉（±180 格，±18℉ = ±10℃）。
   // 设备存储恒为 0.1℃（s8），℉ 格写入时四舍五入到 0.1℃ 网格（偏差 ≤0.05℉），
-  // 因此 Apply 后按设备真实值回显时滑杆位置可能微调 ≤1 格。
-  function tempOffsetSliderRange() {
+  // 因此 Apply 后按设备真实值回显时显示可能微调 ≤0.1℉。
+  function tempOffsetRange() {
     return state.tempUnit === 'F'
       ? { min: TEMP_OFFSET.MIN_F, max: TEMP_OFFSET.MAX_F, step: 1 }
       : { min: TEMP_OFFSET.MIN_X10, max: TEMP_OFFSET.MAX_X10, step: TEMP_OFFSET.STEP_X10 };
   }
-  // 设备值(0.1℃) -> 滑杆格值（显示单位的 0.1）
-  function tempOffsetToSlider(x10) {
+  // 数字框当前值 -> 格数（当前单位 0.1 的整数格，非法输入按 0 处理）
+  function tempOffsetTicksFromInput() {
+    const raw = parseFloat(String(els.tempOffsetInput.value).replace(',', '.'));
+    return Number.isFinite(raw) ? Math.round(raw * 10) : 0;
+  }
+  // 设备值(0.1℃) -> 格数（显示单位的 0.1）
+  function tempOffsetToTicks(x10) {
     return state.tempUnit === 'F' ? Math.round(x10 * 9 / 5) : x10;
   }
-  // 滑杆格值 -> 设备值(0.1℃)，四舍五入对齐 0.1℃ 网格
-  function sliderToTempOffset(ticks) {
+  // 格数 -> 设备值(0.1℃)，四舍五入对齐 0.1℃ 网格
+  function ticksToTempOffset(ticks) {
     return state.tempUnit === 'F' ? Math.round(ticks * 5 / 9) : ticks;
+  }
+
+  // 统一写入口：±0.1 微调 / 手动输入规范化 / 单位切换回显 共用——按“当前单位 0.1”
+  // 整数格夹取到量程后写数字框
+  function setTempOffsetTicks(ticks) {
+    const range = tempOffsetRange();
+    const clamped = Math.max(range.min, Math.min(range.max, Math.round(ticks)));
+    els.tempOffsetInput.value = (clamped / 10).toFixed(1);
+    return clamped;
   }
 
   function renderTempOffset() {
     const x10 = state.tempOffsetX10 || 0;
-    const range = tempOffsetSliderRange();
-    els.tempOffsetSlider.min = String(range.min);
-    els.tempOffsetSlider.max = String(range.max);
-    els.tempOffsetSlider.step = String(range.step);
-    els.tempOffsetSlider.value = String(tempOffsetToSlider(x10));
-    els.tempOffsetValue.textContent = fmtTempDelta(x10 / 10);
+    const range = tempOffsetRange();
+    // 数字框随单位切换同步量程（℃ ±10.0 / ℉ ±18.0）、步进与单位后缀
+    els.tempOffsetInput.min = String(range.min / 10);
+    els.tempOffsetInput.max = String(range.max / 10);
+    els.tempOffsetInput.step = '0.1';
+    if (els.tempOffsetUnitSpan) els.tempOffsetUnitSpan.textContent = tempDeltaSymbol();
+    els.tempOffsetInput.value = (tempOffsetToTicks(x10) / 10).toFixed(1);
   }
 
   els.trendTabBtn.addEventListener('click', () => switchChartTab('trend'));
