@@ -203,15 +203,51 @@
         color: #64748b;
       }
 
+      /* 指标列（温度/湿度/电量）：手机端 thead 已隐藏，改用 ::before 自动生成
+         "emoji + 名称"标签，避免用户看不出数值含义。
+         每个指标做成浅色小色块（配色呼应顶部实时指标卡 / 校准按钮），标签在上、数值在下 */
       .history-table td:nth-child(n + 3) {
-        display: inline-flex;
+        display: flex;
+        flex-direction: column;
         align-items: center;
-        font-size: 12px;
+        gap: 3px;
+        padding: 7px 2px 6px;
+        border-radius: 9px;
+        font-size: 13px;
+        line-height: 1.1;
+        text-align: center;
       }
 
-      .history-table td:nth-child(4),
+      .history-table td:nth-child(3) {
+        background: #fff7ed; /* orange-50 · 温度 */
+      }
+
+      .history-table td:nth-child(4) {
+        background: #f0f9ff; /* sky-50 · 湿度 */
+      }
+
       .history-table td:nth-child(5) {
-        justify-content: flex-end;
+        background: #f0fdf4; /* green-50 · 电量 */
+      }
+
+      .history-table td:nth-child(n + 3)::before {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+        color: #64748b;
+      }
+
+      .history-table td:nth-child(3)::before {
+        content: "🌡️ Temp";
+      }
+
+      .history-table td:nth-child(4)::before {
+        content: "💧 Moist";
+      }
+
+      .history-table td:nth-child(5)::before {
+        content: "🔋 Batt";
       }
 
       .history-table td[colspan] {
@@ -590,7 +626,7 @@
         <h2 class="mt-6 text-base font-bold text-emerald-800">Troubleshooting</h2>
         <ul class="mt-2 space-y-2 text-xs leading-5 text-slate-500">
           <li><b class="text-slate-700">Can't connect?</b> Tap the touch pad to wake it, allow Bluetooth permissions, then click <b class="text-slate-700">Connect Device</b>.</li>
-          <li><b class="text-slate-700">No new data?</b> Connect and tap <b class="text-slate-700">Refresh</b> — new data should arrive within a few minutes.</li>
+          <li><b class="text-slate-700">No new data?</b> Connect and click <b class="text-slate-700">Refresh</b> — new data should arrive within a few minutes.</li>
           <li><b class="text-slate-700">Odd moisture?</b> Insert the probe to the <b class="text-slate-700">OPTIMAL DEPTH line</b> without leaving loose gaps in soil.</li>
           <li><b class="text-slate-700">Shows unavailable in Home Assistant?</b> This is normal. The sensor updates every 10 minutes to save power — new data will still arrive automatically.</li>
         </ul>

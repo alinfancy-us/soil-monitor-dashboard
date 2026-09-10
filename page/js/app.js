@@ -183,7 +183,7 @@
      const [dot, text, active] = map[mode];
      els.statusDot.className = `w-3 h-3 rounded-full ${dot}`;
      els.statusText.textContent = text;
-     els.connectBtn.textContent = mode === 'connected' ? 'Disconnect' : 'Connect device';
+     els.connectBtn.textContent = mode === 'connected' ? 'Disconnect' : 'Connect Device';
      const connected = mode === 'connected';
     els.calibDryBtn.disabled = !connected;
     els.calibWetBtn.disabled = !connected;
