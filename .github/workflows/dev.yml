@@ -203,6 +203,11 @@ jobs:
           cat page/firmware/firmware.json
           ls -la page/firmware
 
+      # 兜底重建 Tailwind 静态 CSS：page/css/tailwind.css 虽然入库，但若本地改了类名
+      # 忘记重跑 ./build_css.sh，这里会用 CI 环境重新编译，避免线上样式静默缺失
+      - name: Build Tailwind CSS
+        run: ./build_css.sh
+
       - name: Assemble clean dist
         run: |
           mkdir -p dist

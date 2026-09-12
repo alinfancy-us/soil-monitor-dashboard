@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# 构建产物（CI 组装 / 本地调试生成）
+dist/
+node_modules/
+
+# CI 生成的固件升级产物（README 第 5 节：只存在于 pipeline 中）
+page/firmware/
+
+# 日志
+*.log

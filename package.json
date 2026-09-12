@@ -1,0 +1,12 @@
+{
+  "name": "soil-monitor-dashboard",
+  "version": "1.3.21",
+  "private": true,
+  "description": "SoilPulse soil sensor web dashboard (fully static site, Web Bluetooth)",
+  "scripts": {
+    "build:css": "tailwindcss -c tailwind.config.js -i tailwind.input.css -o page/css/tailwind.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}
