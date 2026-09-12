@@ -37,6 +37,73 @@
       border-top: 3px solid var(--metric-color);
     }
 
+    /* 实时指标卡（手机/PC 通用布局）：标签（icon + 名称）在数值上方，与历史表格指标块一致。
+       emoji 用 ::before 注入，app.js 更新 tempUnitLabel.textContent 时不会丢图标 */
+    .metric-card .metric-label {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+    }
+
+    .metric-card .metric-label::before {
+      font-size: 1.3em;
+      line-height: 1;
+    }
+
+    .live-metrics .metric-card:nth-child(1) .metric-label::before {
+      content: "🌡️";
+    }
+
+    .live-metrics .metric-card:nth-child(2) .metric-label::before {
+      content: "💧";
+    }
+
+    .live-metrics .metric-card:nth-child(3) .metric-label::before {
+      content: "🔋";
+    }
+
+    /* 实时指标卡底色（手机/PC 通用）：温度橙 / 湿度蓝 / 电量绿（呼应数值文字颜色） */
+    .live-metrics .metric-card:nth-child(1) {
+      background: #fff7ed;
+    }
+
+    .live-metrics .metric-card:nth-child(2) {
+      background: #f0f9ff;
+    }
+
+    .live-metrics .metric-card:nth-child(3) {
+      background: #f0fdf4;
+    }
+
+    /* 历史表格（手机/PC 通用）：温度/湿度/电量列与表头使用同色系浅色底。
+       手机端的列色块样式在下方媒体查询中另有 flex 布局覆盖 */
+    .history-table th:nth-child(3),
+    .history-table td:nth-child(3) {
+      background: #fff7ed;
+    }
+
+    .history-table th:nth-child(4),
+    .history-table td:nth-child(4) {
+      background: #f0f9ff;
+    }
+
+    .history-table th:nth-child(5),
+    .history-table td:nth-child(5) {
+      background: #f0fdf4;
+    }
+
+    /* 历史表格（PC）：表头与单元格文字居中，左右内边距对称。
+       元素+类选择器优先级高于 Tailwind 的 text-left / pr-2 工具类，不依赖加载顺序 */
+    @media (min-width: 640px) {
+      .history-table th,
+      .history-table td {
+        text-align: center;
+        padding-left: 8px;
+        padding-right: 8px;
+      }
+    }
+
     .action-button {
       min-height: 42px;
       justify-content: center;
@@ -142,19 +209,64 @@
         box-shadow: 0 8px 24px rgba(27, 66, 55, 0.06);
       }
 
-      .metric-card {
-        padding: 12px 6px;
+      /* 实时指标卡（仅手机）：图标移到名称文字左侧，压缩卡片高度与上下留白 */
+      .dashboard-card.metric-card {
+        padding: 8px 4px;
       }
 
-      .metric-card .metric-value {
-        font-size: clamp(1.5rem, 8vw, 2rem);
-        line-height: 1.15;
+      .dashboard-card.metric-card .metric-value {
+        font-size: clamp(1.4rem, 7vw, 1.7rem);
+        line-height: 1.1;
       }
 
-      .metric-card .metric-label {
-        min-height: 28px;
+      .dashboard-card.metric-card .metric-label {
+        min-height: 0;
+        margin-top: 0;
         font-size: 10px;
-        line-height: 14px;
+        line-height: 13px;
+        white-space: nowrap;
+      }
+
+      /* 温度卡 °F/°C 切换（仅手机）：放回数值下方，收紧与数值的间距 */
+      #tempUnitToggle {
+        margin-top: 4px;
+      }
+
+      /* 图表 Tab 按钮（仅手机）：缩小字号、收紧左右内边距，保证单行显示 */
+      .chart-tabs .chart-tab-btn {
+        font-size: 11px;
+        padding-left: 8px;
+        padding-right: 8px;
+        white-space: nowrap;
+        line-height: 1.2;
+      }
+
+      /* 顶部标题与连接控制卡片之间的留白（仅手机）：收紧 */
+      .dashboard-shell > header {
+        margin-bottom: 10px;
+      }
+
+      /* 卡片间垂直留白（仅手机）：整体收紧，特别是 "No measurement received yet"
+         （latest measurement 文案）上下方的空隙。用高优先级选择器覆盖 Tailwind 的
+         mb-4 / mb-5 / mt-6 工具类 */
+      .grid.live-metrics {
+        margin-bottom: 10px;
+      }
+
+      #lastUpdate {
+        margin-bottom: 10px;
+      }
+
+      #mainTabDataPanel > .dashboard-card {
+        margin-bottom: 12px;
+      }
+
+      #mainTabDataPanel > .dashboard-card + .dashboard-card {
+        margin-top: 14px;
+      }
+
+      #mainTabDataPanel .chart-tabs {
+        margin-bottom: 10px;
       }
 
       .calibration-grid.grid {
@@ -267,11 +379,6 @@
         grid-template-columns: 1fr 1fr;
       }
 
-      .chart-tab-btn {
-        white-space: normal;
-        line-height: 1.2;
-      }
-
       .main-tab-btn {
         font-size: 12.5px;
       }
@@ -337,25 +444,22 @@
     <!-- ================= Panel: Data ================= -->
     <section id="mainTabDataPanel" role="tabpanel">
       <!-- Live readings -->
-      <div class="grid grid-cols-3 gap-2 mb-4 sm:gap-4 sm:mb-5">
+      <div class="live-metrics grid grid-cols-3 gap-2 mb-4 sm:gap-4 sm:mb-5">
         <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #f97316">
-          <div class="text-xl sm:text-3xl">🌡️</div>
+          <div id="tempUnitLabel" class="metric-label text-xs sm:text-sm text-slate-500">Temperature °F</div>
           <div id="tempValue" class="metric-value mt-1 text-3xl font-bold text-orange-600 sm:text-4xl">--</div>
-          <div id="tempUnitLabel" class="metric-label text-xs text-slate-500 mt-0.5">Temperature °F</div>
           <div id="tempUnitToggle" class="mt-1.5 inline-flex p-0.5 rounded-lg bg-slate-100" role="group" aria-label="Temperature unit">
             <button type="button" class="temperature-unit-btn px-2 py-0.5 text-[11px] font-semibold rounded-md transition" data-unit="F">°F</button>
             <button type="button" class="temperature-unit-btn px-2 py-0.5 text-[11px] font-semibold rounded-md transition" data-unit="C">°C</button>
           </div>
         </div>
         <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #0ea5e9">
-          <div class="text-xl sm:text-3xl">💧</div>
+          <div class="metric-label text-xs sm:text-sm text-slate-500">Moisture %</div>
           <div id="humValue" class="metric-value mt-1 text-3xl font-bold text-sky-600 sm:text-4xl">--</div>
-          <div class="metric-label text-xs text-slate-500 mt-0.5">Moisture %</div>
         </div>
         <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #16a34a">
-          <div class="text-xl sm:text-3xl">🔋</div>
+          <div class="metric-label text-xs sm:text-sm text-slate-500">Battery %</div>
           <div id="battValue" class="metric-value mt-1 text-3xl font-bold text-emerald-700 sm:text-4xl">--</div>
-          <div class="metric-label text-xs text-slate-500 mt-0.5">Battery %</div>
         </div>
       </div>
       <p id="lastUpdate" class="mb-5 text-xs text-center text-slate-400 sm:mb-6">No measurement received yet</p>
