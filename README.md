@@ -52,8 +52,9 @@ Debugging tips:
 ## 4. Versioning & cache busting
 
 - `PAGE_VERSION` in `page/js/config.js` is the frontend version, shown in the page footer for cache troubleshooting.
-- Scripts at the bottom of `index.html` are loaded with a `?v=x.y.z` query for cache busting. **Increment the `?v=` of any script you change**, otherwise browsers keep running the old JS.
-- On production release, `deploy.yml` rewrites `PAGE_VERSION` from the git tag (with the `v` prefix stripped) — no manual sync needed.
+- The three business scripts at the bottom of `index.html` (`config.js` / `ble-protocol.js` / `app.js`) share **one unified `?v=` version** for cache busting — they are always released together and must never drift.
+- On CI the version is synced automatically from a single source of truth: `deploy.yml` (production, git tag, e.g. `v1.3.20` → `1.3.20`) and `dev.yml` (GitHub Pages preview, current commit short hash) rewrite both `PAGE_VERSION` and the three `?v=` values in `index.html` — no manual sync needed.
+- For local development, bump the same version in `config.js` `PAGE_VERSION` and all three `?v=` values in `index.html` whenever any JS changes, otherwise browsers keep running the old JS.
 
 ## 5. Release pipeline
 

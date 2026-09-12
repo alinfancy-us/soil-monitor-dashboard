@@ -406,7 +406,7 @@
       <img src="page/images/alinfancy-logo.svg" alt="Alinfancy" class="object-contain w-[90px] h-[90px] shrink-0 sm:w-24 sm:h-24">
       <div>
         <h1 class="text-2xl font-bold sm:text-3xl text-emerald-800">SoilPulse</h1>
-        <p class="mt-0.5 max-w-md text-sm leading-5 text-slate-500 sm:mt-1 sm:text-base">Soil Temperature, Moisture, and Battery Dashboard</p>
+        <p class="mt-0.5 max-w-md text-sm leading-5 text-slate-500 sm:mt-1 sm:text-base">Soil Temperature, Moisture, And Battery Dashboard</p>
       </div>
     </header>
 
@@ -757,10 +757,11 @@
     <p id="pageVersion" class="mt-6 text-center text-[10px] text-slate-300 select-none"></p>
   </div>
 
-  <!-- 引入业务模块脚本：?v= 版本号用于缓存破坏（cache busting），
-       每次前端功能变更后必须递增，否则浏览器会继续运行旧版 JS -->
+  <!-- 引入业务模块脚本：?v= 版本号用于缓存破坏（cache busting）。
+       三处统一使用同一版本号，由 CI 发版时自动从 git tag / commit 哈希同步，
+       本地开发请三处一并递增，否则浏览器会继续运行旧版 JS -->
   <script src="page/js/config.js?v=1.3.20"></script>
-  <script src="page/js/ble-protocol.js?v=1.3.11"></script>
+  <script src="page/js/ble-protocol.js?v=1.3.20"></script>
   <script src="page/js/app.js?v=1.3.20"></script>
 </body>
 </html>
