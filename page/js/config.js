@@ -7,7 +7,7 @@ const SoilPulseConfig = (() => {
 
   // 前端页面版本号：与 index.html 的 <script src="...?v=X"> 保持一致，每次功能变更递增。
   // 页面底部会显示该值，便于现场确认浏览器实际加载的是哪一版前端（排查缓存问题）
-  const PAGE_VERSION = '1.3.20';
+  const PAGE_VERSION = '1.3.21';
 
   // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致（固件改名须保留此前缀）。
   // 它参与 requestDevice 的过滤（与 services UUID 同一 filter 内 AND 匹配），
@@ -90,8 +90,14 @@ const SoilPulseConfig = (() => {
   // 3. 对带版本号的完整 URL 进行 encodeURIComponent
   const BLUEFY_DEEPLINK = `bluefy://open?url=${encodeURIComponent(targetUrl.toString())}`;
 
-  // 调试日志 / 轮询间隔（毫秒）
-  const DEBUG_ENABLED = true;
+  // 调试日志 / 轮询间隔（毫秒）。
+  // 中文：两个开关必须解耦——轮询(startPolling)承担"读数据兜底 + 断链 UI 校正"职责，
+  //       不能随日志开关一起被关掉（DEBUG=false 时若仍门控轮询，断链后 UI 会永远显示 Connected，
+  //       WebKit 平台 gattserverdisconnected 事件不可靠）。
+  //       DEBUG_ENABLED=false 发版：log() 仅输出 console.debug，关闭后现场零调试输出；
+  //       POLL_ENABLED=true 发版：轮询兜底必须常开。
+  const DEBUG_ENABLED = false;
+  const POLL_ENABLED = true;
   const POLL_INTERVAL = 5000;
 
   // 时间戳合理区间（过滤 1970 年脏数据），须与固件 soil_daily.c 的过滤区间一致
@@ -120,6 +126,7 @@ const SoilPulseConfig = (() => {
     BLUEFY_APPSTORE_URL,
     BLUEFY_DEEPLINK,
     DEBUG_ENABLED,
+    POLL_ENABLED,
     POLL_INTERVAL,
     DAILY_EPOCH_MIN_VALID,
     DAILY_EPOCH_MAX_VALID,

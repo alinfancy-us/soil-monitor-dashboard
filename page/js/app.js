@@ -9,7 +9,7 @@
      PAGE_VERSION,
      DEV_NAME_MAX_BYTES,
      DEVICE_NAME,
-     DEBUG_ENABLED, POLL_INTERVAL,
+     DEBUG_ENABLED, POLL_ENABLED, POLL_INTERVAL,
      DASHBOARD_URL, BLUEFY_APPSTORE_URL, BLUEFY_DEEPLINK,
      DAILY_EPOCH_MIN_VALID, DAILY_EPOCH_MAX_VALID, TREND_EPOCH_MAX_VALID,
      CACHE_PREFIX, CACHE_MAX_ITEM_BYTES, CACHE_MAX_TOTAL_BYTES,
@@ -116,6 +116,7 @@
     fwVersion: null,
     fwUpdate: null,
      pollTimer: null,
+     pollBusy: false,   // 中文：轮询 readData 重入保护——上一轮未完成（GATT 慢/射频差）时跳过本轮
      lastRecords: null,
      lastDailyRecords: null,
      dailyMetric: 'temp',
@@ -1014,16 +1015,29 @@
  
    function startPolling() {
      stopPolling();
-     if (!DEBUG_ENABLED) return;
+     // 中文：轮询开关独立于日志开关（POLL_ENABLED）——轮询承担"读数据兜底 + 断链 UI 校正"
+     //       职责，发版必须常开；DEBUG_ENABLED 只控制 log() 的 console 输出
+     if (!POLL_ENABLED) return;
      state.pollTimer = setInterval(async () => {
        if (!state.characteristic) return;
+       // OTA 升级进行中：暂停轮询读数，避免与升级流量抢占连接事件拖慢传输
+       if (state.otaRunning) return;
+       // 重入保护：上一轮 readData 未完成（GATT 慢/射频差）时跳过本轮，防止并发 GATT 操作
+       if (state.pollBusy) return;
        // 底层连接已断但 gattserverdisconnected 事件未触发（页面后台 / 平台差异）：
        // 轮询主动校正 UI 状态，避免"断线但界面仍显示 Connected"
        if (!state.device?.gatt.connected) {
          onDisconnected();
          return;
        }
-       await readData().catch(e => log(`Poll failed: ${e.message}`));
+       state.pollBusy = true;
+       try {
+         await readData();
+       } catch (e) {
+         log(`Poll failed: ${e.message}`);
+       } finally {
+         state.pollBusy = false;
+       }
      }, POLL_INTERVAL);
    }
  

@@ -8,7 +8,9 @@
   <meta http-style="Cache-Control" content="no-cache, no-store, must-revalidate"> -->
   <title>Alinfancy SoilPulse Soil Monitor</title>
   <link rel="icon" href="page/images/alinfancy-logo.svg">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- 中文：Tailwind 已改为构建期编译的静态 CSS（见 tailwind.config.js / build_css.sh），
+       不再依赖 cdn.tailwindcss.com 运行时脚本；类名变更后须重跑 ./build_css.sh 并递增版本号 -->
+  <link rel="stylesheet" href="page/css/tailwind.css?v=1.3.21">
   <style>
     :root {
       color-scheme: light;
@@ -760,8 +762,8 @@
   <!-- 引入业务模块脚本：?v= 版本号用于缓存破坏（cache busting）。
        三处统一使用同一版本号，由 CI 发版时自动从 git tag / commit 哈希同步，
        本地开发请三处一并递增，否则浏览器会继续运行旧版 JS -->
-  <script src="page/js/config.js?v=1.3.20"></script>
-  <script src="page/js/ble-protocol.js?v=1.3.20"></script>
-  <script src="page/js/app.js?v=1.3.20"></script>
+  <script src="page/js/config.js?v=1.3.21"></script>
+  <script src="page/js/ble-protocol.js?v=1.3.21"></script>
+  <script src="page/js/app.js?v=1.3.21"></script>
 </body>
 </html>
