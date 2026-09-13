@@ -10,7 +10,7 @@
   <link rel="icon" href="page/images/alinfancy-logo.svg">
   <!-- 中文：Tailwind 已改为构建期编译的静态 CSS（见 tailwind.config.js / build_css.sh），
        不再依赖 cdn.tailwindcss.com 运行时脚本；类名变更后须重跑 ./build_css.sh 并递增版本号 -->
-  <link rel="stylesheet" href="page/css/tailwind.css?v=1.3.21">
+  <link rel="stylesheet" href="page/css/tailwind.css?v=1.3.23">
   <style>
     :root {
       color-scheme: light;
@@ -419,17 +419,16 @@
         <span id="statusText" class="text-sm font-medium text-slate-600">Disconnected</span>
         <span id="deviceNameText" class="hidden text-xs font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full"></span>
       </div>
-      <div class="grid grid-cols-2 gap-2 sm:flex sm:gap-2">
-        <button id="clearCacheBtn" disabled
-          class="action-button inline-flex items-center px-3 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-rose-100 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-40 sm:px-4">
-          🗑 Clear Data
+      <!-- 中文：手机端 Connect / Refresh 等宽同排、间距 gap-3、字体 text-base（16px），
+           两按钮铺满卡片内容区不留边角空白（Clear Data 已移至 Measurement History 卡片）。
+           未连接时 Refresh 呈灰色禁用态，连接后为品牌色次级操作 -->
+      <div class="grid grid-cols-2 gap-3 sm:flex sm:gap-2">
+        <button id="connectBtn" class="action-button inline-flex items-center px-3 py-2 text-base font-semibold text-white transition shadow-sm rounded-xl bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] w-full sm:w-auto">
+          Connect Device
         </button>
         <button id="refreshBtn" disabled
-          class="action-button inline-flex items-center px-3 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-sky-100 hover:text-sky-600 disabled:cursor-not-allowed disabled:opacity-40 sm:px-4">
+          class="action-button inline-flex items-center px-3 py-2 text-base font-semibold transition rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:border-transparent disabled:bg-slate-100 disabled:text-slate-600 disabled:cursor-not-allowed disabled:opacity-40 sm:px-4 sm:w-auto">
           🔄 Refresh
-        </button>
-        <button id="connectBtn" class="action-button inline-flex items-center px-5 py-2 text-sm font-semibold text-white transition shadow-sm rounded-xl bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] w-full col-span-2 sm:w-auto">
-          Connect Device
         </button>
       </div>
     </div>
@@ -502,7 +501,15 @@
       <!-- History & trend charts（原 History 面板内容已并入 Data 面板） -->
       <!-- History table -->
       <div class="dashboard-card p-4 mb-5 overflow-hidden rounded-2xl sm:p-5 sm:mb-6 mt-6">
-        <h2 class="mb-3 text-sm font-semibold text-slate-600">Measurement History</h2>
+        <!-- Clear Data（自顶部工具栏迁入）：清除的就是本地+设备历史数据，操作靠近其作用对象，
+             且远离高频的 Refresh 按钮以降低手机误触。未连接时 disabled 联动逻辑不变（app.js） -->
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h2 class="text-sm font-semibold text-slate-600">Measurement History</h2>
+          <button id="clearCacheBtn" disabled
+            class="action-button inline-flex shrink-0 items-center px-3 py-1.5 text-xs font-semibold transition rounded-lg border border-rose-200 bg-white text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40">
+            🗑 Clear
+          </button>
+        </div>
         <table class="history-table w-full text-sm">
           <thead>
             <tr class="text-left border-b text-slate-400 border-slate-100">
