@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       fw_url:
-        description: '固件 bin 下载 URL (留空则不更新固件，文件名须按 SoilPulse_v<版本>.bin 或 SoilPulse_<commit哈希>.bin 命名)'
+        description: '固件 bin 下载 URL (留空则回退 vars.FW_TAG 从固件仓库 Release 下载；文件名须按 SoilPulse_v<版本>.bin 或 SoilPulse_<commit哈希>.bin 命名)'
         required: false
         default: ''
       fw_notes:
@@ -62,19 +62,43 @@ jobs:
           grep -n "page/js/.*\.js?v=" index.html
           grep "DASHBOARD_URL" page/js/config.js
 
-      # 从 fw_url 拉取固件并更新升级清单，isforce=true 强制提醒升级
-      # 支持 Actions Artifact zip 链接、Release Asset 链接以及常规 HTTP 链接
+      # 固件来源优先级：fw_url 输入 > vars.FW_TAG（固件仓库 Release，与 deploy.yml 规则一致）。
+      # 两者都为空时跳过固件更新（仅发页面）。
+      # fw_url 支持 Actions Artifact zip 链接、Release Asset 链接以及常规 HTTP 链接
       - name: Download firmware & Sync firmware.json
-        if: ${{ github.event.inputs.fw_url != '' }}
+        if: ${{ github.event.inputs.fw_url != '' || vars.FW_TAG != '' }}
         env:
           FW_URL: ${{ github.event.inputs.fw_url }}
           FW_RAW_NOTES: ${{ github.event.inputs.fw_notes }}
+          FW_RAW_TAG: ${{ vars.FW_TAG }}
           GH_TOKEN: ${{ secrets.FW_REPO_TOKEN }}
+          REPO_PATH: "alinfancy-us/bth_soil_sensor"
         run: |
           mkdir -p page/firmware
 
+          # ===== 情况零：fw_url 留空 → 回退 vars.FW_TAG，按 deploy.yml 同款规则
+          # 从固件仓库 Release 下载 SoilPulse_v<tag>.bin，省去每次测试版本手工配置 URL =====
+          if [ -z "$FW_URL" ]; then
+            # 规范化 release tag：去掉可能输入的 v 前缀后统一补回，得到 v2.1.1 形式
+            FW_NUM=$(echo "$FW_RAW_TAG" | sed 's/^[vV]//')
+            if [ -z "$FW_NUM" ]; then
+              echo "::error::fw_url 为空且 vars.FW_TAG 未配置，无法确定固件来源"
+              exit 1
+            fi
+            FW_TAG="v${FW_NUM}"
+            FW_BIN="SoilPulse_${FW_TAG}.bin"
+            SRC="release ${FW_TAG} @ ${REPO_PATH}"
+
+            echo "fw_url is empty. Falling back to vars.FW_TAG -> downloading ${FW_BIN} from ${REPO_PATH} using gh cli..."
+            gh release download "$FW_TAG" \
+              --repo "$REPO_PATH" \
+              --pattern "$FW_BIN" \
+              --dir page/firmware/ \
+              --clobber
+          else
           # 提取 URL 中的 repo 路径 (如 alinfancy-us/bth_soil_sensor)
           REPO_PATH=$(echo "$FW_URL" | sed -E 's|https://github\.com/([^/]+/[^/]+)/.*|\1|')
+          SRC="$FW_URL"
 
           # 1. 情况一：判断是否为 Actions Artifact 链接 (/artifacts/xxxx)
           if [[ "$FW_URL" =~ /artifacts/([0-9]+) ]]; then
@@ -144,11 +168,12 @@ jobs:
                 ;;
             esac
             curl --fail --location --silent --show-error --retry 3 "${CURL_AUTH[@]}" --output "page/firmware/${FW_BIN}" "$FW_URL"
-          fi
+          fi  # fw_url 分支（情况一/二/三）结束
+          fi  # [ -z "$FW_URL" ] if/else 结束
 
           # ===== 校验下载产物（非空、二进制固件、文件名） =====
           if [ ! -s "page/firmware/${FW_BIN}" ]; then
-            echo "::error::固件下载失败或文件为空: ${FW_URL}"
+            echo "::error::固件下载失败或文件为空: ${SRC}"
             exit 1
           fi
 
@@ -163,10 +188,10 @@ jobs:
           ' "page/firmware/${FW_BIN}" || ARTIFACT_RC=$?
           case "$ARTIFACT_RC" in
             0) : ;;
-            1) echo "::error::下载产物为空文件: ${FW_URL}"; exit 1 ;;
-            2) echo "::error::下载产物是 HTML 页面而非固件二进制（请确认 Token 是否具备权限或 URL 是否正确）: ${FW_URL}"; exit 1 ;;
-            3) echo "::error::下载产物不是二进制固件（未检测到二进制特征）: ${FW_URL}"; exit 1 ;;
-            *) echo "::error::下载产物校验失败 (rc=${ARTIFACT_RC}): ${FW_URL}"; exit 1 ;;
+            1) echo "::error::下载产物为空文件: ${SRC}"; exit 1 ;;
+            2) echo "::error::下载产物是 HTML 页面而非固件二进制（请确认 Token 是否具备权限或来源是否正确）: ${SRC}"; exit 1 ;;
+            3) echo "::error::下载产物不是二进制固件（未检测到二进制特征）: ${SRC}"; exit 1 ;;
+            *) echo "::error::下载产物校验失败 (rc=${ARTIFACT_RC}): ${SRC}"; exit 1 ;;
           esac
 
           # 清理旧版本固件 bin，只保留本次清单指向的固件
