@@ -973,8 +973,8 @@
      const isTrend = tab === 'trend';
      els.trendTabPanel.classList.toggle('hidden', !isTrend);
      els.dailyTabPanel.classList.toggle('hidden', isTrend);
-     els.trendTabBtn.className = `chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`;
-     els.dailyTabBtn.className = `chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-slate-100 text-slate-500' : 'bg-emerald-600 text-white'}`;
+     els.trendTabBtn.className = `chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-emerald-700 text-white' : 'bg-slate-100 text-slate-500'}`;
+     els.dailyTabBtn.className = `chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-slate-100 text-slate-500' : 'bg-emerald-700 text-white'}`;
  
      if (isTrend && state.lastRecords) {
        drawChart(state.lastRecords);
