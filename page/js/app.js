@@ -105,6 +105,8 @@
      resetChar: null,
     calibChar: null,
     refreshChar: null,
+    latestChar: null,
+    latestShown: null,   // "Latest measurement" 卡片当前展示的记录（时间戳水位），防止被更旧的历史数据覆盖
     tempOffsetChar: null,
     tempOffsetX10: 0,
     calibStatusChar: null,
@@ -440,6 +442,7 @@
   // 清空 live 展示区（切换到另一台设备、或没有该设备缓存时，避免继续显示上一台设备的数据）。
   function resetDisplay() {
     state.lastRecords = null;
+    state.latestShown = null;
     state.lastDailyRecords = null;
     els.tempValue.textContent = '--';
     els.humValue.textContent = '--';
@@ -585,10 +588,16 @@
     saveTrendRecordsCache(records, state.activeDeviceId);
      const latest = records[records.length - 1];
  
-     els.tempValue.textContent = tempVal(latest.temp).toFixed(1);
-     els.humValue.textContent = latest.hum.toFixed(1);
-     els.battValue.textContent = latest.batt;
-     els.lastUpdate.textContent = `Latest measurement: ${formatTime(latest.timestamp)}`;
+     // 中文：水位保护——Refresh 的一次性测量值（0xFFEB）可能比历史最后一条更新，
+     //     历史渲染（轮询/重连/通知）不得用过期数据覆盖 Latest 卡片；
+     //     只有历史出现 >= 水位的新记录（如新一轮周期采样）才允许刷新卡片
+     if (!state.latestShown || latest.timestamp >= state.latestShown.timestamp) {
+       els.tempValue.textContent = tempVal(latest.temp).toFixed(1);
+       els.humValue.textContent = latest.hum.toFixed(1);
+       els.battValue.textContent = latest.batt;
+       els.lastUpdate.textContent = `Latest measurement: ${formatTime(latest.timestamp)}`;
+       state.latestShown = latest;
+     }
  
      els.historyBody.innerHTML = records
        .map((r, i) => `
@@ -1196,7 +1205,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        if (token !== connectToken) return;   // 期间用户又发起了新连接，丢弃本次
 
        // 阶段2：gatt.connect + 服务/特征发现，由 finishConnect 内部保证 5s 超时
-       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
+       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
          device,
          (records, hex) => {
            log(`Notification: ${hex}`);
@@ -1226,6 +1235,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        state.resetChar = resetChar;
        state.calibChar = calibChar;
        state.refreshChar = refreshChar;
+       state.latestChar = latestChar;
        state.tempOffsetChar = tempOffsetChar;
        state.calibStatusChar = calibStatusChar;
        state.devNameChar = devNameChar;
@@ -1253,6 +1263,18 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        if (dataChar.properties.read) {
          await readData();
        }
+
+       // 中文：合并 0xFFEB latest——设备端 s_last_measure 含 Refresh 一次性测量值，
+       //     若它比历史最后一条更新（如上次连接点过 Refresh），恢复卡片显示；
+       //     旧固件无此特征时 readLatest 返回 null，静默跳过
+       try {
+         const devLatest = await BLEProtocol.readLatest(state.latestChar);
+         const histLatest = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
+         if (devLatest && (!histLatest || devLatest.timestamp > histLatest.timestamp)) {
+           applyLatestRecord(devLatest);
+           log(`Restored newer latest measurement from 0xFFEB (${formatTime(devLatest.timestamp)})`);
+         }
+       } catch (_) { /* latest 读取失败不影响连接流程 */ }
 
        setStatus('connected');
        log('Connected & Listening for updates.');
@@ -1509,16 +1531,13 @@ The device will measure the current probe state first, then apply the calibratio
   els.calibWetBtn.addEventListener('click', () => handleCalibClick('wet', 'Wet'));
 
   // ===== Refresh 防连点 =====
-  // 设备端一轮测量（电池/NTC/湿度三通道 ADC 采样 + 滤波稳定等待 + 0xFFE1 历史通知回传）
-  // 通常需要几百毫秒到 1~2 秒，而 0xFFE7 的 GATT 写入本身几十毫秒即完成：
-  // 若写完立刻恢复按钮，用户在这段窗口里看不到任何反馈，极易连续点击。
-  // 连点危害：设备端 s_force_measure_pending 是二值标志，同窗口内的连点会合并成一次测量，
-  // 但测量完成后再点仍会再测一次并写入一条历史记录（历史环仅 SOIL_HISTORY_MAX=5 条），
-  // 连续手动重测会把"最近 5 次趋势"刷成几乎相同的值，挤掉真实历史。
-  // 策略：
-  //   1) 点击后锁定按钮并显示 Measuring…，直到收到 0xFFE1 新数据通知（数据已到，无需再等）
-  //      或超时兜底解锁——突变/快采轮不写历史也不推通知，必须靠超时解锁，避免按钮永久锁死；
-  //   2) 解锁后仍有 COOLDOWN 冷却窗：两次手动重测至少间隔 3 秒，进一步限制重测频率。
+  // 设备端一轮测量（电池/NTC/湿度三通道 ADC 采样 + 滤波稳定等待）通常需要几百毫秒到 1~2 秒，
+  // 而 0xFFE7 的 GATT 写入本身几十毫秒即完成：若写完立刻恢复按钮，用户在这段窗口里
+  // 看不到任何反馈，极易连续点击。
+  // v2 规格：refresh 一次性测量不写历史、不推 0xFFE1 通知，实时值写入 0xFFEB latest 特征。
+  // 策略：点击后锁定按钮并显示 Measuring…，每 500ms 轮询读 0xFFEB，直到出现比
+  // 历史最后一条更新的时间戳（新测量已到，刷新 Latest 卡片）或超时兜底解锁。
+  // 连点危害：设备端 s_force_measure_pending 是二值标志，同窗口内的连点会合并成一次测量。
   const REFRESH_RESULT_TIMEOUT_MS = 6000;
   // const REFRESH_COOLDOWN_MS = 3000;
   const REFRESH_LABEL_IDLE = '🔄 Refresh';
@@ -1553,6 +1572,33 @@ The device will measure the current probe state first, then apply the calibratio
     setRefreshUiBusy(false);
   }
 
+  // Refresh 专用：只刷新 "Latest measurement" 卡片，不写历史记录/图表/本地缓存
+  function applyLatestRecord(rec) {
+    els.tempValue.textContent = tempVal(rec.temp).toFixed(1);
+    els.humValue.textContent = rec.hum.toFixed(1);
+    els.battValue.textContent = rec.batt;
+    els.lastUpdate.textContent = `Latest measurement: ${formatTime(rec.timestamp)}`;
+    state.latestShown = rec;   // 抬高水位：更旧的历史数据不允许覆盖本次实时值
+  }
+
+  const REFRESH_POLL_INTERVAL_MS = 500;
+
+  // 轮询 0xFFEB latest，直到出现比 prev（历史最后一条）更新的时间戳；超时/断连返回 null
+  async function waitForLatestMeasurement(prev) {
+    const deadline = Date.now() + REFRESH_RESULT_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, REFRESH_POLL_INTERVAL_MS));
+      if (!state.device?.gatt.connected) return null;
+      try {
+        const rec = await BLEProtocol.readLatest(state.latestChar);
+        if (rec && (!prev || rec.timestamp !== prev.timestamp)) return rec;
+      } catch (err) {
+        // 单次读失败（射频瞬态等）继续重试，直到超时兜底
+      }
+    }
+    return null;
+  }
+
   async function handleRefreshClick() {
     if (state.otaRunning) {
       log('Refresh ignored: OTA update is running');
@@ -1578,13 +1624,17 @@ The device will measure the current probe state first, then apply the calibratio
     try {
       await BLEProtocol.sendRefresh(state.refreshChar);
       log('Refresh command sent (0xFFE7), measuring now');
-      // 锁定到新数据通知到达为止（见 handleConnect 通知回调里的 releaseRefreshOnData）；超时兜底解锁
-      refreshUnlockTimer = setTimeout(() => {
-        refreshUnlockTimer = null;
-        refreshBusy = false;
-        setRefreshUiBusy(false);
-        log('Refresh: no new-data notification within 6s, button unlocked');
-      }, REFRESH_RESULT_TIMEOUT_MS);
+      const prev = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
+      const rec = await waitForLatestMeasurement(prev);
+      refreshUnlockTimer = null;
+      refreshBusy = false;
+      setRefreshUiBusy(false);
+      if (rec) {
+        applyLatestRecord(rec);
+        log('Refresh: latest measurement updated (0xFFEB)');
+      } else {
+        log('Refresh: no updated measurement within 6s, button unlocked');
+      }
     } catch (err) {
       cancelRefreshWait();
       log(`Refresh failed: ${err.message || err}`);

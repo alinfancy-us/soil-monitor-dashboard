@@ -176,6 +176,8 @@ const BLEProtocol = (() => {
       getChar(UUIDS.TEMP_OFFSET_CHAR),
       getChar(UUIDS.CALIB_STATUS_CHAR),
       getChar(UUIDS.DEV_NAME_CHAR),
+      // 最新一次测量记录（9 字节，布局同历史记录；旧固件无此特征时为 null）
+      getChar(UUIDS.LATEST_CHAR),
       // Telink OTA 升级特征（128bit UUID，仅 BLE_OTA_SERVER_ENABLE=1 的固件才有）
       (async () => {
         const otaService = await server.getPrimaryService(UUIDS.OTA_SERVICE);
@@ -189,9 +191,9 @@ const BLEProtocol = (() => {
       })(),
     ]).then(results => results.map(r => (r.status === 'fulfilled' ? r.value : null)));
 
-    const [dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, otaChar, fwVersion] = values;
+    const [dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, otaChar, fwVersion] = values;
 
-    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, otaChar, fwVersion };
+    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, otaChar, fwVersion };
   }
 
   /**
@@ -347,6 +349,25 @@ const BLEProtocol = (() => {
    * 向 0xFFE7 写入 1 字节固定值，请求设备在连接态下立即重新执行一次测量
    * @param {BluetoothRemoteGATTCharacteristic} refreshChar
    */
+  /**
+   * 读取 0xFFEB latest 特征值（9 字节：epoch u32 + 温度 s16 + 湿度 u16 + 电量 u8，小端）。
+   * v2 规格：refresh 一次性测量不写历史，Refresh 按钮的实时值从这里轮询读取；
+   * 旧固件无此特征（latestChar 为 null）或读取失败时返回 null，由调用方超时兜底。
+   * @param {BluetoothRemoteGATTCharacteristic|null} latestChar
+   * @returns {Promise<{timestamp:number,temp:number,hum:number,batt:number}|null>}
+   */
+  async function readLatest(latestChar) {
+    if (!latestChar) return null;
+    const view = await latestChar.readValue();
+    if (view.byteLength < RECORD_SIZE) return null;
+    return {
+      timestamp: view.getUint32(0, true),
+      temp: view.getInt16(4, true) / 100,
+      hum: view.getUint16(6, true) / 100,
+      batt: view.getUint8(8),
+    };
+  }
+
   async function sendRefresh(refreshChar) {
     if (!refreshChar) {
       throw new Error('refresh characteristic unavailable');
@@ -594,6 +615,7 @@ const BLEProtocol = (() => {
     sendFactoryReset,
     sendHumCalib,
     sendRefresh,
+    readLatest,
     readTempOffset,
     sendTempOffset,
     readCalibStatus,
