@@ -7,7 +7,7 @@ const SoilPulseConfig = (() => {
 
   // 前端页面版本号：与 index.html 的 <script src="...?v=X"> 保持一致，每次功能变更递增。
   // 页面底部会显示该值，便于现场确认浏览器实际加载的是哪一版前端（排查缓存问题）
-  const PAGE_VERSION = '1.3.23';
+  const PAGE_VERSION = '1.3.30';
 
   // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致（固件改名须保留此前缀）。
   // 它参与 requestDevice 的过滤（与 services UUID 同一 filter 内 AND 匹配），
@@ -77,9 +77,10 @@ const SoilPulseConfig = (() => {
     TEMP: 0x04,  // 温度偏移非 0
   };
 
-  // 设备名（网页展示名）限制：名字不再进广播（广播名恒为 DEVICE_NAME），20 字节足够友好命名；
-  // 仅允许可打印 ASCII（0x20~0x7E）；前端输入即做字节数与字符集双重校验
-  const DEV_NAME_MAX_BYTES = 20;
+  // 设备名（网页展示名）限制：名字不再进广播（广播名恒为 DEVICE_NAME）；
+  // 仅允许可打印 ASCII（0x20~0x7E）；前端输入即做字节数与字符集双重校验。
+  // 固件特征值仍为 20 字节（app_att.h），产品层面收紧到 10 字符（写入 ≤10 字节完全兼容）
+  const DEV_NAME_MAX_BYTES = 10;
 
   // Bluefy 深链唤起配置：iOS Safari 无 Web Bluetooth 时引导用 Bluefy 打开本 Dashboard，
   // 未安装则回退 App Store（deep link scheme 未公开文档，需真机验证）

@@ -19,6 +19,7 @@
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
   const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
+  const DEVICE_NAME_KEY = `${CACHE_PREFIX}devName:v1`;   // 最近一次连接的设备展示名（断开连接后仍展示）
   const RECORD_KEY_RE = /^SoilPulse:(trend|daily):v1:/;  // 注意：与 CACHE_PREFIX='SoilPulse:' 大小写一致，否则容量清理匹配不到任何 key
 
   function cacheKey(type, deviceId) {
@@ -36,6 +37,9 @@
     calibDryBadge: document.getElementById('calibDryBadge'),
     calibWetBadge: document.getElementById('calibWetBadge'),
     refreshBtn: document.getElementById('refreshBtn'),
+    refreshIcon: document.getElementById('refreshIcon'),
+    refreshLabel: document.getElementById('refreshLabel'),
+    connectErrorText: document.getElementById('connectErrorText'),
     otaProgressWrap: document.getElementById('otaProgressWrap'),
     otaProgressBar: document.getElementById('otaProgressBar'),
     otaStatus: document.getElementById('otaStatus'),
@@ -128,6 +132,8 @@
    // 温度单位偏好：默认华氏（°F，美国常用），可在温度卡片切换摄氏（°C），持久化到本地
    try {
      state.tempUnit = localStorage.getItem(`${CACHE_PREFIX}tempUnit:v1`) === 'C' ? 'C' : 'F';
+     // 启动时恢复最近一次连接的设备展示名（未连接也展示，见 showDeviceNameBadge）
+     showDeviceNameBadge(localStorage.getItem(DEVICE_NAME_KEY) || '');
    } catch (_) {
      state.tempUnit = 'F';
    }
@@ -186,7 +192,7 @@
      const [dot, text, active] = map[mode];
      els.statusDot.className = `w-3 h-3 rounded-full ${dot}`;
      els.statusText.textContent = text;
-     els.connectBtn.textContent = mode === 'connected' ? 'Disconnect' : 'Connect Device';
+     els.connectBtn.textContent = mode === 'connected' ? 'Disconnect' : 'Connect';
      const connected = mode === 'connected';
     els.calibDryBtn.disabled = !connected;
     els.calibWetBtn.disabled = !connected;
@@ -406,6 +412,28 @@
       localStorage.setItem(LAST_DEVICE_KEY, JSON.stringify({ id: deviceId, name: deviceName || '', savedAt: Date.now() }));
     } catch (err) {
       log(`Save last device failed: ${err.message}`);
+    }
+  }
+
+  // 设备展示名徽章：设置文字并显示，同时持久化到 localStorage——断开连接、刷新页面后
+  // 仍展示最近一次连接的设备名（需求：disconnect 时不隐藏设备名）
+  function showDeviceNameBadge(name) {
+    if (!els.deviceNameText || !name) return;
+    els.deviceNameText.textContent = name;
+    els.deviceNameText.classList.remove('hidden');
+    try {
+      localStorage.setItem(DEVICE_NAME_KEY, name);
+    } catch (_) {}
+  }
+
+  // 清除设备名徽章及本地持久化（仅工厂复位使用：设备端名字已被擦除，徽章不应残留旧名）
+  function clearDeviceNameBadge() {
+    try {
+      localStorage.removeItem(DEVICE_NAME_KEY);
+    } catch (_) {}
+    if (els.deviceNameText) {
+      els.deviceNameText.textContent = '';
+      els.deviceNameText.classList.add('hidden');
     }
   }
 
@@ -889,10 +917,10 @@
      const active = state.tempUnit;
      (els.tempUnitToggle?.querySelectorAll('.temperature-unit-btn') || []).forEach(btn => {
        const isActive = btn.dataset.unit === active;
-       btn.className = `temperature-unit-btn px-2 py-0.5 text-[11px] font-semibold rounded-md transition ${isActive ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`;
+       btn.className = `temperature-unit-btn px-1.5 py-0.5 text-[10px] font-semibold rounded-md transition ${isActive ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`;
      });
      try { localStorage.setItem(`${CACHE_PREFIX}tempUnit:v1`, active); } catch (_) {}
-     if (els.tempUnitLabel) els.tempUnitLabel.textContent = `Temperature ${tempUnitSymbol()}`;
+     if (els.tempUnitLabel) els.tempUnitLabel.textContent = 'Temperature';   // 单位由 °F/°C 切换器高亮表达，label 不再重复后缀
      if (state.lastRecords) {
        render(state.lastRecords);
      } else {
@@ -1077,9 +1105,8 @@
      state.otaRunning = false;
      state.fwUpdate = null;
      renderFirmwareCard();
-     // 断开后隐藏"已校准"徽标与设备名（下次连接时重新读取）
+     // 断开后隐藏"已校准"徽标；设备名保留展示（最近一次连接的设备名，不随断开隐藏）
      renderCalibHints(null);
-     if (els.deviceNameText) els.deviceNameText.classList.add('hidden');
      if (els.devNameStatus) els.devNameStatus.textContent = '';
      log('Device disconnected');
    }
@@ -1188,6 +1215,20 @@
  
 let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的连接，防止幽灵状态
 
+// 连接失败/超时的红字提示：显示在状态卡下方独立行（不覆盖状态行文字）；
+// 新的连接尝试开始（clearConnectError）或连接成功后清除
+function showConnectError(msg) {
+  if (!els.connectErrorText) return;
+  els.connectErrorText.textContent = msg;
+  els.connectErrorText.classList.remove('hidden');
+}
+
+function clearConnectError() {
+  if (!els.connectErrorText) return;
+  els.connectErrorText.textContent = '';
+  els.connectErrorText.classList.add('hidden');
+}
+
    async function handleConnect() {
      if (!navigator.bluetooth) {
        const ua = navigator.userAgent;
@@ -1196,6 +1237,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
      }
 
      const token = ++connectToken;
+     clearConnectError();   // 新的连接尝试开始，清除上一次失败的红字提示
      try {
        setStatus('connecting');
        log('Requesting Bluetooth Device...');
@@ -1277,6 +1319,7 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        } catch (_) { /* latest 读取失败不影响连接流程 */ }
 
        setStatus('connected');
+       clearConnectError();   // 连接成功，清除历史失败提示
        log('Connected & Listening for updates.');
        startPolling();
 
@@ -1292,13 +1335,16 @@ let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的�
        setStatus('disconnected');
        const errMsg = String(err && err.message);
        if (errMsg.includes('CONNECT_TIMEOUT')) {
-         // 阶段2a：gatt.connect() 超时——多为设备深睡不在广播窗口 / 系统蓝牙被关闭
-         els.statusText.textContent = 'Connect timed out — device may be sleeping (touch it to wake) or Bluetooth is off';
+         // 阶段2a：gatt.connect() 超时——多为设备深睡不在广播窗口 / 系统蓝牙被关闭；
+         // 失败文案显示在状态卡下方红字独立行（不再覆盖状态行"Disconnected"文字）
+         showConnectError('Connect timed out — device may be sleeping (touch it to wake) or Bluetooth is off');
          log('gatt.connect timed out after 10s');
        } else if (errMsg.includes('INIT_TIMEOUT')) {
          // 阶段2b：已连上但服务发现/时间同步/订阅初始化超时——多为射频信号差或慢平台
-         els.statusText.textContent = 'Connected, but setup timed out — weak signal? Move closer and reconnect';
+         showConnectError('Connected, but setup timed out — weak signal? Move closer and reconnect');
          log('Post-connect setup timed out after 20s');
+       } else if (/cancel|chooser/i.test(errMsg)) {
+         log('Connection chooser dismissed by user (not an error)');
        } else {
          log(`Connection failed: ${err.message || err}`);
        }
@@ -1465,12 +1511,16 @@ The device will measure the current probe state first, then apply the calibratio
     const okAscii = bytes.length > 0 && bytes.every(b => b >= 0x20 && b <= 0x7E);
     if (els.devNameSaveBtn) els.devNameSaveBtn.disabled = !okLen || !okAscii;
     if (els.devNameStatus && v && (!okLen || !okAscii)) {
-      els.devNameStatus.textContent = 'Only printable ASCII, max 20 characters';
+      els.devNameStatus.textContent = 'Only printable ASCII, max 10 characters';
     }
   }
 
   // ---- 设备名：连接与初始化全部完成后，经 GATT 0xFFEA 读取设备侧存储的网页展示名 ----
-  // 读不到（旧固件只写特征 / 读取失败 / 未命名）时回退 config.js 的 DEVICE_NAME，展示永不留空；
+  // 展示一致性策略（无论连接/断开/刷新页面都展示同一个名字，不因缓存状态不一致）：
+  //   1) GATT 读到名字 → 展示并持久化（showDeviceNameBadge 写入 localStorage）；
+  //   2) 读失败/为空 → 优先沿用 localStorage 里最近一次的名字（不因瞬时读取失败把真实
+  //      名字覆盖成通用默认名）；本地也没有才回退 config.js 的 DEVICE_NAME；
+  //   3) 工厂复位显式清除持久化（clearDeviceNameBadge），复位后回默认名。
   // 注意：不使用选择器里的蓝牙名（device.name）；改名不影响蓝牙名，因此也无需重扫/重连
   async function refreshDeviceNameFromDevice() {
     let name = null;
@@ -1483,14 +1533,26 @@ The device will measure the current probe state first, then apply the calibratio
       }
     }
     if (name === null || name === '') {
+      let cached = '';
+      try { cached = localStorage.getItem(DEVICE_NAME_KEY) || ''; } catch (_) {}
+      if (cached) {
+        // 只展示不回写：缓存名保留，避免被默认名覆盖
+        if (els.deviceNameText) {
+          els.deviceNameText.textContent = cached;
+          els.deviceNameText.classList.remove('hidden');
+        }
+        if (els.devNameInput) {
+          els.devNameInput.value = cached;
+          updateDevNameByteCount();
+        }
+        log(`Device name unavailable via GATT, keep cached name: ${cached}`);
+        return;
+      }
       fromGatt = false;
       name = DEVICE_NAME;   // config.js 中与固件 app_config.h BLE_DEVICE_NAME 保持一致
       log('Device name unavailable via GATT, fallback to config DEVICE_NAME');
     }
-    if (els.deviceNameText) {
-      els.deviceNameText.textContent = name;
-      els.deviceNameText.classList.remove('hidden');
-    }
+    showDeviceNameBadge(name);
     if (els.devNameInput) {
       els.devNameInput.value = name;
       updateDevNameByteCount();
@@ -1514,7 +1576,7 @@ The device will measure the current probe state first, then apply the calibratio
     try {
       const res = await BLEProtocol.sendDeviceName(state.devNameChar, name);
       if (res.ok) {
-        if (els.deviceNameText) els.deviceNameText.textContent = name;
+        showDeviceNameBadge(name);
         els.devNameStatus.textContent = 'Name saved — shown in this dashboard only (Bluetooth name unchanged).';
         log(`Device name saved: ${name}`);
       } else {
@@ -1540,14 +1602,23 @@ The device will measure the current probe state first, then apply the calibratio
   // 连点危害：设备端 s_force_measure_pending 是二值标志，同窗口内的连点会合并成一次测量。
   const REFRESH_RESULT_TIMEOUT_MS = 6000;
   // const REFRESH_COOLDOWN_MS = 3000;
-  const REFRESH_LABEL_IDLE = '🔄 Refresh';
-  const REFRESH_LABEL_BUSY = '⏳ Measuring…';
+  const REFRESH_ICON_IDLE = '🔄';
+  const REFRESH_ICON_BUSY = '⏳';
+  const REFRESH_LABEL_IDLE = 'Refresh';
+  const REFRESH_LABEL_BUSY = 'Measuring…';
   let refreshBusy = false;          // 一次 refresh 从点击到"通知到达或超时"期间为 true
   let refreshUnlockTimer = null;    // 超时兜底解锁定时器
   // let refreshLastStart = 0;         // 上次 refresh 发起时刻（冷却窗计时基准）
 
   function setRefreshUiBusy(busy) {
-    els.refreshBtn.textContent = busy ? REFRESH_LABEL_BUSY : REFRESH_LABEL_IDLE;
+    // 按钮内部为 图标 + 文字 两个 span 的固定结构（HTML），只替换内容不重建节点
+    if (els.refreshIcon) els.refreshIcon.textContent = busy ? REFRESH_ICON_BUSY : REFRESH_ICON_IDLE;
+    if (els.refreshLabel) {
+      els.refreshLabel.textContent = busy ? REFRESH_LABEL_BUSY : REFRESH_LABEL_IDLE;
+    } else {
+      // 兜底：span 不存在时退回整体 textContent
+      els.refreshBtn.textContent = busy ? `${REFRESH_ICON_BUSY} ${REFRESH_LABEL_BUSY}` : `${REFRESH_ICON_IDLE} ${REFRESH_LABEL_IDLE}`;
+    }
     els.refreshBtn.disabled = busy || !state.device?.gatt.connected;
   }
 
@@ -1708,6 +1779,7 @@ The device will measure the current probe state first, then apply the calibratio
     try {
       await BLEProtocol.sendFactoryReset(state.resetChar);
       log('Factory reset command sent (0xFFE5 RST1)');
+      clearDeviceNameBadge();   // 设备端名字已被擦除，徽章与本地持久化同步清除
       els.factoryResetStatus.textContent = 'Factory reset requested — the device is rebooting. Reconnect when it appears again.';
     } catch (err) {
       // 设备可能在写入确认前就重启断链，此处按“已下发”处理而非报错
