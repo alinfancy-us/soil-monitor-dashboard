@@ -27,14 +27,14 @@ jobs:
           # 自动替换 page/js/config.js 中的 PAGE_VERSION
           sed -i "s/const PAGE_VERSION = '[^']*';/const PAGE_VERSION = '$VERSION';/g" page/js/config.js
           
-          # 同步 index.html 中三个业务脚本（config/ble-protocol/app）的 ?v= 缓存破坏版本号
-          # 三处统一使用同一 tag 版本，避免人肉维护导致的版本漂移
+          # 同步 index.html 中静态 CSS 与三个业务脚本（config/ble-protocol/app）的 ?v= 缓存破坏版本号
+          # 四处统一使用同一 tag 版本，避免人肉维护导致的版本漂移
           # （分隔符用 #：正则内含 | 交替符，不能用 | 作分隔符）
-          sed -i -E "s#(page/js/(config|ble-protocol|app)\.js\?v=)[^\"]*#\1${VERSION}#g" index.html
+          sed -i -E "s#(page/(css/tailwind\.css|js/(config|ble-protocol|app)\.js)\?v=)[^\"]*#\1${VERSION}#g" index.html
           
           # 验证替换结果
           grep "PAGE_VERSION" page/js/config.js
-          grep -n "page/js/.*\.js?v=" index.html
+          grep -n "page/.*?v=" index.html
 
       # 从 SoilPulse 固件仓库 Release 拉取固件并更新升级清单：
       # 固件 tag / 说明直接读取仓库 Actions Variables（FW_TAG / FW_NOTES）。

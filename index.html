@@ -2,15 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <!-- 禁页面缩放（工具型面板，app-like）：user-scalable=no / maximum-scale=1 在 Android 上
+       同时禁掉双击缩放与捏合缩放；iOS Safari 出于无障碍不允许网页禁捏合（双击缩放另由
+       下方 html/body/button 的 touch-action: manipulation 关闭） -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <!-- <meta http-style="Pragma" content="no-cache">
   <meta http-style="Expires" content="0">
   <meta http-style="Cache-Control" content="no-cache, no-store, must-revalidate"> -->
   <title>Alinfancy SoilPulse Soil Monitor</title>
   <link rel="icon" href="page/images/alinfancy-logo.svg">
   <!-- 中文：Tailwind 已改为构建期编译的静态 CSS（见 tailwind.config.js / build_css.sh），
-       不再依赖 cdn.tailwindcss.com 运行时脚本；类名变更后须重跑 ./build_css.sh 并递增版本号 -->
-  <link rel="stylesheet" href="page/css/tailwind.css?v=1.3.31">
+       不再依赖 cdn.tailwindcss.com 运行时脚本；类名变更后须重跑 ./build_css.sh 并递增版本号。
+       本链接的 ?v= 与下方三个业务脚本一致，CI 打包时会统一替换为发布版本号（见 .github/workflows） -->
+  <link rel="stylesheet" href="page/css/tailwind.css?v=1.3.34">
   <style>
     :root {
       color-scheme: light;
@@ -19,17 +23,51 @@
       --ink: #17352d;
     }
 
+    /* 全页双击缩放兜底：touch-action 生效值沿命中元素向上逐级求交集，body/button 已声明
+       manipulation，这里再补 html 覆盖触及根元素的极端情况；与 viewport 的
+       maximum-scale=1/user-scalable=no 构成双保险（manipulation 只关双击缩放，保留捏合） */
+    html {
+      touch-action: manipulation;
+    }
+
     body {
-      background-color: #f3f7f5;
+      /* 科技感光晕背景（无网格/无重复纹理）：冷调近白基底上叠四层大尺寸平滑渐变——
+         ① 右上 emerald 品牌主光晕 ② 左上 sky 青蓝冷光（科技感来源）
+         ③ 一道 118° 斜向"极光带"贯穿顶部提亮 ④ 底部中央 teal 回光收底防头重脚轻。
+         固定像素尺寸，滚动时光晕随内容自然上移；不用 iOS 兼容性差的 fixed 附着。
+         纯渐变实现，零图片资源、零额外请求 */
+      background-color: #f0f5f4;
       background-image:
-        linear-gradient(rgba(22, 101, 52, 0.035) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(22, 101, 52, 0.035) 1px, transparent 1px);
-      background-size: 28px 28px;
+        radial-gradient(1100px 560px at 85% -8%, rgba(5, 150, 105, 0.10), transparent 62%),
+        radial-gradient(900px 520px at -12% 4%, rgba(14, 165, 233, 0.08), transparent 60%),
+        linear-gradient(118deg, transparent 8%, rgba(45, 212, 191, 0.045) 38%, rgba(5, 150, 105, 0.045) 54%, transparent 80%),
+        radial-gradient(1000px 480px at 50% 118%, rgba(13, 148, 136, 0.06), transparent 65%);
       letter-spacing: 0;
       /* 快速连点按钮（如 Refresh）时指尖可能落在按钮间隙/空白处，双击落在 body 上
          仍会触发整页双击缩放：body 层也声明 manipulation（生效值=沿祖先链求交集），
          全局只关双击缩放，滚动与捏合缩放保留 */
       touch-action: manipulation;
+    }
+
+    /* 电量胶囊状态：未连接/无实时数据时灰显（选灰显而非隐藏：布局稳定不跳动，
+       与温度/湿度卡无数据时显示 -- 的行为一致，用户也不会找不到电量入口）。
+       ID+类选择器优先级高于胶囊上的 Tailwind 颜色工具类，app.js 只需增删 batt-idle 一个类 */
+    #battPill {
+      transition: background-color 0.2s ease;
+    }
+
+    #battPill.batt-idle {
+      background-color: #f1f5f9;
+    }
+
+    #battPill.batt-idle #battValue,
+    #battPill.batt-idle .batt-unit {
+      color: #94a3b8;
+    }
+
+    #battPill.batt-idle > span[aria-hidden="true"] {
+      filter: grayscale(1);
+      opacity: 0.6;
     }
 
     .dashboard-card {
@@ -347,6 +385,19 @@
         grid-column: 1 / -1;
         padding: 18px 0;
       }
+
+      /* 温度值 + °F/°C 切换同行（仅手机）：收紧行内间距并收窄切换器按钮（字号/左右内边距），
+         保证 375px 级窄屏单行放得下；ID+类选择器优先级高于按钮上的 Tailwind px-*/text-* 工具类，
+         updateTempUnitUI 重写 className 后覆盖依然生效 */
+      .temp-value-row {
+        gap: 4px;
+      }
+
+      #tempUnitToggle .temperature-unit-btn {
+        font-size: 9px;
+        padding-left: 4px;
+        padding-right: 4px;
+      }
     }
 
     @media (max-width: 390px) {
@@ -361,6 +412,13 @@
 
       .main-tab-btn {
         font-size: 12.5px;
+      }
+
+      /* 极窄屏（320px 级）：°F/°C 切换器再收窄一档，与温度数值同行仍不溢出 */
+      #tempUnitToggle .temperature-unit-btn {
+        font-size: 8.5px;
+        padding-left: 3px;
+        padding-right: 3px;
       }
     }
   </style>
@@ -403,10 +461,10 @@
             <span id="statusText" class="shrink-0 text-sm font-medium text-slate-600">Disconnected</span>
           </div>
         </div>
-        <div class="inline-flex shrink-0 items-center gap-1 rounded-lg bg-emerald-50 px-2 py-1" aria-label="Battery level">
+        <div id="battPill" class="batt-idle inline-flex shrink-0 items-center gap-1 rounded-lg bg-emerald-50 px-2 py-1" aria-label="Battery level">
           <span aria-hidden="true">🔋</span>
           <span id="battValue" class="text-sm font-bold text-emerald-700">--</span>
-          <span class="text-[11px] font-semibold text-emerald-600">%</span>
+          <span class="batt-unit text-[11px] font-semibold text-emerald-600">%</span>
         </div>
         <!-- Connect/Disconnect 文案宽度不同：w-28 固定按钮宽度，两态尺寸完全一致不跳动 -->
         <button id="connectBtn" class="action-button inline-flex w-28 shrink-0 items-center justify-center px-3 py-2 text-base font-semibold text-white transition shadow-sm rounded-xl bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98]">
@@ -430,17 +488,22 @@
     <!-- ================= Panel: Data ================= -->
     <section id="mainTabDataPanel" role="tabpanel">
       <!-- Live readings：温度 / 湿度 / Refresh 三等宽列（Refresh 与两张卡片同宽、同高上下对齐）。
-           Refresh 可点击时为实心品牌色（与应用内 Connect / 图表 Tab / Apply Offset 等按钮统一），
-           禁用时灰色；忙碌态由 app.js setRefreshUiBusy 只替换图标与文字 span 内容 -->
+           Refresh 可点击时与 Connect 同色（bg-emerald-700）；禁用时保留"白底 + 灰描边"外框——
+           原方案的 slate-100 底色与页面底色几乎同色、再叠加 opacity-40 会让外框整块消失；
+           图标 emoji 用 grayscale 灰度化表达禁用态。忙碌态由 app.js setRefreshUiBusy 只替换图标与文字 span 内容 -->
       <div class="live-metrics grid grid-cols-3 gap-2 mb-4 sm:gap-4 sm:mb-5">
         <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #f97316">
-          <!-- °F/°C 切换放回数值下方（居中）；当前单位由切换器高亮表达，label 不带单位后缀；
-               app.js updateTempUnitUI 重写按钮 class 时须与此处尺寸同步 -->
+          <!-- 当前单位由切换器高亮表达，label 不带单位后缀；°F/°C 切换与数值同行（微小间距），
+               手机端由媒体查询收窄切换器避免溢出。app.js updateTempUnitUI 重写按钮 class 后，
+               ≤639px 的 #tempUnitToggle .temperature-unit-btn 规则（优先级更高）仍会覆盖 px-*/text-*，
+               因此 JS 侧无需同步尺寸 -->
           <div id="tempUnitLabel" class="metric-label text-xs sm:text-sm text-slate-500">Temperature</div>
-          <div id="tempValue" class="metric-value mt-1 text-3xl font-bold text-orange-600 sm:text-4xl">--</div>
-          <div id="tempUnitToggle" class="mt-1.5 inline-flex p-0.5 rounded-lg bg-slate-100" role="group" aria-label="Temperature unit">
-            <button type="button" class="temperature-unit-btn px-1.5 py-0.5 text-[10px] font-semibold rounded-md transition" data-unit="F">°F</button>
-            <button type="button" class="temperature-unit-btn px-1.5 py-0.5 text-[10px] font-semibold rounded-md transition" data-unit="C">°C</button>
+          <div class="temp-value-row mt-1 flex items-center justify-center gap-1.5">
+            <div id="tempValue" class="metric-value text-3xl font-bold text-orange-600 sm:text-4xl">--</div>
+            <div id="tempUnitToggle" class="inline-flex shrink-0 p-0.5 rounded-lg bg-slate-100" role="group" aria-label="Temperature unit">
+              <button type="button" class="temperature-unit-btn px-1.5 py-0.5 text-[10px] font-semibold rounded-md transition" data-unit="F">°F</button>
+              <button type="button" class="temperature-unit-btn px-1.5 py-0.5 text-[10px] font-semibold rounded-md transition" data-unit="C">°C</button>
+            </div>
           </div>
         </div>
         <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #0ea5e9">
@@ -448,7 +511,7 @@
           <div id="humValue" class="metric-value mt-1 text-3xl font-bold text-sky-600 sm:text-4xl">--</div>
         </div>
         <button id="refreshBtn" disabled
-          class="flex flex-col items-center justify-center gap-1.5 px-2 text-center text-white transition shadow-sm rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] active:bg-emerald-700 disabled:border-transparent disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none">
+          class="flex flex-col items-center justify-center gap-1.5 px-2 text-center text-white transition shadow-sm rounded-2xl border border-transparent bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] disabled:border-slate-200 disabled:bg-white disabled:text-slate-400 disabled:grayscale disabled:cursor-not-allowed disabled:shadow-none">
           <span id="refreshIcon" class="text-2xl leading-none" aria-hidden="true">🔄</span>
           <span id="refreshLabel" class="text-xs font-semibold leading-tight">Refresh</span>
         </button>
@@ -757,10 +820,11 @@
   </div>
 
   <!-- 引入业务模块脚本：?v= 版本号用于缓存破坏（cache busting）。
-       三处统一使用同一版本号，由 CI 发版时自动从 git tag / commit 哈希同步，
-       本地开发请三处一并递增，否则浏览器会继续运行旧版 JS -->
-  <script src="page/js/config.js?v=1.3.31"></script>
-  <script src="page/js/ble-protocol.js?v=1.3.31"></script>
-  <script src="page/js/app.js?v=1.3.31"></script>
+       四处（tailwind.css 链接 + 三个业务脚本）统一使用同一版本号，CI 打包时自动从
+       git tag / commit 哈希同步替换（含 CSS 链接），本地开发请四处一并递增，
+       否则浏览器会继续运行旧版 CSS/JS -->
+  <script src="page/js/config.js?v=1.3.34"></script>
+  <script src="page/js/ble-protocol.js?v=1.3.34"></script>
+  <script src="page/js/app.js?v=1.3.34"></script>
 </body>
 </html>

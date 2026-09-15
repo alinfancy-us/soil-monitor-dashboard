@@ -53,10 +53,10 @@ jobs:
           # 自动替换 page/js/config.js 中的 PAGE_VERSION
           sed -i "s/const PAGE_VERSION = '[^']*';/const PAGE_VERSION = '$VERSION';/g" page/js/config.js
 
-          # 同步 index.html 中三个业务脚本（config/ble-protocol/app）的 ?v= 缓存破坏版本号
-          # 三处统一使用同一 commit 版本，避免人肉维护导致的版本漂移
+          # 同步 index.html 中静态 CSS 与三个业务脚本（config/ble-protocol/app）的 ?v= 缓存破坏版本号
+          # 四处统一使用同一 commit 版本，避免人肉维护导致的版本漂移
           # （分隔符用 #：正则内含 | 交替符，不能用 | 作分隔符）
-          sed -i -E "s#(page/js/(config|ble-protocol|app)\.js\?v=)[^\"]*#\1${VERSION}#g" index.html
+          sed -i -E "s#(page/(css/tailwind\.css|js/(config|ble-protocol|app)\.js)\?v=)[^\"]*#\1${VERSION}#g" index.html
 
           # dev 预览发布到 GitHub Pages，Bluefy 深链落地页须同步替换为 Pages 地址
           # （生产 deploy.yml 发布到 Cloudflare，固定为自定义域名 https://soilpulse.alinfancy.com）
@@ -65,7 +65,7 @@ jobs:
 
           # 验证替换结果
           grep "PAGE_VERSION" page/js/config.js
-          grep -n "page/js/.*\.js?v=" index.html
+          grep -n "page/.*?v=" index.html
           grep "DASHBOARD_URL" page/js/config.js
 
       # 固件来源优先级：fw_url 输入 > vars.FW_TAG（固件仓库 Release，与 deploy.yml 规则一致）。

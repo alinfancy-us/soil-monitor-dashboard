@@ -68,6 +68,7 @@
      tempUnitToggle: document.getElementById('tempUnitToggle'),
      humValue: document.getElementById('humValue'),
      battValue: document.getElementById('battValue'),
+     battPill: document.getElementById('battPill'),
      lastUpdate: document.getElementById('lastUpdate'),
      historyBody: document.getElementById('historyBody'),
      trendChart: document.getElementById('trendChart'),
@@ -467,6 +468,14 @@
     });
   }
 
+  // 电量胶囊高亮状态：仅"已连接且本会话拿到过实时数据"才绿色高亮。
+  // 首屏会用本地缓存回显历史（restoreCachedCharts → render），若不区分连接态，
+  // 未连接的页面也会显示"电量 100%"绿色高亮误导用户；断开时保留最后一次读数仅灰显，
+  // 与温度/湿度卡保留最后读数的行为一致
+  function syncBatteryPill() {
+    els.battPill?.classList.toggle('batt-idle', !(state.device?.gatt.connected && state.latestShown));
+  }
+
   // 清空 live 展示区（切换到另一台设备、或没有该设备缓存时，避免继续显示上一台设备的数据）。
   function resetDisplay() {
     state.lastRecords = null;
@@ -475,6 +484,7 @@
     els.tempValue.textContent = '--';
     els.humValue.textContent = '--';
     els.battValue.textContent = '--';
+    syncBatteryPill();
     els.lastUpdate.textContent = 'No measurement received yet';
     els.historyBody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-slate-300">Connect a device to view history</td></tr>';
     updateTrendSummary(null);
@@ -625,6 +635,7 @@
        els.battValue.textContent = latest.batt;
        els.lastUpdate.textContent = `Latest measurement: ${formatTime(latest.timestamp)}`;
        state.latestShown = latest;
+       syncBatteryPill();
      }
  
      els.historyBody.innerHTML = records
@@ -1094,6 +1105,7 @@
      state.otaRunning = false;
      setOtaUiLock(false);
      setStatus('disconnected');
+     syncBatteryPill();
      state.device = null;   // 释放旧 device 引用：断链后 connectBtn/visibilitychange 的 device 判断自然失效，幂等条件（characteristic 与 device 双 null）也靠它闭合
      state.resetChar = null;
      state.calibChar = null;
@@ -1333,6 +1345,7 @@ function clearConnectError() {
      } catch (err) {
        if (token !== connectToken) return;   // 超时/失败期间用户已重新点击，不被覆盖
        setStatus('disconnected');
+       syncBatteryPill();
        const errMsg = String(err && err.message);
        if (errMsg.includes('CONNECT_TIMEOUT')) {
          // 阶段2a：gatt.connect() 超时——多为设备深睡不在广播窗口 / 系统蓝牙被关闭；
@@ -1650,6 +1663,7 @@ The device will measure the current probe state first, then apply the calibratio
     els.battValue.textContent = rec.batt;
     els.lastUpdate.textContent = `Latest measurement: ${formatTime(rec.timestamp)}`;
     state.latestShown = rec;   // 抬高水位：更旧的历史数据不允许覆盖本次实时值
+    syncBatteryPill();
   }
 
   const REFRESH_POLL_INTERVAL_MS = 500;
