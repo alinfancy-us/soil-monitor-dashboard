@@ -941,6 +941,13 @@
        els.tempValue.textContent = '--';
      }
      if (state.lastDailyRecords) renderDaily(state.lastDailyRecords);
+
+     // 中文：显式重刷温度卡片——render() 内部的 latestShown 水位保护可能阻止更新，
+     //      切换单位后需要强制以当前单位重新展示温度，确保所有相关温度数据立即换算对应单位
+     if (state.latestShown) {
+       applyLatestRecord(state.latestShown);
+     }
+
      // Setting 温度偏移的数值与刻度同步跟随单位（温差换算 ×9/5、不加 32；±10℃ = ±18℉）
      renderTempOffset();
      if (els.tempOffsetScaleMin) els.tempOffsetScaleMin.textContent = fmtTempDelta(-10);
