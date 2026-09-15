@@ -193,6 +193,8 @@
      const [dot, text, active] = map[mode];
      els.statusDot.className = `w-3 h-3 rounded-full ${dot}`;
      els.statusText.textContent = text;
+    els.deviceNameText.classList.toggle('dev-name-idle', mode === 'disconnected');
+    els.calibStatus.style.color = '';
      els.connectBtn.textContent = mode === 'connected' ? 'Disconnect' : 'Connect';
      const connected = mode === 'connected';
     els.calibDryBtn.disabled = !connected;
@@ -422,6 +424,7 @@
     if (!els.deviceNameText || !name) return;
     els.deviceNameText.textContent = name;
     els.deviceNameText.classList.remove('hidden');
+    els.deviceNameText.classList.toggle('dev-name-idle', !state.device?.gatt.connected);
     try {
       localStorage.setItem(DEVICE_NAME_KEY, name);
     } catch (_) {}
@@ -1432,7 +1435,7 @@ function clearConnectError() {
     try {
       const saved = await BLEProtocol.readCalibStatus(state.calibStatusChar);
       renderCalibHints(saved);
-      log(`Calibration status read (0xFFE9): dry=${saved.dry} wet=${saved.wet} temp=${saved.temp}`);
+      log(`Calibration status read (0xFFE9): dry=${saved.dry} wet=${saved.wet} temp=${saved.temp} result=${saved.result}`);
       return 'ok';
     } catch (err) {
       renderCalibHints(null);
@@ -1444,6 +1447,7 @@ function clearConnectError() {
   // 渲染干/湿校准点的"已校准"徽标与汇总文案：只提示设备上存在哪些校准，不展示具体校准数值
   function renderCalibHints(saved) {
     state.calibSaved = saved;
+    els.calibStatus.style.color = '';
     els.calibDryBadge.classList.toggle('hidden', !saved?.dry);
     els.calibWetBadge.classList.toggle('hidden', !saved?.wet);
     els.calibStatus.textContent = saved?.dry || saved?.wet
@@ -1490,19 +1494,40 @@ The device will measure the current probe state first, then apply the calibratio
     els.calibDryBtn.disabled = true;
     els.calibWetBtn.disabled = true;
     els.calibStatus.textContent = 'Calibration started — measuring current probe state…';
+    els.calibStatus.style.color = '';   // 中文：测量中恢复默认灰色（红色仅在结果码为错误时展示）
     try {
-      // 固件 0xFFE6 写回调现在只登记校准点并触发立即测量，测量完成后自动用新鲜采样值应用
+      // 固件 0xFFE6 写回调只登记校准点并触发立即测量，测量完成后自动应用（或按状态/间距拒绝、丢弃）。
+      // 每次尝试的确定结果由固件记录在 0xFFE9 第 2 字节：1=干点成功 2=湿点成功
+      // 3=拒:湿度未低于20% 4=拒:湿度未高于80% 5=拒:两点过近 6=方向反向 7=测量失败或断链丢弃
       await BLEProtocol.sendHumCalib(state.calibChar, point);
       log(`Moisture ${label} calibration command sent (0xFFE6)`);
 
-      // 等待设备完成新测量（固件随后自动应用校准并推送 Notify），再回读 0xFFE9 确认
+      // 等待设备完成新测量（校准由固件在测量后自动应用或拒绝），再回读 0xFFE9 用结果码判定
       await waitForHumiditySample();
       const readState = await refreshCalibHints();
       if (readState === 'ok') {
-        const ok = point === 'dry' ? !!state.calibSaved?.dry : !!state.calibSaved?.wet;
-        els.calibStatus.textContent = ok
-          ? `${label} calibration saved on device`
-          : `${label} calibration rejected (dry/wet points too close)`;
+        const result = state.calibSaved?.result;
+        // 结果码 1/2=成功；3/4/5/6=各类失败（红色展示）；0/无结果码=旧固件回退标志推断
+        const resultText = {
+          1: `${label} calibration saved on device`,
+          2: `${label} calibration saved on device`,
+          3: 'Dry calibration rejected: moisture not below 20% — ambient/environment is not dry enough',
+          4: 'Wet calibration rejected: moisture not above 80% — ambient/environment is not wet enough',
+          5: 'Calibration rejected: difference between dry and wet anchors is too small',
+          6: 'Calibration discarded: measurement failed or connection interrupted',
+          7: 'Calibration rejected: reversed anchors — wet voltage must stay below dry voltage',
+        };
+        const known = result !== undefined && result !== null && resultText[result] !== undefined;
+        els.calibStatus.style.color = known && result >= 3 ? '#dc2626' : '';
+        if (known) {
+          els.calibStatus.textContent = resultText[result];
+        } else {
+          // 旧固件（0xFFE9 只有 1 字节标志位，无结果码）：退回标志推断
+          const ok = point === 'dry' ? !!state.calibSaved?.dry : !!state.calibSaved?.wet;
+          els.calibStatus.textContent = ok
+            ? `${label} calibration saved on device`
+            : `${label} calibration rejected (dry/wet points too close)`;
+        }
       } else {
         els.calibStatus.textContent = `${label} calibration command sent (device calibration status not readable)`;
       }
@@ -1553,6 +1578,7 @@ The device will measure the current probe state first, then apply the calibratio
         if (els.deviceNameText) {
           els.deviceNameText.textContent = cached;
           els.deviceNameText.classList.remove('hidden');
+          els.deviceNameText.classList.toggle('dev-name-idle', !state.device?.gatt.connected);
         }
         if (els.devNameInput) {
           els.devNameInput.value = cached;

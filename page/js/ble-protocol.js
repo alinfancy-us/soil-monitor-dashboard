@@ -312,9 +312,11 @@ const BLEProtocol = (() => {
   }
 
   /**
-   * 读取 0xFFE9 校准状态标志（1 字节：bit0=干点已校准 bit1=湿点已校准 bit2=温度偏移非0）
+   * 读取 0xFFE9 校准状态（2 字节：b0=标志 bit0=干点已校准 bit1=湿点已校准 bit2=温度偏移非0；
+   * b1=最近一次校准尝试结果 0=无 1=干点成功 2=湿点成功 3=拒:湿度未低于5% 4=拒:湿度未高于95% 5=拒:两点过近 6=丢弃）
    * @param {BluetoothRemoteGATTCharacteristic} calibStatusChar
-   * @returns {Promise<{dry: boolean, wet: boolean, temp: boolean}>} 设备上已持久化存在的校准项
+   * @returns {Promise<{dry: boolean, wet: boolean, temp: boolean, result: number|null}>}
+   *          设备上已持久化存在的校准项 + 最近一次尝试结果（旧固件 result 为 null）
    */
   async function readCalibStatus(calibStatusChar) {
     if (!calibStatusChar) {
@@ -324,11 +326,14 @@ const BLEProtocol = (() => {
     if (val.byteLength < 1) {
       throw new Error('invalid calibration status length');
     }
-    const flags = new DataView(val.buffer, val.byteOffset, val.byteLength).getUint8(0);
+    const view = new DataView(val.buffer, val.byteOffset, val.byteLength);
+    const flags = view.getUint8(0);
     return {
       dry: !!(flags & CALIB_STATUS_FLAGS.DRY),
       wet: !!(flags & CALIB_STATUS_FLAGS.WET),
       temp: !!(flags & CALIB_STATUS_FLAGS.TEMP),
+      // b1：最近一次校准尝试结果码；旧固件只有 1 字节时为 null，调用方退回标志位推断
+      result: val.byteLength >= 2 ? view.getUint8(1) : null,
     };
   }
 
