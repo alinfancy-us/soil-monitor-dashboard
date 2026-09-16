@@ -86,7 +86,6 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     dailyMetricTempBtn: document.getElementById('dailyMetricTempBtn'),
     dailyMetricHumBtn: document.getElementById('dailyMetricHumBtn'),
     dailyMetricBattBtn: document.getElementById('dailyMetricBattBtn'),
-    // dailyMetricHint: document.getElementById('dailyMetricHint'),
      modal: document.getElementById('compatibilityModal'),
      modalIcon: document.getElementById('modalIcon'),
      modalTitle: document.getElementById('modalTitle'),
@@ -986,7 +985,6 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
 
      if (!records || !records.length) {
        els.dailyEmpty.classList.remove('hidden');
-       // els.dailyMetricHint.textContent = 'Single metric view for clear comparison';
        const ctx = els.dailyChart.getContext('2d');
        if (ctx) ctx.clearRect(0, 0, els.dailyChart.width, els.dailyChart.height);
        return;
@@ -1009,8 +1007,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        leftAxisFormatter: cfg.axisFormatter,
      });
 
-     // els.dailyMetricHint.textContent = `${cfg.title}${cfg.key === 'temp' ? ` (${tempUnitSymbol()})` : ''} · ${xLabels[0]} - ${xLabels[xLabels.length - 1]}`;
-    saveDailyRecordsCache(records, state.activeDeviceId);
+     saveDailyRecordsCache(records, state.activeDeviceId);
    }
  
    function switchChartTab(tab) {
@@ -1824,14 +1821,12 @@ The device will measure the current probe state first, then apply the calibratio
   // 历史最后一条更新的时间戳（新测量已到，刷新 Latest 卡片）或超时兜底解锁。
   // 连点危害：设备端 s_force_measure_pending 是二值标志，同窗口内的连点会合并成一次测量。
   const REFRESH_RESULT_TIMEOUT_MS = 6000;
-  // const REFRESH_COOLDOWN_MS = 3000;
   const REFRESH_ICON_IDLE = '🔄';
   const REFRESH_ICON_BUSY = '⏳';
   const REFRESH_LABEL_IDLE = 'Refresh';
   const REFRESH_LABEL_BUSY = 'Measuring…';
   let refreshBusy = false;          // 一次 refresh 从点击到"通知到达或超时"期间为 true
   let refreshUnlockTimer = null;    // 超时兜底解锁定时器
-  // let refreshLastStart = 0;         // 上次 refresh 发起时刻（冷却窗计时基准）
 
   function setRefreshUiBusy(busy) {
     // 按钮内部为 图标 + 文字 两个 span 的固定结构（HTML），只替换内容不重建节点

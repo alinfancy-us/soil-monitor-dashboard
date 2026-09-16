@@ -6,9 +6,6 @@
        同时禁掉双击缩放与捏合缩放；iOS Safari 出于无障碍不允许网页禁捏合（双击缩放另由
        下方 html/body/button 的 touch-action: manipulation 关闭） -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <!-- <meta http-style="Pragma" content="no-cache">
-  <meta http-style="Expires" content="0">
-  <meta http-style="Cache-Control" content="no-cache, no-store, must-revalidate"> -->
   <title>Alinfancy SoilPulse Soil Monitor</title>
   <link rel="icon" href="page/images/alinfancy-logo.svg">
   <!-- 中文：Tailwind 已改为构建期编译的静态 CSS（见 tailwind.config.js / build_css.sh），
@@ -20,7 +17,6 @@
       color-scheme: light;
       --surface: rgba(255, 255, 255, 0.94);
       --line: #e2e8e5;
-      --ink: #17352d;
     }
 
     /* 全页双击缩放兜底：touch-action 生效值沿命中元素向上逐级求交集，body/button 已声明
@@ -42,7 +38,6 @@
         radial-gradient(900px 520px at -12% 4%, rgba(14, 165, 233, 0.08), transparent 60%),
         linear-gradient(118deg, transparent 8%, rgba(45, 212, 191, 0.045) 38%, rgba(5, 150, 105, 0.045) 54%, transparent 80%),
         radial-gradient(1000px 480px at 50% 118%, rgba(13, 148, 136, 0.06), transparent 65%);
-      letter-spacing: 0;
       /* 快速连点按钮（如 Refresh）时指尖可能落在按钮间隙/空白处，双击落在 body 上
          仍会触发整页双击缩放：body 层也声明 manipulation（生效值=沿祖先链求交集），
          全局只关双击缩放，滚动与捏合缩放保留 */
@@ -185,10 +180,6 @@
       min-height: 36px;
     }
 
-    canvas {
-      max-width: 100%;
-    }
-
     /* ===== Calibration per-button status line（问题2） =====
        按钮框内短文案：break-word 防长句溢出、最多 2 行截断（完整原因展示在按钮组下方的
        #calibStatus）；显隐由 hidden 属性控制（.calib-msg[hidden] 优先级高于 display） */
@@ -267,6 +258,13 @@
     }
     .update-badge {
       animation: updatePulse 1.8s ease-in-out infinite;
+    }
+
+    /* 无障碍：系统开启"减弱动态效果"时停用脉冲动画（WCAG 2.3.3） */
+    @media (prefers-reduced-motion: reduce) {
+      .update-badge {
+        animation: none;
+      }
     }
 
     /* ===== Mobile tweaks ===== */
@@ -397,17 +395,7 @@
         text-align: center;
       }
 
-      .history-table td:nth-child(3) {
-        background: #fff7ed; /* orange-50 · 温度 */
-      }
-
-      .history-table td:nth-child(4) {
-        background: #f0f9ff; /* sky-50 · 湿度 */
-      }
-
-      .history-table td:nth-child(5) {
-        background: #f0fdf4; /* green-50 · 电量 */
-      }
+      /* 列底色（orange-50/sky-50/green-50）复用上方全局规则，此处不再重复声明 */
 
       .history-table td:nth-child(n + 3)::before {
         font-size: 10px;
@@ -484,7 +472,7 @@
       <h2 id="modalTitle" class="mt-3 text-xl font-bold text-slate-800">Bluetooth is unavailable</h2>
       <p id="modalMessage" class="mt-2 text-sm leading-6 text-slate-500"></p>
       <div class="mt-5">
-        <a id="modalActionBtn" href="#" target="_blank" class="block w-full rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700 text-center">
+        <a id="modalActionBtn" href="#" target="_blank" rel="noopener noreferrer" class="block w-full rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700 text-center">
           Download Supported Browser
         </a>
       </div>
@@ -493,7 +481,8 @@
 
   <div class="dashboard-shell max-w-4xl px-4 py-1 mx-auto sm:px-6 sm:py-10 lg:py-12">
     <!-- Header -->
-    <header class="flex items-center gap-2 sm:gap-4 mb-5 text-left sm:mb-7 sm:justify-center sm:text-center">
+    <!-- Header（上下留白由下方 .dashboard-shell > header 的媒体查询统一控制，不再用 Tailwind mb-* 双轨定义） -->
+    <header class="flex items-center gap-2 sm:gap-4 text-left sm:justify-center sm:text-center">
       <img src="page/images/alinfancy-logo.svg" alt="Alinfancy" class="object-contain w-[90px] h-[90px] shrink-0 sm:w-24 sm:h-24">
       <div>
         <h1 class="text-2xl font-bold sm:text-3xl text-emerald-800">SoilPulse</h1>
@@ -544,7 +533,8 @@
            Refresh 可点击时与 Connect 同色（bg-emerald-700）；禁用时保留"白底 + 灰描边"外框——
            原方案的 slate-100 底色与页面底色几乎同色、再叠加 opacity-40 会让外框整块消失；
            图标 emoji 用 grayscale 灰度化表达禁用态。忙碌态由 app.js setRefreshUiBusy 只替换图标与文字 span 内容 -->
-      <div class="live-metrics grid grid-cols-3 gap-2 mb-4 sm:gap-4 sm:mb-5">
+      <!-- 移动端下边距由 .grid.live-metrics 媒体查询控制；桌面端 sm:mb-5 生效 -->
+      <div class="live-metrics grid grid-cols-3 gap-2 sm:gap-4 sm:mb-5">
         <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #f97316">
           <!-- 当前单位由切换器高亮表达，label 不带单位后缀；°F/°C 切换与数值同行（微小间距），
                手机端由媒体查询收窄切换器避免溢出。app.js updateTempUnitUI 重写按钮 class 后，
@@ -569,12 +559,13 @@
           <span id="refreshLabel" class="text-xs font-semibold leading-tight">Refresh</span>
         </button>
       </div>
-      <p id="lastUpdate" class="mb-5 text-xs text-center text-slate-400 sm:mb-6">No measurement received yet</p>
+      <p id="lastUpdate" class="text-xs text-center text-slate-400 sm:mb-6">No measurement received yet</p>
 
       
 
-      <!-- Trend charts (tabbed: recent records / 7-day daily average) -->
-      <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5 sm:mb-0">
+      <!-- Trend charts (tabbed: recent records / 7-day daily average)
+           手机端下边距由 #mainTabDataPanel > .dashboard-card 媒体查询控制；桌面端 sm:mb-0（紧贴历史卡片） -->
+      <div class="dashboard-card p-4 rounded-2xl sm:p-5 sm:mb-0">
         <div class="chart-tabs flex items-stretch gap-2 mb-4">
           <button id="trendTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-emerald-700 text-white transition">Recent 5 Records</button>
           <button id="dailyTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-slate-100 text-slate-500 transition">7-Day Daily Average</button>
@@ -594,7 +585,6 @@
               <button id="dailyMetricHumBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-500">Moisture</button>
               <button id="dailyMetricBattBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-500">Battery</button>
             </div>
-            <!-- <span id="dailyMetricHint" class="text-xs text-slate-400">Single metric view for clear comparison</span> -->
           </div>
           <div class="relative h-56 sm:h-60">
             <canvas id="dailyChart" class="w-full h-full"></canvas>
@@ -605,8 +595,9 @@
       </div>
 
       <!-- History & trend charts（原 History 面板内容已并入 Data 面板） -->
-      <!-- History table -->
-      <div class="dashboard-card p-4 mb-5 overflow-hidden rounded-2xl sm:p-5 sm:mb-6 mt-6">
+      <!-- History table（手机端与上方趋势卡片的间距由 + 兄弟选择器媒体查询控制；
+           桌面端 mt-6 提供趋势卡片→历史卡片间距，mb-5 桌面端无视觉效果已移除） -->
+      <div class="dashboard-card p-4 overflow-hidden rounded-2xl sm:p-5 sm:mb-6 mt-6">
         <!-- Clear Data（自顶部工具栏迁入）：清除的就是本地+设备历史数据，操作靠近其作用对象，
              且远离高频的 Refresh 按钮以降低手机误触。未连接时 disabled 联动逻辑不变（app.js） -->
         <div class="mb-3 flex items-center justify-between gap-2">
@@ -711,7 +702,8 @@
             Use the <b>− / +</b> buttons for precise 0.1 steps, or type an exact value in the box.
           </p>
           <!-- 控制行：− / 数值 / 单位 / + 与 Apply offset 同组（滑杆已移除：手机上拖动精度不足，
-               ±0.1 按钮 + 直接键入是最可靠的精调方式；手机上 Apply 换行铺满，≥sm 与微调按钮同行） -->
+               ±0.1 按钮 + 直接键入是最可靠的精调方式；手机上 Apply 换行铺满，≥sm 与微调按钮同行）。
+               inputmode="text" 是刻意的：decimal 数字键盘没有负号，而 offset 需要键入 -10 ~ +10 -->
           <div class="flex flex-wrap items-center gap-2">
             <button id="tempOffsetDecBtn" type="button" aria-label="Decrease offset by 0.1"
               class="action-button inline-flex w-11 shrink-0 items-center justify-center rounded-xl bg-slate-100 px-0 py-0 text-xl font-bold text-slate-700 transition hover:bg-slate-200 active:bg-emerald-100 active:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">−</button>
