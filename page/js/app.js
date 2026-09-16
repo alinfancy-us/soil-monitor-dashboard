@@ -26,6 +26,10 @@
     return `${CACHE_PREFIX}${type}:v1:${deviceId}`;
   }
  
+// 校准尝试结果 localStorage key：state 初始化（calibAttempt 恢复）在页面加载时就会调用
+// loadCalibAttempts()，此声明必须早于该调用，否则落入 TDZ 被 try/catch 静默吞掉
+const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
+
    const els = {
      statusDot: document.getElementById('statusDot'),
      statusText: document.getElementById('statusText'),
@@ -36,6 +40,8 @@
     calibStatus: document.getElementById('calibStatus'),
     calibDryBadge: document.getElementById('calibDryBadge'),
     calibWetBadge: document.getElementById('calibWetBadge'),
+    calibDryMsg: document.getElementById('calibDryMsg'),
+    calibWetMsg: document.getElementById('calibWetMsg'),
     refreshBtn: document.getElementById('refreshBtn'),
     refreshIcon: document.getElementById('refreshIcon'),
     refreshLabel: document.getElementById('refreshLabel'),
@@ -124,6 +130,7 @@
     fwUpdate: null,
      pollTimer: null,
      pollBusy: false,   // 中文：轮询 readData 重入保护——上一轮未完成（GATT 慢/射频差）时跳过本轮
+     calibAttempt: loadCalibAttempts(),   // 中文：各校准点最近一次尝试结果（localStorage 持久化，刷新后仍生效）
      lastRecords: null,
      lastDailyRecords: null,
      dailyMetric: 'temp',
@@ -519,6 +526,22 @@
     keys.forEach((key) => localStorage.removeItem(key));
     resetDisplay();
     log(`Cache cleared: removed ${keys.length} key(s)`);
+  }
+
+  // Factory reset 联动：设备端数据全部擦除后，网页本地为该设备缓存的数据同步清除——
+  // 校准尝试记录（CALIB_ATTEMPT_KEY，不在 CACHE_PREFIX 下，clearAllCache 管不到）、
+  // 该设备的历史/日均值缓存、设备展示名徽章。lastDevice（便于重连）与温度单位偏好保留
+  function clearLocalDeviceCache() {
+    try {
+      localStorage.removeItem(CALIB_ATTEMPT_KEY);
+      Object.keys(localStorage)
+        .filter((key) => RECORD_KEY_RE.test(key) && (!state.activeDeviceId || key.includes(state.activeDeviceId)))
+        .forEach((key) => localStorage.removeItem(key));
+    } catch (_) { /* 存储不可用时静默跳过 */ }
+    state.calibAttempt = { dry: null, wet: null };
+    renderCalibPointUi('dry', 'clear');
+    renderCalibPointUi('wet', 'clear');
+    clearDeviceNameBadge();
   }
 
     /**
@@ -1080,19 +1103,25 @@
        if (!state.characteristic) return;
        // OTA 升级进行中：暂停轮询读数，避免与升级流量抢占连接事件拖慢传输
        if (state.otaRunning) return;
-       // 重入保护：上一轮 readData 未完成（GATT 慢/射频差）时跳过本轮，防止并发 GATT 操作
+       // 重入保护：上一轮探测未完成（GATT 慢/射频差）时跳过本轮，防止并发 GATT 操作
        if (state.pollBusy) return;
        // 底层连接已断但 gattserverdisconnected 事件未触发（页面后台 / 平台差异）：
-       // 轮询主动校正 UI 状态，避免"断线但界面仍显示 Connected"
+       // 轮询主动校正 UI 状态，避免界面卡在 Connected
        if (!state.device?.gatt.connected) {
          onDisconnected();
          return;
        }
        state.pollBusy = true;
        try {
-         await readData();
+         // 存活探测（问题3-3）：只读 0xFFEB latest（9 字节），不再轮询读 0xFFE1 历史 +
+         // 0xFFE3 日均值——实时数据由 0xFFE1 Notify 推送；读到 latest 顺便刷新实时卡片
+         // （旧固件无 0xFFEB 时 readLatest 返回 null，存活检测退化为下方 gatt.connected 检查）
+         const rec = await withGattTimeout(BLEProtocol.readLatest(state.latestChar), 'Latest read (0xFFEB)');
+         if (rec) applyLatestRecord(rec);
        } catch (e) {
+         // 单次读取失败即按断链处理（产品策略）：主动断连复位 UI，避免僵尸 Connected
          log(`Poll failed: ${e.message}`);
+         onDisconnected();
        } finally {
          state.pollBusy = false;
        }
@@ -1407,7 +1436,7 @@ function clearConnectError() {
      }
    });
  
-   els.clearCacheBtn.addEventListener('click', async () => {
+   els.clearCacheBtn.addEventListener('click', gattButton('Device reset command', async () => {
     if (state.otaRunning) {
       log('Action ignored: OTA update is running');
       return;
@@ -1419,20 +1448,68 @@ function clearConnectError() {
      clearAllCache();
      // 向已连接设备下发 Clear/Reset 指令，清空芯片 RAM 历史/日均值
      if (state.resetChar) {
-       try {
-         await BLEProtocol.sendReset(state.resetChar);
-         log('Device reset command sent (0xFFE5)');
-       } catch (err) {
-         log(`Device reset failed: ${err.message || err}`);
-       }
+       await withGattTimeout(BLEProtocol.sendReset(state.resetChar), 'Device reset write (0xFFE5)');
+       log('Device reset command sent (0xFFE5)');
      }
-   });
+   }));
+
+  // ===== 问题3加固：GATT 操作超时 + 断链类错误识别 + 主动断连 =====
+  const GATT_OP_TIMEOUT_MS = 5000;
+
+  // 给任意 GATT Promise 包一层 5s 超时：底层链路半死时 readValue/writeValue 可能永远
+  // 悬空（挂死会卡死 pollBusy 与按钮流程）。超时只是放弃等待，底层操作无法真正取消
+  function withGattTimeout(promise, label = 'GATT operation') {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${GATT_OP_TIMEOUT_MS / 1000}s`)), GATT_OP_TIMEOUT_MS);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  // 断链/超时类错误判定：命中即视为链路不可用，应主动断连并复位 UI。
+  // 超时（withGattTimeout 抛出）按产品策略也归入断链类；本地配置类错误
+  // （特征缺失/包长度非法，由 BLEProtocol 主动抛出）与固件业务结果码不算链路问题
+  function isGattLinkError(err) {
+    const msg = String(err?.message || err || '');
+    if (!msg) return false;
+    if (msg.includes('timed out')) return true;
+    if (/characteristic unavailable|invalid calibration status length|not supported/i.test(msg)) return false;
+    return /disconnect|networkerror|connection|gatt/i.test(msg);
+  }
+
+  // 主动断连 + 复位 UI：浏览器栈半死（gatt.connected 迟迟不变 false、事件不派发）时，
+  // 本地 gatt.disconnect() 强制清理协议栈状态；onDisconnected 幂等，复位全部界面
+  function forceDisconnect(reason) {
+    log(`Connection lost${reason ? ` — ${reason}` : ''}`);
+    try { state.device?.gatt?.disconnect(); } catch (_) { /* 链路已断时可能抛错，忽略 */ }
+    onDisconnected();
+  }
+
+  // Settings 各按钮统一错误兜底：try/catch 收敛到这一个封装，按钮代码只写成功路径、
+  // 不再区分错误类型——断链/超时类错误 → 主动断连复位 UI（onDisconnected 顺带复位
+  // 校准按钮状态）；其余错误 → 写日志并回调 onError 供按钮更新各自的状态行
+  function gattButton(context, action, onError) {
+    return async (...args) => {
+      try {
+        await action(...args);
+      } catch (err) {
+        if (isGattLinkError(err)) {
+          forceDisconnect(`${context}: ${err.message || err}`);
+        } else {
+          log(`${context} failed: ${err.message || err}`);
+          if (onError) onError(err);
+        }
+      }
+    };
+  }
+
 
   // 读取设备 0xFFE9 校准状态并刷新干/湿校准点的"已校准"提示。
   // 返回 'ok'（成功读到设备真实校准状态，state.calibSaved 有效）或 'unavailable'
   // （特征缺失/读取失败——常见于设备还是旧固件（无 0xFFE9）、iOS/Bluefy 缓存了旧 GATT
   //  属性表、或浏览器缓存了旧版页面脚本）。调用方必须区分这两种情况：
   //  读取通道不可用 ≠ 校准被设备拒绝。
+  let lastCalibReadErr = null;   // 中文：最近一次 0xFFE9 读取失败的错误（供调用方判断是否断链类）
   async function refreshCalibHints() {
     if (!state.calibStatusChar) {
       renderCalibHints(null);
@@ -1440,11 +1517,12 @@ function clearConnectError() {
       return 'unavailable';
     }
     try {
-      const saved = await BLEProtocol.readCalibStatus(state.calibStatusChar);
+      const saved = await withGattTimeout(BLEProtocol.readCalibStatus(state.calibStatusChar), 'Calibration status read (0xFFE9)');
       renderCalibHints(saved);
       log(`Calibration status read (0xFFE9): dry=${saved.dry} wet=${saved.wet} temp=${saved.temp} result=${saved.result}`);
       return 'ok';
     } catch (err) {
+      lastCalibReadErr = err;
       renderCalibHints(null);
       log(`Calibration status read failed: ${err.message || err}`);
       return 'unavailable';
@@ -1457,6 +1535,17 @@ function clearConnectError() {
     els.calibStatus.style.color = '';
     els.calibDryBadge.classList.toggle('hidden', !saved?.dry);
     els.calibWetBadge.classList.toggle('hidden', !saved?.wet);
+    // 问题2：本地持久化的最新一次校准尝试结果优先于设备标志位展示——
+    // 徽标与按钮框内文案都按最后一次尝试渲染：重新连接/刷新后仍显示最后一次信息；
+    // 未有本地记录的点则清空文案、以设备真实标志为准
+    ['dry', 'wet'].forEach((p) => {
+      const attempt = state.calibAttempt?.[p];
+      if (attempt?.status === 'fail' || attempt?.status === 'ok') {
+        renderCalibPointUi(p, attempt.status, attempt.text);
+      } else {
+        renderCalibPointUi(p, 'clear');
+      }
+    });
     els.calibStatus.textContent = saved?.dry || saved?.wet
       ? `Saved on device (persists across reboots)`
       : 'No calibration saved on device yet';
@@ -1466,20 +1555,85 @@ function clearConnectError() {
   // 原因：固件校准使用的是"最近一次测量"（s_last_measure），若用户切换探头状态（如浸水）
   // 后设备尚未采样，固件会用旧状态读数做校准，导致"两点过近"被拒绝（gap < 50mV）。
   async function waitForHumiditySample(timeoutMs = 8000) {
+    // 中文：固件校准在触发的一次新测量完成后才应用/拒绝并写入 0xFFE9 结果码，
+    //       必须等新测量落地再回读。校准测量只更新 0xFFEB latest（app.c 就地重测），
+    //       故这里每 500ms 轮询一次 9 字节 latest，时间戳出现变化即新测量已到
+    //       （替代旧的全量 readData 轮询：GATT 事务减半，避免与 0xFFE9 回读争用链路）
     const t0 = Date.now();
     const prev = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
     while (Date.now() - t0 < timeoutMs) {
-      await new Promise(resolve => setTimeout(resolve, 400));
-      try { await readData(); } catch (_) { /* 单次读取失败不中断，继续等待 */ }
-      const latest = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
-      if (latest && (!prev || latest.timestamp !== prev.timestamp || latest.hum !== prev.hum)) {
-        return latest;
-      }
+      await new Promise(resolve => setTimeout(resolve, 500));
+      if (!state.device?.gatt.connected) return null;
+      try {
+        const latest = await withGattTimeout(BLEProtocol.readLatest(state.latestChar), 'Latest read (0xFFEB)');
+        if (latest && (!prev || latest.timestamp !== prev.timestamp)) return latest;
+      } catch (_) { /* 单次读取失败不中断，继续等待到超时预算为止 */ }
     }
-    return state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
+    return null;
   }
 
-  async function handleCalibClick(point, label) {
+  // ===== 问题2：校准尝试结果持久化（localStorage）+ 按钮下方消息行渲染 =====
+  // 每个校准点最近一次尝试结果存 localStorage（soilpulse_calib_attempt_v1），
+  // 页面刷新/重连后仍然显示，直到该点下一次校准尝试将其覆盖
+  function loadCalibAttempts() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CALIB_ATTEMPT_KEY));
+      return saved && typeof saved === 'object' ? saved : {};
+    } catch (_) {
+      return {};   // localStorage 不可用（隐私模式等）时退化为内存态
+    }
+  }
+
+  function saveCalibAttempt(point, entry) {
+    try {
+      const all = loadCalibAttempts();
+      if (entry) all[point] = entry;
+      else delete all[point];
+      localStorage.setItem(CALIB_ATTEMPT_KEY, JSON.stringify(all));
+    } catch (_) { /* 存储不可用时静默跳过 */ }
+  }
+
+  // 渲染单点状态：view: 'busy' 测量中 | 'fail' 失败（按钮下方红字） | 'ok' 成功（✓ 徽标） | 'clear' 复位
+  function renderCalibPointUi(point, view, text) {
+    const badge = point === 'dry' ? els.calibDryBadge : els.calibWetBadge;
+    const msg = point === 'dry' ? els.calibDryMsg : els.calibWetMsg;
+    if (!badge || !msg) return;
+    if (view === 'busy') {
+      badge.classList.add('hidden');
+      msg.classList.remove('calib-msg-err');
+      msg.textContent = text || 'Measuring…';
+      msg.hidden = false;
+    } else if (view === 'fail') {
+      badge.classList.add('hidden');   // 最新失败覆盖上一次成功标记
+      msg.textContent = text || '✗ Failed';
+      msg.classList.add('calib-msg-err');
+      msg.hidden = false;
+    } else if (view === 'ok') {
+      msg.textContent = '';
+      msg.hidden = true;
+      badge.classList.remove('hidden');
+    } else {
+      msg.textContent = '';
+      msg.hidden = true;
+    }
+  }
+
+  // 更新某校准点尝试结果：'ok'/'fail' 持久化；'busy' 仅更新 UI；'clear' 清除该点记录
+  function setCalibAttempt(point, status, shortText) {
+    if (!state.calibAttempt) state.calibAttempt = loadCalibAttempts();
+    if (status === 'ok' || status === 'fail') {
+      state.calibAttempt[point] = { status, text: shortText || '', ts: Date.now() };
+      saveCalibAttempt(point, state.calibAttempt[point]);
+    } else if (status === 'clear') {
+      state.calibAttempt[point] = null;
+      saveCalibAttempt(point, null);
+    }
+    renderCalibPointUi(point, status === 'busy' ? 'busy' : (state.calibAttempt[point]?.status || 'clear'), shortText);
+  }
+
+
+  // 校准动作主体：只写成功路径，任何错误原样抛出交由 gattButton 统一处理
+  async function runCalibration(point, label) {
     if (state.otaRunning) {
       log('Calibration ignored: OTA update is running');
       return;
@@ -1502,50 +1656,75 @@ The device will measure the current probe state first, then apply the calibratio
     els.calibWetBtn.disabled = true;
     els.calibStatus.textContent = 'Calibration started — measuring current probe state…';
     els.calibStatus.style.color = '';   // 中文：测量中恢复默认灰色（红色仅在结果码为错误时展示）
+    // 问题2：本次点击的点立即进入测量中状态——隐藏该点可能残留的 ✓，覆盖上一次结果
+    setCalibAttempt(point, 'busy', 'Measuring…');
     try {
       // 固件 0xFFE6 写回调只登记校准点并触发立即测量，测量完成后自动应用（或按状态/间距拒绝、丢弃）。
       // 每次尝试的确定结果由固件记录在 0xFFE9 第 2 字节：1=干点成功 2=湿点成功
       // 3=拒:湿度未低于20% 4=拒:湿度未高于80% 5=拒:两点过近 6=方向反向 7=测量失败或断链丢弃
-      await BLEProtocol.sendHumCalib(state.calibChar, point);
+      await withGattTimeout(BLEProtocol.sendHumCalib(state.calibChar, point), 'Calibration write (0xFFE6)');
       log(`Moisture ${label} calibration command sent (0xFFE6)`);
 
       // 等待设备完成新测量（校准由固件在测量后自动应用或拒绝），再回读 0xFFE9 用结果码判定
       await waitForHumiditySample();
       const readState = await refreshCalibHints();
-      if (readState === 'ok') {
-        const result = state.calibSaved?.result;
-        // 结果码 1/2=成功；3/4/5/6=各类失败（红色展示）；0/无结果码=旧固件回退标志推断
-        const resultText = {
-          1: `${label} calibration saved on device`,
-          2: `${label} calibration saved on device`,
-          3: 'Dry calibration rejected: moisture not below 20% — ambient/environment is not dry enough',
-          4: 'Wet calibration rejected: moisture not above 80% — ambient/environment is not wet enough',
-          5: 'Calibration rejected: difference between dry and wet anchors is too small',
-          6: 'Calibration discarded: measurement failed or connection interrupted',
-          7: 'Calibration rejected: reversed anchors — wet voltage must stay below dry voltage',
-        };
-        const known = result !== undefined && result !== null && resultText[result] !== undefined;
-        els.calibStatus.style.color = known && result >= 3 ? '#dc2626' : '';
-        if (known) {
-          els.calibStatus.textContent = resultText[result];
-        } else {
-          // 旧固件（0xFFE9 只有 1 字节标志位，无结果码）：退回标志推断
-          const ok = point === 'dry' ? !!state.calibSaved?.dry : !!state.calibSaved?.wet;
-          els.calibStatus.textContent = ok
-            ? `${label} calibration saved on device`
-            : `${label} calibration rejected (dry/wet points too close)`;
-        }
-      } else {
+      if (readState !== 'ok') {
+        // 回读失败：断链类错误原样抛出交由 gattButton 统一断连，其余仅提示状态不可读
+        if (isGattLinkError(lastCalibReadErr)) throw lastCalibReadErr;
         els.calibStatus.textContent = `${label} calibration command sent (device calibration status not readable)`;
+        setCalibAttempt(point, 'fail', '✗ Result unknown');
+        return;
       }
-    } catch (err) {
-      els.calibStatus.textContent = `${label} calibration failed: ${err.message || err}`;
-      log(`Moisture calibration failed: ${err.message || err}`);
+      const result = state.calibSaved?.result;
+      // 结果码 1/2=成功；3/4/5/6/7=各类失败（红色展示）；0/无结果码=旧固件回退标志推断
+      const resultText = {
+        1: `${label} calibration saved on device`,
+        2: `${label} calibration saved on device`,
+        3: 'Dry calibration rejected: moisture not below 20% — ambient/environment is not dry enough',
+        4: 'Wet calibration rejected: moisture not above 80% — ambient/environment is not wet enough',
+        5: 'Calibration rejected: difference between dry and wet anchors is too small',
+        6: 'Calibration discarded: measurement failed or connection interrupted',
+        7: 'Calibration rejected: reversed anchors — wet voltage must stay below dry voltage',
+      };
+      // 按钮内只放短文案防溢出，完整原因展示在按钮组下方的 calibStatus
+      const shortText = {
+        1: '✓ Calibrated', 2: '✓ Calibrated',
+        3: '✗ Rejected: not dry enough', 4: '✗ Rejected: not wet enough',
+        5: '✗ Rejected: anchors too close', 6: '✗ Discarded: measurement failed',
+        7: '✗ Rejected: reversed anchors',
+      };
+      const known = result !== undefined && result !== null && resultText[result] !== undefined;
+      els.calibStatus.style.color = known && result >= 3 ? '#dc2626' : '';
+      if (known) {
+        els.calibStatus.textContent = resultText[result];
+        setCalibAttempt(point, result >= 3 ? 'fail' : 'ok', shortText[result]);
+      } else {
+        // 旧固件（0xFFE9 只有 1 字节标志位，无结果码）：退回标志推断
+        const ok = point === 'dry' ? !!state.calibSaved?.dry : !!state.calibSaved?.wet;
+        els.calibStatus.textContent = ok
+          ? `${label} calibration saved on device`
+          : `${label} calibration rejected (dry/wet points too close)`;
+        setCalibAttempt(point, ok ? 'ok' : 'fail', ok ? undefined : '✗ Rejected (anchors too close)');
+      }
     } finally {
-      els.calibDryBtn.disabled = false;
-      els.calibWetBtn.disabled = false;
+      // 断链路径上 onDisconnected 会把按钮重新禁用，这里仅在仍连接时恢复
+      const stillConnected = !!state.device?.gatt.connected;
+      els.calibDryBtn.disabled = !stillConnected;
+      els.calibWetBtn.disabled = !stillConnected;
     }
   }
+
+  // 各校准点错误回调：红色完整原因 + 按钮内短文案（断链类由 gattButton 断连复位 UI）
+  function onCalibError(point, label) {
+    return (err) => {
+      els.calibStatus.style.color = '#dc2626';
+      els.calibStatus.textContent = `${label} calibration failed: ${err.message || err}`;
+      setCalibAttempt(point, 'fail', '✗ Failed');
+    };
+  }
+
+  els.calibDryBtn.addEventListener('click', gattButton('Dry calibration', () => runCalibration('dry', 'Dry'), onCalibError('dry', 'Dry')));
+  els.calibWetBtn.addEventListener('click', gattButton('Wet calibration', () => runCalibration('wet', 'Wet'), onCalibError('wet', 'Wet')));
 
   // ---- 设备改名：字节数/字符集实时校验 + 保存 ----
   function updateDevNameByteCount() {
@@ -1607,7 +1786,7 @@ The device will measure the current probe state first, then apply the calibratio
   }
 
   els.devNameInput.addEventListener('input', updateDevNameByteCount);
-  els.devNameSaveBtn.addEventListener('click', async () => {
+  els.devNameSaveBtn.addEventListener('click', gattButton('Device name save', async () => {
     if (state.otaRunning) {
       els.devNameStatus.textContent = 'Ignored: OTA update is running';
       return;
@@ -1620,7 +1799,7 @@ The device will measure the current probe state first, then apply the calibratio
     els.devNameSaveBtn.disabled = true;
     els.devNameStatus.textContent = 'Saving…';
     try {
-      const res = await BLEProtocol.sendDeviceName(state.devNameChar, name);
+      const res = await withGattTimeout(BLEProtocol.sendDeviceName(state.devNameChar, name), 'Device name write (0xFFEA)');
       if (res.ok) {
         showDeviceNameBadge(name);
         els.devNameStatus.textContent = 'Name saved — shown in this dashboard only (Bluetooth name unchanged).';
@@ -1628,15 +1807,13 @@ The device will measure the current probe state first, then apply the calibratio
       } else {
         els.devNameStatus.textContent = `Save failed: ${res.message}`;
       }
-    } catch (err) {
-      els.devNameStatus.textContent = `Save failed: ${err.message || err}`;
     } finally {
       updateDevNameByteCount();
     }
-  });
+  }, (err) => {
+    els.devNameStatus.textContent = `Save failed: ${err.message || err}`;
+  }));
 
-  els.calibDryBtn.addEventListener('click', () => handleCalibClick('dry', 'Dry'));
-  els.calibWetBtn.addEventListener('click', () => handleCalibClick('wet', 'Wet'));
 
   // ===== Refresh 防连点 =====
   // 设备端一轮测量（电池/NTC/湿度三通道 ADC 采样 + 滤波稳定等待）通常需要几百毫秒到 1~2 秒，
@@ -1717,7 +1894,7 @@ The device will measure the current probe state first, then apply the calibratio
     return null;
   }
 
-  async function handleRefreshClick() {
+  els.refreshBtn.addEventListener('click', gattButton('Refresh', async () => {
     if (state.otaRunning) {
       log('Refresh ignored: OTA update is running');
       return;
@@ -1725,41 +1902,29 @@ The device will measure the current probe state first, then apply the calibratio
     if (!state.device?.gatt.connected || !state.refreshChar) {
       return;
     }
-    // 防连点 1：上一次测量仍在进行（未收到新数据也未超时），忽略本次点击
+    // 防连点：上一次测量仍在进行（未收到新数据也未超时）则忽略；设备端
+    // s_force_measure_pending 是二值标志，同窗口内的连点会合并成一次测量
     if (refreshBusy) {
       log('Refresh ignored: measurement already in progress');
       return;
     }
-    // 防连点 2：冷却窗内（数据已到但间隔太近），同样忽略，限制手动重测频率
-    // const sinceLast = Date.now() - refreshLastStart;
-    // if (refreshLastStart && sinceLast < REFRESH_COOLDOWN_MS) {
-    //   log(`Refresh ignored: please wait ${Math.ceil((REFRESH_COOLDOWN_MS - sinceLast) / 1000)}s between refreshes`);
-    //   return;
-    // }
-    // refreshLastStart = Date.now();
     refreshBusy = true;
     setRefreshUiBusy(true);
     try {
-      await BLEProtocol.sendRefresh(state.refreshChar);
+      await withGattTimeout(BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)');
       log('Refresh command sent (0xFFE7), measuring now');
       const prev = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
       const rec = await waitForLatestMeasurement(prev);
-      refreshUnlockTimer = null;
-      refreshBusy = false;
-      setRefreshUiBusy(false);
       if (rec) {
         applyLatestRecord(rec);
         log('Refresh: latest measurement updated (0xFFEB)');
       } else {
         log('Refresh: no updated measurement within 6s, button unlocked');
       }
-    } catch (err) {
-      cancelRefreshWait();
-      log(`Refresh failed: ${err.message || err}`);
+    } finally {
+      cancelRefreshWait();   // 成功/失败统一恢复按钮态（成功时为幂等空操作）
     }
-  }
-
-  els.refreshBtn.addEventListener('click', handleRefreshClick);
+  }));
 
   // 温度偏移：数字输入框是“待应用值”的唯一来源（滑杆已移除——手机上拖动精度不足，
   // ±0.1 按钮 + 直接键入是最可靠的精调方式）。℃ 量程 ±10.0，℉ 量程 ±18.0，Apply 时才换算到设备 0.1℃ 网格。
@@ -1779,7 +1944,7 @@ The device will measure the current probe state first, then apply the calibratio
     setTempOffsetTicks(Number.isFinite(raw) ? Math.round(raw * 10) : tempOffsetToTicks(state.tempOffsetX10 || 0));
   });
 
-  els.tempOffsetApplyBtn.addEventListener('click', async () => {
+  els.tempOffsetApplyBtn.addEventListener('click', gattButton('Temperature offset', async () => {
     if (state.otaRunning) {
       log('Temperature offset ignored: OTA update is running');
       return;
@@ -1792,25 +1957,24 @@ The device will measure the current probe state first, then apply the calibratio
     els.tempOffsetApplyBtn.disabled = true;
     els.tempOffsetStatus.textContent = 'Applying temperature offset…';
     try {
-      await BLEProtocol.sendTempOffset(state.tempOffsetChar, x10);
+      await withGattTimeout(BLEProtocol.sendTempOffset(state.tempOffsetChar, x10), 'Offset write (0xFFE8)');
       state.tempOffsetX10 = x10;
       renderTempOffset();   // 回显设备 0.1℃ 网格真实值（℉ 模式滑杆位置可能微调 ≤1 格）
       els.tempOffsetStatus.textContent = `Temperature offset set to ${fmtTempDelta(x10 / 10)}`;
       log(`Temperature offset sent (0xFFE8): ${x10 / 10}℃`);
       // 立即重测，让 Data 面板尽快反映修正后的温度
       if (state.refreshChar) {
-        try { await BLEProtocol.sendRefresh(state.refreshChar); } catch (_) {}
+        try { await withGattTimeout(BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)'); } catch (_) {}
       }
-    } catch (err) {
-      els.tempOffsetStatus.textContent = `Temperature offset failed: ${err.message || err}`;
-      log(`Temperature offset failed: ${err.message || err}`);
     } finally {
       els.tempOffsetApplyBtn.disabled = !state.device?.gatt.connected || !state.tempOffsetChar;
     }
-  });
+  }, (err) => {
+    els.tempOffsetStatus.textContent = `Temperature offset failed: ${err.message || err}`;
+  }));
 
   // 工厂重置 + 重启：写入 RST1 后设备会清空数据并重启，连接随即断开
-  els.factoryResetBtn.addEventListener('click', async () => {
+  els.factoryResetBtn.addEventListener('click', gattButton('Factory reset', async () => {
     if (state.otaRunning) {
       log('Factory reset ignored: OTA update is running');
       return;
@@ -1819,26 +1983,22 @@ The device will measure the current probe state first, then apply the calibratio
       els.factoryResetStatus.textContent = 'Connect a device to reset';
       return;
     }
-    const msg = 'Factory reset the device? All stored data (history, daily averages, moisture calibration, temperature offset and device name) will be cleared and the device will reboot. The connection will drop.';
+    const msg = 'Factory reset the device? All stored data (history, daily averages, moisture calibration, temperature offset and device name) will be cleared and the device will reboot. This page\'s cached data for the device will also be cleared. The connection will drop.';
     if (!window.confirm(msg)) return;
     els.factoryResetBtn.disabled = true;
     els.factoryResetStatus.textContent = 'Sending factory reset… the device will reboot';
-    try {
-      await BLEProtocol.sendFactoryReset(state.resetChar);
-      log('Factory reset command sent (0xFFE5 RST1)');
-      clearDeviceNameBadge();   // 设备端名字已被擦除，徽章与本地持久化同步清除
-      els.factoryResetStatus.textContent = 'Factory reset requested — the device is rebooting. Reconnect when it appears again.';
-    } catch (err) {
-      // 设备可能在写入确认前就重启断链，此处按“已下发”处理而非报错
-      if (/disconnect|gatt server/i.test(String(err?.message || err))) {
-        els.factoryResetStatus.textContent = 'Factory reset requested — the device is rebooting. Reconnect when it appears again.';
-        log('Factory reset caused disconnect (expected)');
-      } else {
-        els.factoryResetStatus.textContent = `Factory reset failed: ${err.message || err}`;
-        log(`Factory reset failed: ${err.message || err}`);
-      }
-    }
-  });
+    // 设备端将全擦，网页本地为该设备缓存的数据同步清除（校准记录/历史/日均值/设备名；
+    // lastDevice 与温度单位偏好保留）。放在写入前执行，确保任何失败路径下都已完成清理
+    clearLocalDeviceCache();
+    // 写入后设备可能在 ACK 前就重启断链：断链/超时类错误由 gattButton 主动断连复位 UI，
+    // 其余错误回调也按已下发、设备重启中提示——对用户表现一致，无需区分
+    await withGattTimeout(BLEProtocol.sendFactoryReset(state.resetChar), 'Factory reset write (0xFFE5)');
+    log('Factory reset command sent (0xFFE5 RST1)');
+    els.factoryResetStatus.textContent = 'Factory reset requested — the device is rebooting. Reconnect when it appears again.';
+  }, (err) => {
+    els.factoryResetStatus.textContent = 'Factory reset requested — the device is rebooting. Reconnect when it appears again.';
+    log(`Factory reset note: ${err.message || err}`);
+  }));
 
   // 中文：统一格式化 OTA 报错文案——断链（监督超时/设备复位）给安抚性提示，
   //       双 bank 设计保证老固件仍在运行，重连即可重试；其余错误原样展示。
@@ -2135,6 +2295,12 @@ The device will measure the current probe state first, then apply the calibratio
 
    updateDailyMetricButtons();
   updateTempUnitUI();
+  // 启动时恢复本地保存的校准尝试结果（问题2：刷新页面后错误/成功标记仍显示）
+  ['dry', 'wet'].forEach((p) => {
+    const a = state.calibAttempt?.[p];
+    if (a) renderCalibPointUi(p, a.status, a.text);
+  });
+
   if (els.pageVersion) {
     els.pageVersion.textContent = `SoilPulse dashboard v${PAGE_VERSION}`;
   }
