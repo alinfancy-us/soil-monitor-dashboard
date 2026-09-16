@@ -36,6 +36,19 @@ jobs:
           grep "PAGE_VERSION" page/js/config.js
           grep -n "page/.*?v=" index.html
 
+      # 发布渠道强制关闭前端调试日志：本地排障时可能把 DEBUG_ENABLED 改成 true 并忘记还原，
+      # 这里在打包前强制写回 false（DEBUG_ENABLED 只影响 log() 的 console 输出；
+      # 轮询 POLL_ENABLED 不受影响，必须常开承担断链 UI 校正职责）
+      - name: Force DEBUG_ENABLED=false for production
+        run: |
+          sed -i 's/const DEBUG_ENABLED = true;/const DEBUG_ENABLED = false;/' page/js/config.js
+          if ! grep -q 'const DEBUG_ENABLED = false;' page/js/config.js; then
+            echo "::error::DEBUG_ENABLED 强制关闭失败：page/js/config.js 中未找到 'const DEBUG_ENABLED = ...' 预期格式，请检查文件"
+            exit 1
+          fi
+          echo "DEBUG_ENABLED 发布渠道强制关闭结果："
+          grep -n 'DEBUG_ENABLED' page/js/config.js
+
       # 从 SoilPulse 固件仓库 Release 拉取固件并更新升级清单：
       # 固件 tag / 说明直接读取仓库 Actions Variables（FW_TAG / FW_NOTES）。
       # 在仓库 Settings -> Secrets and variables -> Actions -> Variables 中配置 FW_TAG（如 v2.1.1）

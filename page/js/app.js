@@ -128,7 +128,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     fwVersion: null,
     fwUpdate: null,
      pollTimer: null,
-     pollBusy: false,   // 中文：轮询 readData 重入保护——上一轮未完成（GATT 慢/射频差）时跳过本轮
+     gattBusy: false,   // 中文：全局 GATT 互斥锁——安卓 Chrome 蓝牙栈同一时刻只允许一个 in-flight
+                        // GATT 操作（不排队，重叠直接抛 "already in progress"/133），因此轮询、
+                        // Refresh 轮询、各按钮写必须共用这把锁串行化；iOS/PC 本身会排队，加锁无害
+     disconnecting: false,   // 中文：onDisconnected 重入保护——断链事件/轮询/forceDisconnect 可能并发触发
      calibAttempt: loadCalibAttempts(),   // 中文：各校准点最近一次尝试结果（localStorage 持久化，刷新后仍生效）
      lastRecords: null,
      lastDailyRecords: null,
@@ -185,9 +188,11 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    };
  
  
+   const LOG_T0 = Date.now();   // 中文：日志相对时间基准（页面加载时刻），方便排查"操作后多少 ms 断链"
    function log(msg) {
      if (!DEBUG_ENABLED) return;
-     console.debug(`[SoilPulse] ${msg}`);
+     const dt = ((Date.now() - LOG_T0) / 1000).toFixed(1);
+     console.debug(`[SoilPulse +${dt}s] ${msg}`);
    }
  
    function setStatus(mode) {
@@ -1096,33 +1101,30 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      // 中文：轮询开关独立于日志开关（POLL_ENABLED）——轮询承担"读数据兜底 + 断链 UI 校正"
      //       职责，发版必须常开；DEBUG_ENABLED 只控制 log() 的 console 输出
      if (!POLL_ENABLED) return;
+     let probing = false;   // 中文：上一轮探活未结束时跳过本拍（探活最坏 3 次 × (5s 超时 + 700ms)）
      state.pollTimer = setInterval(async () => {
-       if (!state.characteristic) return;
-       // OTA 升级进行中：暂停轮询读数，避免与升级流量抢占连接事件拖慢传输
-       if (state.otaRunning) return;
-       // 重入保护：上一轮探测未完成（GATT 慢/射频差）时跳过本轮，防止并发 GATT 操作
-       if (state.pollBusy) return;
-       // 底层连接已断但 gattserverdisconnected 事件未触发（页面后台 / 平台差异）：
-       // 轮询主动校正 UI 状态，避免界面卡在 Connected
-       if (!state.device?.gatt.connected) {
-         onDisconnected();
-         return;
-       }
-       state.pollBusy = true;
-       try {
-         // 存活探测（问题3-3）：只读 0xFFEB latest（9 字节），不再轮询读 0xFFE1 历史 +
-         // 0xFFE3 日均值——实时数据由 0xFFE1 Notify 推送；读到 latest 顺便刷新实时卡片
-         // （旧固件无 0xFFEB 时 readLatest 返回 null，存活检测退化为下方 gatt.connected 检查）
-         const rec = await withGattTimeout(BLEProtocol.readLatest(state.latestChar), 'Latest read (0xFFEB)');
-         if (rec) applyLatestRecord(rec);
-       } catch (e) {
-         // 单次读取失败即按断链处理（产品策略）：主动断连复位 UI，避免僵尸 Connected
-         log(`Poll failed: ${e.message}`);
-         onDisconnected();
-       } finally {
-         state.pollBusy = false;
-       }
-     }, POLL_INTERVAL);
+        if (!state.characteristic) return;
+        // OTA 升级进行中：暂停轮询读数，避免与升级流量抢占连接事件拖慢传输
+        if (state.otaRunning) return;
+        // 重入保护：上一轮探活未结束，或其他 GATT 操作（按钮写/Refresh 轮询）进行中时跳过本拍，
+        // 防止安卓操作重叠报错（全局 GATT 互斥）
+        if (probing || state.gattBusy) return;
+        // 存活探测直接复用 probeLinkAlive（同一把锁、同一套重试/裁决逻辑，不再重复实现）：
+        //   返回 latest 记录 → 链路活且顺便刷新实时卡片
+        //   返回 true       → 旧固件无 0xFFEB，仅确认存活
+        //   返回 false      → 探活 3 连败，链路确死，复位 UI
+        probing = true;
+        try {
+          const result = await probeLinkAlive();
+          if (!result) {
+            onDisconnected();
+          } else if (result !== true) {
+            applyLatestRecord(result);
+          }
+        } finally {
+          probing = false;
+        }
+      }, POLL_INTERVAL);
    }
  
    function stopPolling() {
@@ -1133,31 +1135,42 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    }
  
    function onDisconnected() {
-     // 幂等保护：已被其它路径清理过（轮询 / visibilitychange / 用户点击）则直接返回，
-     // 避免重复 setStatus / 重复日志
-     if (state.characteristic === null && state.device === null) return;
-     stopPolling();
-     cancelRefreshWait();   // 若 refresh 正在等待测量结果，断连后立即恢复按钮
-     state.otaRunning = false;
-     setOtaUiLock(false);
-     setStatus('disconnected');
-     syncBatteryPill();
-     state.device = null;   // 释放旧 device 引用：断链后 connectBtn/visibilitychange 的 device 判断自然失效，幂等条件（characteristic 与 device 双 null）也靠它闭合
-     state.resetChar = null;
-     state.calibChar = null;
-     state.refreshChar = null;
-     state.tempOffsetChar = null;
-     state.tempOffsetX10 = 0;
-     state.calibStatusChar = null;
-     state.otaChar = null;
-     state.otaRunning = false;
-     state.fwUpdate = null;
-     renderFirmwareCard();
-     // 断开后隐藏"已校准"徽标；设备名保留展示（最近一次连接的设备名，不随断开隐藏）
-     renderCalibHints(null);
-     if (els.devNameStatus) els.devNameStatus.textContent = '';
-     log('Device disconnected');
-   }
+      // 重入保护：gattserverdisconnected 事件 / 轮询 / forceDisconnect / visibilitychange
+      // 可能并发触发，第一个进入的路径执行清理，后续直接返回（避免重复日志/重复复位）
+      if (state.disconnecting) return;
+      // 幂等保护：已被其它路径清理过（轮询 / visibilitychange / 用户点击）则直接返回
+      if (state.characteristic === null && state.device === null) return;
+      state.disconnecting = true;
+      try {
+        stopPolling();         // 先停定时器：防止清理期间轮询再跑一拍（断开后 GATT 报错噪音的来源）
+        cancelRefreshWait();   // 若 refresh 正在等待测量结果，断连后立即恢复按钮
+        state.otaRunning = false;
+        setOtaUiLock(false);
+        setStatus('disconnected');
+        syncBatteryPill();
+        state.characteristic = null;   // 中文：显式置空，与 device 双 null 闭合幂等条件
+        state.dailyChar = null;
+        state.latestChar = null;
+        state.devNameChar = null;
+        state.device = null;   // 释放旧 device 引用：断链后 connectBtn/visibilitychange 判断自然失效
+        state.resetChar = null;
+        state.calibChar = null;
+        state.refreshChar = null;
+        state.tempOffsetChar = null;
+        state.tempOffsetX10 = 0;
+        state.calibStatusChar = null;
+        state.otaChar = null;
+        state.otaRunning = false;
+        state.fwUpdate = null;
+        renderFirmwareCard();
+        // 断开后隐藏"已校准"徽标；设备名保留展示（最近一次连接的设备名，不随断开隐藏）
+        renderCalibHints(null);
+        if (els.devNameStatus) els.devNameStatus.textContent = '';
+        log('Device disconnected');
+      } finally {
+        state.disconnecting = false;
+      }
+    }
  
    // 剪贴板写入（iOS Safari 兼容）：优先 Clipboard API（要求 HTTPS + 在用户手势内调用），
    // 失败或不可用时回退到隐藏 textarea + document.execCommand('copy') 的同步复制方案。
@@ -1299,7 +1312,6 @@ function clearConnectError() {
          device,
          (records, hex) => {
            log(`Notification: ${hex}`);
-           releaseRefreshOnData();   // 新数据已到：若 refresh 正在等待测量结果，立即解锁按钮
            render(records);
          },
          onDisconnected
@@ -1445,7 +1457,7 @@ function clearConnectError() {
      clearAllCache();
      // 向已连接设备下发 Clear/Reset 指令，清空芯片 RAM 历史/日均值
      if (state.resetChar) {
-       await withGattTimeout(BLEProtocol.sendReset(state.resetChar), 'Device reset write (0xFFE5)');
+       await gattOp(() => BLEProtocol.sendReset(state.resetChar), 'Device reset write (0xFFE5)');
        log('Device reset command sent (0xFFE5)');
      }
    }));
@@ -1454,7 +1466,7 @@ function clearConnectError() {
   const GATT_OP_TIMEOUT_MS = 5000;
 
   // 给任意 GATT Promise 包一层 5s 超时：底层链路半死时 readValue/writeValue 可能永远
-  // 悬空（挂死会卡死 pollBusy 与按钮流程）。超时只是放弃等待，底层操作无法真正取消
+  // 悬空（挂死会卡死 gattBusy 与按钮流程）。超时只是放弃等待，底层操作无法真正取消
   function withGattTimeout(promise, label = 'GATT operation') {
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -1463,15 +1475,55 @@ function clearConnectError() {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
 
-  // 断链/超时类错误判定：命中即视为链路不可用，应主动断连并复位 UI。
-  // 超时（withGattTimeout 抛出）按产品策略也归入断链类；本地配置类错误
-  // （特征缺失/包长度非法，由 BLEProtocol 主动抛出）与固件业务结果码不算链路问题
-  function isGattLinkError(err) {
-    const msg = String(err?.message || err || '');
-    if (!msg) return false;
-    if (msg.includes('timed out')) return true;
-    if (/characteristic unavailable|invalid calibration status length|not supported/i.test(msg)) return false;
-    return /disconnect|networkerror|connection|gatt/i.test(msg);
+  // ===== 全局 GATT 互斥锁 =====
+  // 安卓 Chrome 蓝牙栈同一时刻只允许一个 in-flight GATT 操作：上一个未完成时发新操作
+  // 直接抛 "GATT operation already in progress" / status 133（iOS/PC 系统栈会内部排队，
+  // 不会出现）。所有按钮写统一经 gattOp 串行化；轮询/Refresh 轮询走 gattBusy 跳拍（非阻塞）。
+  // 锁内操作都有 withGattTimeout 兜底，保证锁必然释放（≤5s）。
+  async function gattOp(op, label = 'GATT operation') {
+    let waited = false;
+    while (state.gattBusy) {
+      waited = true;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    if (waited) log(`gattOp [${label}]: waited for GATT lock`);
+    state.gattBusy = true;
+    try {
+      return await withGattTimeout(op(), label);
+    } finally {
+      state.gattBusy = false;
+    }
+  }
+
+  // 链路存活探活状态机：三个信号没有一个单独可信——gatt.connected=true 可能是死链滞留、
+  // gattserverdisconnected 事件可能不触发、GATT 操作失败多为瞬时拥塞（安卓 status 133）。
+  // 唯一可信的"活着"证据 = GATT 往返成功。规则：
+  //   1. gatt.connected===false → 立即判死（false 是可信信号）
+  //   2. 读 0xFFEB 失败 → 间隔 700ms 重试，最多 3 次（等待 in-flight 出清/穿透 flash 停顿窗口）
+  //   3. 任一次往返成功 → 判活，返回 latest 记录（旧固件无值返回 true）；3 次全败 → 判死返回 false
+  // 旧固件无 0xFFEB（latestChar 为 null）时 readLatest 直接返回 null 不抛错 → 判活，
+  // 存活检测退化为 gatt.connected 检查。
+  async function probeLinkAlive() {
+    if (!state.device?.gatt.connected) {
+      log('probeLinkAlive: gatt.connected=false → dead');
+      return false;
+    }
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const rec = await gattOp(() => BLEProtocol.readLatest(state.latestChar), `Link probe #${attempt} (0xFFEB)`);
+        log(`probeLinkAlive: alive (attempt ${attempt}/3)`);
+        return rec || true;   // 中文：有值返回记录（供轮询刷新实时卡片），旧固件无值返回 true
+      } catch (err) {
+        log(`probeLinkAlive: attempt ${attempt}/3 failed — ${err.message || err}`);
+        if (!state.device?.gatt.connected) {
+          log('probeLinkAlive: gatt.connected dropped during probe → dead');
+          return false;
+        }
+      }
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 700));
+    }
+    log('probeLinkAlive: all 3 attempts failed → dead');
+    return false;
   }
 
   // 主动断连 + 复位 UI：浏览器栈半死（gatt.connected 迟迟不变 false、事件不派发）时，
@@ -1482,19 +1534,21 @@ function clearConnectError() {
     onDisconnected();
   }
 
-  // Settings 各按钮统一错误兜底：try/catch 收敛到这一个封装，按钮代码只写成功路径、
-  // 不再区分错误类型——断链/超时类错误 → 主动断连复位 UI（onDisconnected 顺带复位
-  // 校准按钮状态）；其余错误 → 写日志并回调 onError 供按钮更新各自的状态行
+  // Settings 各按钮统一错误兜底：try/catch 收敛到这一个封装，按钮代码只写成功路径。
+  // 出错时先探活（读一次 0xFFEB）再裁决：链路已断 → forceDisconnect 复位 UI（onDisconnected
+  // 顺带复位校准按钮状态）；链路仍在 → 只记日志并回调 onError 供按钮更新各自的状态行。
+  // 不再凭错误消息文本猜断链（timed out / gatt / networkerror 等关键词）——一次操作超时
+  // 或操作重叠不等于链路已断，误判会造成"连点 Refresh 就掉线"的体验
   function gattButton(context, action, onError) {
     return async (...args) => {
       try {
         await action(...args);
       } catch (err) {
-        if (isGattLinkError(err)) {
-          forceDisconnect(`${context}: ${err.message || err}`);
-        } else {
-          log(`${context} failed: ${err.message || err}`);
+        if (await probeLinkAlive()) {
+          log(`${context} failed (link alive): ${err.message || err}`);
           if (onError) onError(err);
+        } else {
+          forceDisconnect(`${context}: ${err.message || err}`);
         }
       }
     };
@@ -1514,7 +1568,7 @@ function clearConnectError() {
       return 'unavailable';
     }
     try {
-      const saved = await withGattTimeout(BLEProtocol.readCalibStatus(state.calibStatusChar), 'Calibration status read (0xFFE9)');
+      const saved = await gattOp(() => BLEProtocol.readCalibStatus(state.calibStatusChar), 'Calibration status read (0xFFE9)');
       renderCalibHints(saved);
       log(`Calibration status read (0xFFE9): dry=${saved.dry} wet=${saved.wet} temp=${saved.temp} result=${saved.result}`);
       return 'ok';
@@ -1562,7 +1616,7 @@ function clearConnectError() {
       await new Promise(resolve => setTimeout(resolve, 500));
       if (!state.device?.gatt.connected) return null;
       try {
-        const latest = await withGattTimeout(BLEProtocol.readLatest(state.latestChar), 'Latest read (0xFFEB)');
+        const latest = await gattOp(() => BLEProtocol.readLatest(state.latestChar), 'Latest read (0xFFEB)');
         if (latest && (!prev || latest.timestamp !== prev.timestamp)) return latest;
       } catch (_) { /* 单次读取失败不中断，继续等待到超时预算为止 */ }
     }
@@ -1659,15 +1713,16 @@ The device will measure the current probe state first, then apply the calibratio
       // 固件 0xFFE6 写回调只登记校准点并触发立即测量，测量完成后自动应用（或按状态/间距拒绝、丢弃）。
       // 每次尝试的确定结果由固件记录在 0xFFE9 第 2 字节：1=干点成功 2=湿点成功
       // 3=拒:湿度未低于20% 4=拒:湿度未高于80% 5=拒:两点过近 6=方向反向 7=测量失败或断链丢弃
-      await withGattTimeout(BLEProtocol.sendHumCalib(state.calibChar, point), 'Calibration write (0xFFE6)');
+      await gattOp(() => BLEProtocol.sendHumCalib(state.calibChar, point), 'Calibration write (0xFFE6)');
       log(`Moisture ${label} calibration command sent (0xFFE6)`);
 
       // 等待设备完成新测量（校准由固件在测量后自动应用或拒绝），再回读 0xFFE9 用结果码判定
       await waitForHumiditySample();
       const readState = await refreshCalibHints();
       if (readState !== 'ok') {
-        // 回读失败：断链类错误原样抛出交由 gattButton 统一断连，其余仅提示状态不可读
-        if (isGattLinkError(lastCalibReadErr)) throw lastCalibReadErr;
+        // 回读失败：捕获到错误则原样抛出，交由 gattButton 探活后统一裁决断连/提示；
+        // 无错误对象（旧固件无 0xFFE9 等本地配置原因）仅提示状态不可读
+        if (lastCalibReadErr) throw lastCalibReadErr;
         els.calibStatus.textContent = `${label} calibration command sent (device calibration status not readable)`;
         setCalibAttempt(point, 'fail', '✗ Result unknown');
         return;
@@ -1796,7 +1851,7 @@ The device will measure the current probe state first, then apply the calibratio
     els.devNameSaveBtn.disabled = true;
     els.devNameStatus.textContent = 'Saving…';
     try {
-      const res = await withGattTimeout(BLEProtocol.sendDeviceName(state.devNameChar, name), 'Device name write (0xFFEA)');
+      const res = await gattOp(() => BLEProtocol.sendDeviceName(state.devNameChar, name), 'Device name write (0xFFEA)');
       if (res.ok) {
         showDeviceNameBadge(name);
         els.devNameStatus.textContent = 'Name saved — shown in this dashboard only (Bluetooth name unchanged).';
@@ -1817,8 +1872,10 @@ The device will measure the current probe state first, then apply the calibratio
   // 而 0xFFE7 的 GATT 写入本身几十毫秒即完成：若写完立刻恢复按钮，用户在这段窗口里
   // 看不到任何反馈，极易连续点击。
   // v2 规格：refresh 一次性测量不写历史、不推 0xFFE1 通知，实时值写入 0xFFEB latest 特征。
-  // 策略：点击后锁定按钮并显示 Measuring…，每 500ms 轮询读 0xFFEB，直到出现比
-  // 历史最后一条更新的时间戳（新测量已到，刷新 Latest 卡片）或超时兜底解锁。
+  // 策略：点击后锁定按钮并显示 Measuring…，每 500ms 轮询读 0xFFEB，直到出现比点击时
+  // 展示水位更新的时间戳（新测量已到，刷新 Latest 卡片）或超时兜底解锁。
+  // 解锁只认三条路径：0xFFEB 时间戳变化 / 6s 超时 / 断连——不因收到任意 0xFFE1 通知解锁
+  // （周期上报与本次强制测量无关，提前解锁会让连点在设备测量中再次写入 0xFFE7）。
   // 连点危害：设备端 s_force_measure_pending 是二值标志，同窗口内的连点会合并成一次测量。
   const REFRESH_RESULT_TIMEOUT_MS = 6000;
   const REFRESH_ICON_IDLE = '🔄';
@@ -1838,17 +1895,6 @@ The device will measure the current probe state first, then apply the calibratio
       els.refreshBtn.textContent = busy ? `${REFRESH_ICON_BUSY} ${REFRESH_LABEL_BUSY}` : `${REFRESH_ICON_IDLE} ${REFRESH_LABEL_IDLE}`;
     }
     els.refreshBtn.disabled = busy || !state.device?.gatt.connected;
-  }
-
-  // 收到 0xFFE1 数据通知时调用：refresh 若在等待新数据则立即解锁
-  function releaseRefreshOnData() {
-    if (!refreshBusy) return;
-    if (refreshUnlockTimer) {
-      clearTimeout(refreshUnlockTimer);
-      refreshUnlockTimer = null;
-    }
-    refreshBusy = false;
-    setRefreshUiBusy(false);
   }
 
   // 断连 / 写失败等异常路径：清等待状态并恢复按钮
@@ -1871,19 +1917,26 @@ The device will measure the current probe state first, then apply the calibratio
     syncBatteryPill();
   }
 
-  const REFRESH_POLL_INTERVAL_MS = 500;
+  const REFRESH_POLL_INTERVAL_MS = 1000;
 
-  // 轮询 0xFFEB latest，直到出现比 prev（历史最后一条）更新的时间戳；超时/断连返回 null
+  // 轮询 0xFFEB latest，直到出现比 prev（点击时刻的展示水位）更新的时间戳；超时/断连返回 null。
+  // 与主轮询共用同一把 GATT 互斥锁（state.gattBusy）：主轮询未完成时本拍跳过，本读进行中时
+  // 主轮询让行——两路轮询不再并发 GATT 操作（操作重叠会让浏览器栈抛 NetworkError、
+  // 设备端测量期间响应变慢导致排队超时）
   async function waitForLatestMeasurement(prev) {
     const deadline = Date.now() + REFRESH_RESULT_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, REFRESH_POLL_INTERVAL_MS));
       if (!state.device?.gatt.connected) return null;
+      if (state.gattBusy) continue;   // 主轮询正在读：本拍跳过，下一拍再看
+      state.gattBusy = true;
       try {
-        const rec = await BLEProtocol.readLatest(state.latestChar);
+        const rec = await withGattTimeout(BLEProtocol.readLatest(state.latestChar), 'Refresh poll read (0xFFEB)');
         if (rec && (!prev || rec.timestamp !== prev.timestamp)) return rec;
       } catch (err) {
         // 单次读失败（射频瞬态等）继续重试，直到超时兜底
+      } finally {
+        state.gattBusy = false;
       }
     }
     return null;
@@ -1906,9 +1959,12 @@ The device will measure the current probe state first, then apply the calibratio
     refreshBusy = true;
     setRefreshUiBusy(true);
     try {
-      await withGattTimeout(BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)');
+      await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)');
       log('Refresh command sent (0xFFE7), measuring now');
-      const prev = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
+      // 水位基线取"当前展示值"：0xFFEB 恢复的上次一次性测量值可能比历史最后一条更新，
+      // 且主轮询/通知也可能在等待期间刷新 latestShown——以点击时刻快照为基线最稳
+      const prev = state.latestShown
+        ?? (state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null);
       const rec = await waitForLatestMeasurement(prev);
       if (rec) {
         applyLatestRecord(rec);
@@ -1952,14 +2008,14 @@ The device will measure the current probe state first, then apply the calibratio
     els.tempOffsetApplyBtn.disabled = true;
     els.tempOffsetStatus.textContent = 'Applying temperature offset…';
     try {
-      await withGattTimeout(BLEProtocol.sendTempOffset(state.tempOffsetChar, x10), 'Offset write (0xFFE8)');
+      await gattOp(() => BLEProtocol.sendTempOffset(state.tempOffsetChar, x10), 'Offset write (0xFFE8)');
       state.tempOffsetX10 = x10;
       renderTempOffset();   // 回显设备 0.1℃ 网格真实值（℉ 模式滑杆位置可能微调 ≤1 格）
       els.tempOffsetStatus.textContent = `Temperature offset set to ${fmtTempDelta(x10 / 10)}`;
       log(`Temperature offset sent (0xFFE8): ${x10 / 10}℃`);
       // 立即重测，让 Data 面板尽快反映修正后的温度
       if (state.refreshChar) {
-        try { await withGattTimeout(BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)'); } catch (_) {}
+        try { await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)'); } catch (_) {}
       }
     } finally {
       els.tempOffsetApplyBtn.disabled = !state.device?.gatt.connected || !state.tempOffsetChar;
@@ -1987,7 +2043,7 @@ The device will measure the current probe state first, then apply the calibratio
     clearLocalDeviceCache();
     // 写入后设备可能在 ACK 前就重启断链：断链/超时类错误由 gattButton 主动断连复位 UI，
     // 其余错误回调也按已下发、设备重启中提示——对用户表现一致，无需区分
-    await withGattTimeout(BLEProtocol.sendFactoryReset(state.resetChar), 'Factory reset write (0xFFE5)');
+    await gattOp(() => BLEProtocol.sendFactoryReset(state.resetChar), 'Factory reset write (0xFFE5)');
     log('Factory reset command sent (0xFFE5 RST1)');
     els.factoryResetStatus.textContent = 'Factory reset requested — the device is rebooting. Reconnect when it appears again.';
   }, (err) => {
