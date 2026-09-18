@@ -464,7 +464,7 @@
     }
   </style>
 </head>
-<body class="min-h-screen text-slate-800 antialiased">
+<body class="min-h-screen antialiased text-slate-800">
   <!-- 兼容性提示 Modal -->
   <div id="compatibilityModal" class="fixed inset-0 z-50 items-center justify-center hidden px-5 bg-slate-900/50">
     <div class="w-full max-w-sm p-6 text-center bg-white shadow-2xl rounded-3xl">
@@ -479,10 +479,10 @@
     </div>
   </div>
 
-  <div class="dashboard-shell max-w-4xl px-4 py-1 mx-auto sm:px-6 sm:py-10 lg:py-12">
+  <div class="max-w-4xl px-4 py-1 mx-auto dashboard-shell sm:px-6 sm:py-10 lg:py-12">
     <!-- Header -->
     <!-- Header（上下留白由下方 .dashboard-shell > header 的媒体查询统一控制，不再用 Tailwind mb-* 双轨定义） -->
-    <header class="flex items-center gap-2 sm:gap-4 text-left sm:justify-center sm:text-center">
+    <header class="flex items-center gap-2 text-left sm:gap-4 sm:justify-center sm:text-center">
       <img src="page/images/alinfancy-logo.svg" alt="Alinfancy" class="object-contain w-[90px] h-[90px] shrink-0 sm:w-24 sm:h-24">
       <div>
         <h1 class="text-2xl font-bold sm:text-3xl text-emerald-800">SoilPulse</h1>
@@ -494,16 +494,16 @@
          左列两行居中：设备名字在上（连接后显示，超长 truncate 兜底）、● 连接状态在下；
          右侧电量胶囊 + Connect 与左列垂直居中对齐。
          Refresh 自原顶部工具栏迁入 Data 面板（两张指标卡右侧第三格） -->
-    <div class="dashboard-card p-3 mb-4 rounded-2xl sm:px-5 sm:py-4 sm:mb-6">
+    <div class="p-3 mb-4 dashboard-card rounded-2xl sm:px-5 sm:py-4 sm:mb-6">
       <div class="flex items-center justify-between gap-1.5 sm:gap-2">
-        <div class="flex min-w-0 flex-col items-center justify-center gap-1">
+        <div class="flex flex-col items-center justify-center min-w-0 gap-1">
           <span id="deviceNameText" class="hidden max-w-full truncate text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-full"></span>
           <div class="flex items-center gap-2">
-            <span id="statusDot" class="w-3 h-3 shrink-0 rounded-full bg-slate-300"></span>
-            <span id="statusText" class="shrink-0 text-sm font-medium text-slate-600">Disconnected</span>
+            <span id="statusDot" class="w-3 h-3 rounded-full shrink-0 bg-slate-300"></span>
+            <span id="statusText" class="text-sm font-medium shrink-0 text-slate-600">Disconnected</span>
           </div>
         </div>
-        <div id="battPill" class="batt-idle inline-flex shrink-0 items-center gap-1 rounded-lg bg-emerald-50 px-2 py-1" aria-label="Battery level">
+        <div id="battPill" class="inline-flex items-center gap-1 px-2 py-1 rounded-lg batt-idle shrink-0 bg-emerald-50" aria-label="Battery level">
           <span aria-hidden="true">🔋</span>
           <span id="battValue" class="text-sm font-bold text-emerald-700">--</span>
           <span class="batt-unit text-[11px] font-semibold text-emerald-600">%</span>
@@ -516,10 +516,10 @@
     </div>
     <!-- 连接失败/超时提示（红字独立一行，显示在状态卡下方）：避免覆盖状态行文字；
          新的连接尝试开始或连接成功后自动清除 -->
-    <p id="connectErrorText" class="hidden mb-4 px-2 text-center text-sm font-medium text-red-600" role="alert"></p>
+    <p id="connectErrorText" class="hidden px-2 mb-4 text-sm font-medium text-center text-red-600" role="alert"></p>
 
     <!-- Main tab navigation -->
-    <nav class="main-nav mb-5 sm:mb-6" role="tablist" aria-label="Dashboard views">
+    <nav class="mb-5 main-nav sm:mb-6" role="tablist" aria-label="Dashboard views">
       <button id="mainTabDataBtn" class="main-tab-btn main-tab-active" role="tab" aria-selected="true">📊 Data</button>
       <button id="mainTabGuideBtn" class="main-tab-btn" role="tab" aria-selected="false">📘 Guide</button>
       <button id="mainTabSettingBtn" class="main-tab-btn" role="tab" aria-selected="false" disabled>
@@ -534,24 +534,24 @@
            原方案的 slate-100 底色与页面底色几乎同色、再叠加 opacity-40 会让外框整块消失；
            图标 emoji 用 grayscale 灰度化表达禁用态。忙碌态由 app.js setRefreshUiBusy 只替换图标与文字 span 内容 -->
       <!-- 移动端下边距由 .grid.live-metrics 媒体查询控制；桌面端 sm:mb-5 生效 -->
-      <div class="live-metrics grid grid-cols-3 gap-2 sm:gap-4 sm:mb-5">
-        <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #f97316">
+      <div class="grid grid-cols-3 gap-2 live-metrics sm:gap-4 sm:mb-5">
+        <div class="p-4 text-center dashboard-card metric-card rounded-2xl" style="--metric-color: #f97316">
           <!-- 当前单位由切换器高亮表达，label 不带单位后缀；°F/°C 切换与数值同行（微小间距），
                手机端由媒体查询收窄切换器避免溢出。app.js updateTempUnitUI 重写按钮 class 后，
                ≤639px 的 #tempUnitToggle .temperature-unit-btn 规则（优先级更高）仍会覆盖 px-*/text-*，
                因此 JS 侧无需同步尺寸 -->
-          <div id="tempUnitLabel" class="metric-label text-xs sm:text-sm text-slate-500">Temperature</div>
+          <div id="tempUnitLabel" class="text-xs metric-label sm:text-sm text-slate-500">Temperature</div>
           <div class="temp-value-row mt-1 flex items-center justify-center gap-1.5">
-            <div id="tempValue" class="metric-value text-3xl font-bold text-orange-600 sm:text-4xl">--</div>
+            <div id="tempValue" class="text-3xl font-bold text-orange-600 metric-value sm:text-4xl">--</div>
             <div id="tempUnitToggle" class="inline-flex shrink-0 p-0.5 rounded-lg bg-slate-100" role="group" aria-label="Temperature unit">
               <button type="button" class="temperature-unit-btn px-1.5 py-0.5 text-[10px] font-semibold rounded-md transition" data-unit="F">°F</button>
               <button type="button" class="temperature-unit-btn px-1.5 py-0.5 text-[10px] font-semibold rounded-md transition" data-unit="C">°C</button>
             </div>
           </div>
         </div>
-        <div class="dashboard-card metric-card p-4 text-center rounded-2xl" style="--metric-color: #0ea5e9">
-          <div class="metric-label text-xs sm:text-sm text-slate-500">Moisture %</div>
-          <div id="humValue" class="metric-value mt-1 text-3xl font-bold text-sky-600 sm:text-4xl">--</div>
+        <div class="p-4 text-center dashboard-card metric-card rounded-2xl" style="--metric-color: #0ea5e9">
+          <div class="text-xs metric-label sm:text-sm text-slate-500">Moisture %</div>
+          <div id="humValue" class="mt-1 text-3xl font-bold metric-value text-sky-600 sm:text-4xl">--</div>
         </div>
         <button id="refreshBtn" disabled
           class="flex flex-col items-center justify-center gap-1.5 px-2 text-center text-white transition shadow-sm rounded-2xl border border-transparent bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] disabled:border-slate-200 disabled:bg-white disabled:text-slate-400 disabled:grayscale disabled:cursor-not-allowed disabled:shadow-none">
@@ -565,17 +565,17 @@
 
       <!-- Trend charts (tabbed: recent records / 7-day daily average)
            手机端下边距由 #mainTabDataPanel > .dashboard-card 媒体查询控制；桌面端 sm:mb-0（紧贴历史卡片） -->
-      <div class="dashboard-card p-4 rounded-2xl sm:p-5 sm:mb-0">
-        <div class="chart-tabs flex items-stretch gap-2 mb-4">
-          <button id="trendTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-emerald-700 text-white transition">Recent 5 Records</button>
-          <button id="dailyTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-slate-100 text-slate-500 transition">7-Day Daily Average</button>
+      <div class="p-4 dashboard-card rounded-2xl sm:p-5 sm:mb-0">
+        <div class="flex items-stretch gap-2 mb-4 chart-tabs">
+          <button id="trendTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-emerald-700 text-white transition">Last 5 Records</button>
+          <button id="dailyTabBtn" class="chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-slate-100 text-slate-500 transition">7-Day Average</button>
         </div>
 
         <div id="trendTabPanel">
           <div class="relative h-56 sm:h-60">
             <canvas id="trendChart" class="w-full h-full"></canvas>
           </div>
-          <p id="trendRangeText" class="mt-2 text-xs text-center text-slate-400">Waiting for device data</p>
+          <p id="trendRangeText" class="mt-2 text-xs text-center text-slate-400">No data available</p>
         </div>
 
         <div id="dailyTabPanel" class="hidden">
@@ -597,17 +597,17 @@
       <!-- History & trend charts（原 History 面板内容已并入 Data 面板） -->
       <!-- History table（手机端与上方趋势卡片的间距由 + 兄弟选择器媒体查询控制；
            桌面端 mt-6 提供趋势卡片→历史卡片间距，mb-5 桌面端无视觉效果已移除） -->
-      <div class="dashboard-card p-4 overflow-hidden rounded-2xl sm:p-5 sm:mb-6 mt-6">
+      <div class="p-4 mt-6 overflow-hidden dashboard-card rounded-2xl sm:p-5 sm:mb-6">
         <!-- Clear Data（自顶部工具栏迁入）：清除的就是本地+设备历史数据，操作靠近其作用对象，
              且远离高频的 Refresh 按钮以降低手机误触。未连接时 disabled 联动逻辑不变（app.js） -->
-        <div class="mb-3 flex items-center justify-between gap-2">
+        <div class="flex items-center justify-between gap-2 mb-3">
           <h2 class="text-sm font-semibold text-slate-600">Measurement History</h2>
           <button id="clearCacheBtn" disabled
             class="action-button inline-flex shrink-0 items-center px-3 py-1.5 text-xs font-semibold transition rounded-lg border border-rose-200 bg-white text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40">
             🗑 Clear
           </button>
         </div>
-        <table class="history-table w-full text-sm">
+        <table class="w-full text-sm history-table">
           <thead>
             <tr class="text-left border-b text-slate-400 border-slate-100">
               <th class="py-2 pr-2">#</th>
@@ -618,37 +618,37 @@
             </tr>
           </thead>
           <tbody id="historyBody">
-            <tr><td colspan="5" class="py-6 text-center text-slate-300">Connect a device to view history</td></tr>
+            <tr><td colspan="5" class="py-6 text-center text-slate-300">Connect device to view history</td></tr>
           </tbody>
         </table>
       </div>
     </section>
     <!-- ================= Panel: Setting ================= -->
     <section id="mainTabSettingPanel" class="hidden" role="tabpanel">
-      <div id="settingLockedHint" class="dashboard-card p-5 mb-5 rounded-2xl text-center sm:p-6">
+      <div id="settingLockedHint" class="p-5 mb-5 text-center dashboard-card rounded-2xl sm:p-6">
         <div class="text-3xl">🔒</div>
         <p class="mt-2 text-sm font-semibold text-slate-600">Settings are locked</p>
-        <p class="mt-1 text-xs leading-5 text-slate-400">Connect a device to access calibration, temperature offset, firmware update and reset.</p>
+        <p class="mt-1 text-xs leading-5 text-slate-400">Connect device to access calibration, temperature offset, firmware update and reset.</p>
       </div>
 
       <div id="settingContent" class="hidden">
         <!-- Firmware update -->
-        <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
+        <div class="p-4 mb-5 dashboard-card rounded-2xl sm:p-5">
           <div class="flex items-center justify-between gap-2">
             <h2 class="text-sm font-semibold text-slate-600">📦 Firmware</h2>
             <span id="otaCurrentVersionBadge" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-slate-100 text-slate-500">--</span>
           </div>
-          <div id="otaUpdateHint" class="hidden mt-3 p-4 rounded-2xl bg-violet-600 text-white">
+          <div id="otaUpdateHint" class="hidden p-4 mt-3 text-white rounded-2xl bg-violet-600">
             <div class="flex flex-wrap items-center gap-2 text-sm font-bold">🚀 New firmware <span id="otaNewVersion" class="text-violet-100">--</span> available</div>
             <div class="mt-1 text-xs text-violet-200">Update to get the latest fixes and features.</div>
           </div>
           <details id="otaChangelog" class="hidden mt-3">
-            <summary class="text-xs font-semibold text-violet-600 cursor-pointer select-none">What's new</summary>
-            <ul id="otaChangelogList" class="mt-2 pl-4 space-y-1 text-xs leading-5 text-slate-500 list-disc"></ul>
+            <summary class="text-xs font-semibold cursor-pointer select-none text-violet-600">What's new</summary>
+            <ul id="otaChangelogList" class="pl-4 mt-2 space-y-1 text-xs leading-5 list-disc text-slate-500"></ul>
           </details>
           <div class="flex justify-end mt-3">
             <button id="otaUpdateNowBtn"
-              class="hidden action-button inline-flex items-center w-full px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-violet-600 hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">
+              class="inline-flex items-center hidden w-full px-4 py-2 text-sm font-semibold text-white transition action-button rounded-xl bg-violet-600 hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">
               Update now
             </button>
           </div>
@@ -668,12 +668,12 @@
 
         
         <!-- Sensor Calibration -->
-        <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
+        <div class="p-4 mb-5 dashboard-card rounded-2xl sm:p-5">
           <h2 class="mb-1 text-sm font-semibold text-slate-600">🎯 Sensor Calibration</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
             Two-point calibration reduces measurement errors and improves soil moisture accuracy.Place the probe in the matching condition, click the button, and the device will recalibrate using a new reading.
           </p>
-          <div class="calibration-grid grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-2 gap-3 calibration-grid">
             <button id="calibDryBtn" disabled
               class="flex flex-col items-center gap-1 px-3 py-3 text-orange-700 transition border border-orange-100 rounded-xl bg-orange-50 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-40">
               <span class="text-xl">🏜️</span>
@@ -691,11 +691,11 @@
               <span id="calibWetMsg" hidden class="calib-msg mt-0.5"></span>
             </button>
           </div>
-          <p id="calibStatus" class="mt-3 text-xs text-center text-slate-400">Connect a device to enable calibration</p>
+          <p id="calibStatus" class="mt-3 text-xs text-center text-slate-400">Connect device to enable calibration</p>
         </div>
 
         <!-- Temperature offset -->
-        <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
+        <div class="p-4 mb-5 dashboard-card rounded-2xl sm:p-5">
           <h2 class="mb-1 text-sm font-semibold text-slate-600">🌡️ Temperature Offset</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
             Fine-tune the reported temperature with an adjustable offset from -18 °F to +18 °F (-10 ℃ to +10 ℃). Saved on device (persists across reboots).
@@ -706,14 +706,14 @@
                inputmode="text" 是刻意的：decimal 数字键盘没有负号，而 offset 需要键入 -10 ~ +10 -->
           <div class="flex flex-wrap items-center gap-2">
             <button id="tempOffsetDecBtn" type="button" aria-label="Decrease offset by 0.1"
-              class="action-button inline-flex w-11 shrink-0 items-center justify-center rounded-xl bg-slate-100 px-0 py-0 text-xl font-bold text-slate-700 transition hover:bg-slate-200 active:bg-emerald-100 active:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">−</button>
+              class="inline-flex items-center justify-center px-0 py-0 text-xl font-bold transition action-button w-11 shrink-0 rounded-xl bg-slate-100 text-slate-700 hover:bg-slate-200 active:bg-emerald-100 active:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">−</button>
             <input id="tempOffsetInput" type="number" inputmode="text" step="0.1" min="-10" max="10" value="0" autocomplete="off" aria-label="Temperature offset value"
-              class="min-w-0 flex-1 rounded-xl bg-slate-100 px-2 py-2 text-center text-base font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40">
-            <span id="tempOffsetUnitSpan" class="w-7 shrink-0 text-center text-sm font-semibold text-slate-500">℃</span>
+              class="flex-1 min-w-0 px-2 py-2 text-base font-semibold text-center rounded-xl bg-slate-100 text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40">
+            <span id="tempOffsetUnitSpan" class="text-sm font-semibold text-center w-7 shrink-0 text-slate-500">℃</span>
             <button id="tempOffsetIncBtn" type="button" aria-label="Increase offset by 0.1"
-              class="action-button inline-flex w-11 shrink-0 items-center justify-center rounded-xl bg-slate-100 px-0 py-0 text-xl font-bold text-slate-700 transition hover:bg-slate-200 active:bg-emerald-100 active:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">+</button>
+              class="inline-flex items-center justify-center px-0 py-0 text-xl font-bold transition action-button w-11 shrink-0 rounded-xl bg-slate-100 text-slate-700 hover:bg-slate-200 active:bg-emerald-100 active:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">+</button>
             <button id="tempOffsetApplyBtn" disabled
-              class="action-button inline-flex w-full shrink-0 items-center px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 sm:ml-6 sm:w-auto">
+              class="inline-flex items-center w-full px-4 py-2 text-sm font-semibold text-white transition action-button shrink-0 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 sm:ml-6 sm:w-auto">
               Apply Offset
             </button>
           </div>
@@ -722,11 +722,11 @@
         </div>
 
         <!-- Device name（Reset 卡片上方：改名保存后会更换蓝牙公开 MAC，涉及 Home Assistant 重新绑定） -->
-        <div class="dashboard-card p-4 mb-5 rounded-2xl sm:p-5">
+        <div class="p-4 mb-5 dashboard-card rounded-2xl sm:p-5">
           <h2 class="mb-1 text-sm font-semibold text-slate-600">🏷️ Device Name</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
-            A display name kept on the device and shown in this dashboard. <b>Up to 10 ASCII characters</b>.
-            It does <b>not</b> change the name in your phone's Bluetooth list. So nothing needs to be re-paired in Home Assistant.
+            A display name saved on the device and shown in this dashboard. <b>Up to 10 ASCII characters</b>.
+            It does <b>not</b> change the device's default Bluetooth broadcast name, So nothing needs to be re-paired in Home Assistant.
           </p>
           
           <div class="flex items-center gap-2">
@@ -734,7 +734,7 @@
               placeholder="e.g. SoilPulse"
               class="flex-1 min-w-0 px-3 py-2 text-base font-medium rounded-xl bg-slate-100 text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500">
             <button id="devNameSaveBtn" disabled
-              class="action-button inline-flex items-center px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">
+              class="inline-flex items-center px-4 py-2 text-sm font-semibold text-white transition action-button rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">
               Save
             </button>
           </div>
@@ -745,7 +745,7 @@
         </div>
 
         <!-- Reset -->
-        <div class="dashboard-card p-4 rounded-2xl border-rose-100 sm:p-5">
+        <div class="p-4 dashboard-card rounded-2xl border-rose-100 sm:p-5">
           <h2 class="mb-1 text-sm font-semibold text-rose-600">⚠️ Reset</h2>
           <p class="mb-3 text-xs leading-5 text-slate-400">
             Clears history, calibration, temperature offset, and device name on the device, then reboots it.
@@ -753,7 +753,7 @@
           </p>
           <div class="flex justify-end mt-3">
             <button id="factoryResetBtn" disabled
-              class="action-button inline-flex items-center w-full px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-rose-600 hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">
+              class="inline-flex items-center w-full px-4 py-2 text-sm font-semibold text-white transition action-button rounded-xl bg-rose-600 hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">
               Factory Reset & Reboot
             </button>
           </div>
@@ -763,7 +763,7 @@
     </section>
     <!-- ================= Panel: Guide ================= -->
     <section id="mainTabGuidePanel" class="hidden" role="tabpanel">
-      <div class="dashboard-card p-5 rounded-2xl sm:p-6">
+      <div class="p-5 dashboard-card rounded-2xl sm:p-6">
         <!-- Introduction（内容自印刷手册 introduction.pdf 迁入，取代原 quick-start PDF 跳转展示） -->
         <h2 class="text-base font-bold text-emerald-800">Introduction</h2>
         <p class="mt-1 text-sm leading-6 text-slate-500">SoilPulse monitors your soil — moisture, temperature and battery. Just plant, connect, and check on the spot.</p>
@@ -776,7 +776,7 @@
         <!-- Meet Your Sensor -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Meet Your Sensor</h2>
         <img src="page/images/product_image.webp" alt="SoilPulse sensor" loading="lazy" decoding="async"
-          class="mx-auto mt-2 w-full rounded-xl border border-slate-100">
+          class="w-full mx-auto mt-2 border rounded-xl border-slate-100">
 
         <!-- Setup -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Setup</h2>
@@ -790,16 +790,16 @@
         <!-- Connect — Web Dashboard -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Connect — Web Dashboard</h2>
         <p class="mt-1 text-xs leading-5 text-slate-500">Requires a <b class="text-slate-700">Bluetooth-enabled</b> phone or PC with Bluetooth turned on.</p>
-        <div class="mt-3 flex items-center gap-3 rounded-xl border border-slate-100 bg-slate-50/60 p-3">
+        <div class="flex items-center gap-3 p-3 mt-3 border rounded-xl border-slate-100 bg-slate-50/60">
           <img src="page/images/qrcode.webp" alt="QR code" loading="lazy" decoding="async"
-            class="h-20 w-20 shrink-0 rounded-lg border border-slate-100 sm:h-24 sm:w-24">
+            class="w-20 h-20 border rounded-lg shrink-0 border-slate-100 sm:h-24 sm:w-24">
           <div class="text-xs leading-5 text-slate-500">
             <p class="font-semibold text-slate-700">Scan to open Dashboard</p>
             <p>• Opens in your browser instantly</p>
             <p>• Built-in interactive setup guide</p>
           </div>
         </div>
-        <div class="mt-2 rounded-xl border border-orange-100 bg-orange-50 p-3 text-xs leading-5 text-orange-700">
+        <div class="p-3 mt-2 text-xs leading-5 text-orange-700 border border-orange-100 rounded-xl bg-orange-50">
           <b>Can't find it?</b> Tap <b>touch pad</b> to wake device and allow Bluetooth permissions.<br>
           • <b>Android / PC:</b> Use <b>Chrome</b>.<br>
           • <b>iPhone / iPad:</b> Download &amp; use <b>Bluefy app</b> (iOS Safari/Chrome does not support Web Bluetooth).
@@ -820,14 +820,14 @@
           <li><b class="text-slate-700">Data Tab</b> — live temperature, moisture &amp; battery; history with last 5 readings and 7-day average charts.</li>
           <li>
             <b class="text-slate-700">Refresh &amp; Clear</b>
-            <ul class="mt-1 space-y-1 list-disc pl-4">
+            <ul class="pl-4 mt-1 space-y-1 list-disc">
               <li><b class="text-slate-700">Refresh</b>: triggers an immediate measurement.</li>
               <li><b class="text-slate-700">Clear Data</b>: clears local &amp; history data.</li>
             </ul>
           </li>
           <li>
             <b class="text-slate-700">Setting Tab</b>
-            <ul class="mt-1 space-y-1 list-disc pl-4">
+            <ul class="pl-4 mt-1 space-y-1 list-disc">
               <li><b class="text-slate-700">Calibration &amp; Temperature</b>: Dry/Wet moisture calibration &amp; temperature offset adjustments.</li>
               <li><b class="text-slate-700">Device Management</b>: Custom device renaming &amp; factory reset.</li>
               <li><b class="text-slate-700">Firmware Updates</b>: Displays a prompt when new updates are available.</li>
@@ -839,21 +839,21 @@
         <h2 class="mt-6 text-base font-bold text-emerald-800">Troubleshooting</h2>
         <ul class="mt-2 space-y-2 text-xs leading-5 text-slate-500">
           <li><b class="text-slate-700">Can't connect?</b> Tap the touch pad to wake it, allow Bluetooth permissions, then click <b class="text-slate-700">Connect</b>.</li>
-          <li><b class="text-slate-700">No new data?</b> Connect and click <b class="text-slate-700">Refresh</b> — new data should arrive within a few minutes.</li>
+          <li><b class="text-slate-700">No new data?</b> Connect and click <b class="text-slate-700">Refresh</b> — new data should arrive within a few seconds.</li>
           <li><b class="text-slate-700">Odd moisture?</b> Insert the probe to the <b class="text-slate-700">OPTIMAL DEPTH line</b> without leaving loose gaps in soil.</li>
           <li><b class="text-slate-700">Shows unavailable in Home Assistant?</b> This is normal. The sensor updates every 10 minutes to save power — new data will still arrive automatically.</li>
         </ul>
 
         <!-- Support -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Support</h2>
-        <p class="mt-1 text-xs leading-5 text-slate-500">Email: <a href="mailto:support@alinfancy.com" class="font-semibold text-emerald-700 underline underline-offset-2">support@alinfancy.com</a></p>
+        <p class="mt-1 text-xs leading-5 text-slate-500">Email: <a href="mailto:support@alinfancy.com" class="font-semibold underline text-emerald-700 underline-offset-2">support@alinfancy.com</a></p>
         <p class="mt-0.5 text-xs leading-5 text-slate-500">Questions or feedback? Please email us — we're happy to help. Thank you for your support!</p>
 
         <!-- FCC Statement（自印刷手册 introduction.pdf 补充，置于 Guide 最后） -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">FCC Statement</h2>
         <p class="mt-1 text-xs leading-5 text-slate-500">Complies with Part 15 of the FCC Rules. Operation is subject to two conditions: (1) it may not cause harmful interference, and (2) it must accept any interference received.</p>
         <p class="mt-1 text-xs leading-5 text-slate-500">This equipment complies with the limits for a Class B digital device under Part 15. If it causes harmful interference, try one or more of the following:</p>
-        <ul class="mt-1 space-y-1 list-disc pl-4 text-xs leading-5 text-slate-500">
+        <ul class="pl-4 mt-1 space-y-1 text-xs leading-5 list-disc text-slate-500">
           <li>Reorient or relocate the antenna.</li>
           <li>Increase the separation from the receiver.</li>
           <li>Plug into a different circuit.</li>

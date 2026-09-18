@@ -212,7 +212,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     els.calibWetBtn.disabled = !connected;
     els.calibStatus.textContent = connected
       ? 'Place the probe, wait a few seconds, then tap dry or wet calibration'
-      : 'Connect a device to enable calibration';
+      : 'Connect device to enable calibration';
     els.refreshBtn.disabled = !connected;
     els.clearCacheBtn.disabled = !connected;
     updateSettingsAccess(connected);
@@ -235,8 +235,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      els.tempOffsetApplyBtn.disabled = !connected || !state.tempOffsetChar;
      els.factoryResetBtn.disabled = !connected || !state.resetChar;
      if (!connected) {
-       els.tempOffsetStatus.textContent = 'Connect a device to adjust temperature offset';
-       els.factoryResetStatus.textContent = 'Connect a device to reset';
+       els.tempOffsetStatus.textContent = 'Connect device to adjust temperature offset';
+       els.factoryResetStatus.textContent = 'Connect device to reset';
      }
    }
 
@@ -500,7 +500,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     els.battValue.textContent = '--';
     syncBatteryPill();
     els.lastUpdate.textContent = 'No measurement received yet';
-    els.historyBody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-slate-300">Connect a device to view history</td></tr>';
+    els.historyBody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-slate-300">Connect device to view history</td></tr>';
     updateTrendSummary(null);
     const trendCtx = els.trendChart?.getContext('2d');
     if (trendCtx) trendCtx.clearRect(0, 0, els.trendChart.width, els.trendChart.height);
@@ -688,7 +688,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    // 本函数仅维护仍存在的 trendRangeText 时间范围文案；勿再引用已删除的元素
    function updateTrendSummary(records) {
      if (!records || !records.length) {
-       els.trendRangeText.textContent = 'Waiting for device data';
+       els.trendRangeText.textContent = 'No data available';
        return;
      }
 
@@ -1266,7 +1266,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      } else {
        els.modalIcon.textContent = '💻';
        els.modalTitle.textContent = 'Web Bluetooth Unavailable';
-       els.modalMessage.textContent = 'Please use Chrome / Edge over HTTPS or localhost.';
+       els.modalMessage.textContent = 'Please use Google Chrome to access this site';
        els.modalActionBtn.classList.add('hidden');
      }
  
@@ -1398,7 +1398,7 @@ function clearConnectError() {
        if (errMsg.includes('CONNECT_TIMEOUT')) {
          // 阶段2a：gatt.connect() 超时——多为设备深睡不在广播窗口 / 系统蓝牙被关闭；
          // 失败文案显示在状态卡下方红字独立行（不再覆盖状态行"Disconnected"文字）
-         showConnectError('Connect timed out — device may be sleeping (touch it to wake) or Bluetooth is off');
+         showConnectError('Connection timed out. Device may be sleeping — tap the touch pad to wake.');
          log('gatt.connect timed out after 10s');
        } else if (errMsg.includes('INIT_TIMEOUT')) {
          // 阶段2b：已连上但服务发现/时间同步/订阅初始化超时——多为射频信号差或慢平台
@@ -1690,7 +1690,7 @@ function clearConnectError() {
       return;
     }
     if (!state.device?.gatt.connected || !state.calibChar) {
-      els.calibStatus.textContent = 'Connect a device to enable calibration';
+      els.calibStatus.textContent = 'Connect device to enable calibration';
       return;
     }
 
@@ -1735,14 +1735,14 @@ The device will measure the current probe state first, then apply the calibratio
         3: 'Dry calibration rejected: moisture not below 20% — ambient/environment is not dry enough',
         4: 'Wet calibration rejected: moisture not above 80% — ambient/environment is not wet enough',
         5: 'Calibration rejected: difference between dry and wet anchors is too small',
-        6: 'Calibration discarded: measurement failed or connection interrupted',
+        6: 'Calibration rejected: measurement failed or connection interrupted',
         7: 'Calibration rejected: reversed anchors — wet voltage must stay below dry voltage',
       };
       // 按钮内只放短文案防溢出，完整原因展示在按钮组下方的 calibStatus
       const shortText = {
         1: '✓ Calibrated', 2: '✓ Calibrated',
         3: '✗ Rejected: not dry enough', 4: '✗ Rejected: not wet enough',
-        5: '✗ Rejected: anchors too close', 6: '✗ Discarded: measurement failed',
+        5: '✗ Rejected: anchors too close', 6: '✗ Rejected: measurement failed',
         7: '✗ Rejected: reversed anchors',
       };
       const known = result !== undefined && result !== null && resultText[result] !== undefined;
@@ -1782,7 +1782,7 @@ The device will measure the current probe state first, then apply the calibratio
   function updateDevNameByteCount() {
     const v = els.devNameInput?.value || '';
     const bytes = new TextEncoder().encode(v);
-    if (els.devNameByteCount) els.devNameByteCount.textContent = `${bytes.length} / ${DEV_NAME_MAX_BYTES} bytes`;
+    if (els.devNameByteCount) els.devNameByteCount.textContent = `${bytes.length} / ${DEV_NAME_MAX_BYTES} characters`;
     const okLen = bytes.length >= 1 && bytes.length <= DEV_NAME_MAX_BYTES;
     const okAscii = bytes.length > 0 && bytes.every(b => b >= 0x20 && b <= 0x7E);
     if (els.devNameSaveBtn) els.devNameSaveBtn.disabled = !okLen || !okAscii;
@@ -1844,7 +1844,7 @@ The device will measure the current probe state first, then apply the calibratio
       return;
     }
     if (!state.device?.gatt.connected || !state.devNameChar) {
-      els.devNameStatus.textContent = 'Connect a device to change its name';
+      els.devNameStatus.textContent = 'Connect device to change its name';
       return;
     }
     const name = (els.devNameInput.value || '').trim();
@@ -2001,7 +2001,7 @@ The device will measure the current probe state first, then apply the calibratio
       return;
     }
     if (!state.device?.gatt.connected || !state.tempOffsetChar) {
-      els.tempOffsetStatus.textContent = 'Connect a device to adjust temperature offset';
+      els.tempOffsetStatus.textContent = 'Connect device to adjust temperature offset';
       return;
     }
     const x10 = ticksToTempOffset(tempOffsetTicksFromInput());   // ℉ 格四舍五入对齐设备 0.1℃ 网格
@@ -2031,7 +2031,7 @@ The device will measure the current probe state first, then apply the calibratio
       return;
     }
     if (!state.device?.gatt.connected || !state.resetChar) {
-      els.factoryResetStatus.textContent = 'Connect a device to reset';
+      els.factoryResetStatus.textContent = 'Connect device to reset';
       return;
     }
     const msg = 'Factory reset the device? All stored data (history, daily averages, moisture calibration, temperature offset and device name) will be cleared and the device will reboot. This page\'s cached data for the device will also be cleared. The connection will drop.';
