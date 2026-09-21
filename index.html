@@ -572,6 +572,19 @@
         </div>
 
         <div id="trendTabPanel">
+          <!-- 色线图例（标签下方·居中）：橙线=Temperature，蓝线=Moisture。
+               取色须与 app.js drawChart() 保持一致：#f97316(温度) / #0ea5e9(湿度) -->
+          <div class="flex flex-wrap items-center justify-center gap-y-1 mb-1 text-[10px] text-slate-400">
+            <!-- 内联 margin 兜底：即使 tailwind.css 被缓存（gap-x-5 未生效），两项之间也保有 16px 间距 -->
+            <span class="inline-flex items-center gap-1" style="margin:0 8px">
+              <span style="display:inline-block;width:12px;height:3px;border-radius:9999px;background:#f97316"></span>
+              Temperature
+            </span>
+            <span class="inline-flex items-center gap-1" style="margin:0 8px">
+              <span style="display:inline-block;width:12px;height:3px;border-radius:9999px;background:#0ea5e9"></span>
+              Moisture
+            </span>
+          </div>
           <div class="relative h-56 sm:h-60">
             <canvas id="trendChart" class="w-full h-full"></canvas>
           </div>
