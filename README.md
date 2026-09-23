@@ -1,6 +1,6 @@
 # SoilPulse Web Dashboard (soil-monitor-dashboard)
 
-The official web dashboard for the SoilPulse soil temperature & moisture sensor. Fully static (`index.html` + `page/`) — no app install and no backend required: the browser connects directly to the device's GATT service (`0xFFE0`) over the **Web Bluetooth API** for live readings, history / daily-average charts, sensor calibration, temperature offset, device naming, firmware OTA updates, and factory reset.
+The official web dashboard for the SoilPulse soil temperature & moisture sensor. Fully static (`index.html` + `page/`) — no app install and no backend required: the browser connects directly to the device's GATT service (random 128-bit UUID `749b53b7-2662-4658-9fb4-e47241816727`, advertised in the scan response) over the **Web Bluetooth API** for live readings, history / daily-average charts, sensor calibration, temperature offset, device naming, firmware OTA updates, and factory reset.
 
 Live: <https://soilpulse.alinfancy.com>
 
@@ -78,7 +78,7 @@ Both pipelines assemble a clean `dist/` from `index.html + page/` before publish
 
 ## 6. GATT protocol quick reference
 
-Service `0xFFE0`; characteristic definitions live in `page/js/config.js` and must stay in sync with `app_att.h` in the firmware repo.
+Service `749b53b7-2662-4658-9fb4-e47241816727` (random 128-bit, carried in the BLE scan response packet); characteristic definitions live in `page/js/config.js` and must stay in sync with `app_att.h` in the firmware repo.
 
 | Characteristic | Ops | Purpose |
 | --- | --- | --- |

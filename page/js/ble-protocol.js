@@ -96,20 +96,17 @@ const BLEProtocol = (() => {
    * @returns {Promise<BluetoothDevice>}
    */
   async function requestSoilDevice() {
-    // 按广播服务 UUID(0xFFE0) + 厂商数据公司码(0x0AFE) 组合过滤设备，与设备名无关（详见下方 filters 注释）
-    // 前提：固件广播包含 Complete List of 16-bit Service UUIDs 段（见 bth_soil_sensor.h 的 SOIL_ADV_SERVICE_UUID16）
+    // 按服务 UUID 过滤设备（随机 128 位，与设备名无关），UUIDS.SERVICE 须与固件
+    // bth_soil_sensor.h 的 SOIL_SERVICE_UUID128 一致。UUID 位于扫描响应包的
+    // Complete List of 128-bit Service UUIDs 段（见 app.c soil_app_build_scan_rsp）：
+    // UUID 与 BTHome 各发一条独立空口包，Web Bluetooth 匹配的是广播包+扫描响应包
+    // 的合并数据，主动扫描必能拿到；主广播包的 BTHome 数据供 HA 等被动扫描器使用。
     return navigator.bluetooth.requestDevice({
-      filters: [
-        // 同一 filter 对象内多条件为 AND：广播服务 UUID(0xFFE0) + 厂商自定义数据公司码(0x0AFE)，
-        // 与设备名完全无关——设备任意改名都仍可被搜到（无需同步维护前端配置）。
-        // 0x0AFE 是扫描响应包里的厂商数据公司码（见 app.c soil_app_build_scan_rsp：04 FF FE 0A 01），
-        // 常量定义在 config.js 的 MANUFACTURER_COMPANY_CODE。
-        // 注意：Bluefy(iOS WebKit) 对 manufacturerData 过滤的完整支持不确定，需真机验证；
-        // 若 iOS 上搜不到设备，退化为 { services:[UUIDS.SERVICE], namePrefix: DEVICE_NAME } 即可。
-        { services: [UUIDS.SERVICE] }
-      ],
-      optionalServices: [UUIDS.OTA_SERVICE, UUIDS.DIS_SERVICE]
-    });
+  filters: [{
+  namePrefix: 'SoilPulse'
+}],
+  optionalServices: [UUIDS.OTA_SERVICE,UUIDS.SERVICE]
+});
   }
 
   /**

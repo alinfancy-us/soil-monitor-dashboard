@@ -7,16 +7,18 @@ const SoilPulseConfig = (() => {
 
   // 前端页面版本号：与 index.html 的 <script src="...?v=X"> 保持一致，每次功能变更递增。
   // 页面底部会显示该值，便于现场确认浏览器实际加载的是哪一版前端（排查缓存问题）
-  const PAGE_VERSION = '1.3.50';
+  const PAGE_VERSION = '1.3.51';
 
   // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致（固件改名须保留此前缀）。
   // 它参与 requestDevice 的过滤（与 services UUID 同一 filter 内 AND 匹配），
-  // 用于排除周围其他同样广播 0xFFE0 服务的设备；固件改名后须同步更新此处，否则网页搜不到设备
+  // 用于排除周围其他同样广播 SoilPulse 服务的设备；固件改名后须同步更新此处，否则网页搜不到设备
   const DEVICE_NAME = 'SoilPulse';
 
   // GATT UUID：使用 128 位完整小写字符串，防止 Bluefy/iOS 序列化失败
+  // SERVICE 为随机 128 位主服务 UUID（固件 bth_soil_sensor.h 的 SOIL_SERVICE_UUID128，
+  // 广播时位于扫描响应包的 Complete List of 128-bit Service UUIDs 段）；各特征仍为 16 位展开
   const UUIDS = {
-    SERVICE: '0000ffe0-0000-1000-8000-00805f9b34fb',
+    SERVICE: '749b53b7-2662-4658-9fb4-e47241816727',
     DATA_CHAR: '0000ffe1-0000-1000-8000-00805f9b34fb',
     TIME_CHAR: '0000ffe2-0000-1000-8000-00805f9b34fb',
     DAILY_CHAR: '0000ffe3-0000-1000-8000-00805f9b34fb',
@@ -100,7 +102,7 @@ const SoilPulseConfig = (() => {
   //       WebKit 平台 gattserverdisconnected 事件不可靠）。
   //       DEBUG_ENABLED=false 发版：log() 仅输出 console.debug，关闭后现场零调试输出；
   //       POLL_ENABLED=true 发版：轮询兜底必须常开。
-  const DEBUG_ENABLED = false;
+  const DEBUG_ENABLED = true;
   const POLL_ENABLED = true;
   const POLL_INTERVAL = 5000;
 
