@@ -359,22 +359,36 @@ const BLEProtocol = (() => {
    * @param {BluetoothRemoteGATTCharacteristic} refreshChar
    */
   /**
-   * 读取 0xFFEB latest 特征值（9 字节：epoch u32 + 温度 s16 + 湿度 u16 + 电量 u8，小端）。
+   * 读取 0xFFEB latest 特征值（10 字节：epoch u32 + 温度 s16 + 湿度 u16 + 电量 u8 + measure_seq u8，小端）。
    * v2 规格：refresh 一次性测量不写历史，Refresh 按钮的实时值从这里轮询读取；
+   * measure_seq 单调递增测量序号（新固件），前端以"序号变化"识别新测量免跳秒；
+   * 旧固件只有 9 字节（无序号）时 measureSeq 为 undefined，前端回退"时间戳变化"判断。
    * 旧固件无此特征（latestChar 为 null）或读取失败时返回 null，由调用方超时兜底。
    * @param {BluetoothRemoteGATTCharacteristic|null} latestChar
-   * @returns {Promise<{timestamp:number,temp:number,hum:number,batt:number}|null>}
+   * @returns {Promise<{timestamp:number,temp:number,hum:number,batt:number,measureSeq?:number}|null>}
    */
-  async function readLatest(latestChar) {
-    if (!latestChar) return null;
-    const view = await latestChar.readValue();
-    if (view.byteLength < RECORD_SIZE) return null;
+  /**
+   * 解析 0xFFEB latest 原始 DataView（10 字节：epoch u32 + 温度 s16 + 湿度 u16 + 电量 u8 + measure_seq u8）为测量记录对象；
+   * 旧固件仅 9 字节（无序号）时 measureSeq 为 undefined，调用方回退时间戳判断。
+   * readLatest() 与 notify 回调（characteristicvaluechanged）共用此解析。
+   * @param {DataView} view
+   * @returns {{timestamp:number,temp:number,hum:number,batt:number,measureSeq?:number}|null}
+   */
+  function parseLatestValue(view) {
+    if (!view || view.byteLength < RECORD_SIZE) return null;
     return {
       timestamp: view.getUint32(0, true),
       temp: view.getInt16(4, true) / 100,
       hum: view.getUint16(6, true) / 100,
       batt: view.getUint8(8),
+      measureSeq: view.byteLength >= 10 ? view.getUint8(9) : undefined,
     };
+  }
+
+  async function readLatest(latestChar) {
+    if (!latestChar) return null;
+    const view = await latestChar.readValue();
+    return parseLatestValue(view);
   }
 
   async function sendRefresh(refreshChar) {
@@ -624,6 +638,7 @@ const BLEProtocol = (() => {
     sendFactoryReset,
     sendHumCalib,
     sendRefresh,
+    parseLatestValue,
     readLatest,
     readTempOffset,
     sendTempOffset,
