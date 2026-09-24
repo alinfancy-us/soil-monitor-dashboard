@@ -97,10 +97,12 @@ const BLEProtocol = (() => {
    */
   async function requestSoilDevice() {
     // 按服务 UUID 过滤设备（随机 128 位，与设备名无关），UUIDS.SERVICE 须与固件
-    // bth_soil_sensor.h 的 SOIL_SERVICE_UUID128 一致。UUID 位于扫描响应包的
+    // app_config.h 的 SOIL_SERVICE_UUID128 一致。UUID 位于扫描响应包的
     // Complete List of 128-bit Service UUIDs 段（见 app.c soil_app_build_scan_rsp）：
     // UUID 与 BTHome 各发一条独立空口包，Web Bluetooth 匹配的是广播包+扫描响应包
-    // 的合并数据，主动扫描必能拿到；主广播包的 BTHome 数据供 HA 等被动扫描器使用。
+    // 的合并数据；主广播包的 BTHome 数据供 HA 等被动扫描器使用。
+    // namePrefix 为过渡期兜底：兼容尚未刷新固件（无 128 位 UUID 广播）的旧设备；
+    // 全部设备刷新固件后可移除该 filter，恢复按 UUID 精确识别
     return navigator.bluetooth.requestDevice({
   filters: [{
   namePrefix: 'SoilPulse'
@@ -142,10 +144,15 @@ const BLEProtocol = (() => {
     const dataChar = await service.getCharacteristic(UUIDS.DATA_CHAR);
     const timeChar = await service.getCharacteristic(UUIDS.TIME_CHAR);
 
-    // 同步时间戳（设备端会在写时间后切换回省电连接参数，见固件 soil_time_sync_onWrite）
+    // 同步时间戳 + 时区（6 字节 = epoch u32 LE + 时区偏移 s16 LE）。
+    // tz 取 getTimezoneOffset()：UTC 以西为正（北京时间 UTC+8 = -480），
+    // 固件用它把日均值的切天分界从 UTC 0 点改为本地 0 点；
+    // 旧固件只取前 4 字节（按 UTC 切天），向后兼容不中断
     const now = Math.floor(Date.now() / 1000);
+    const tzMin = new Date().getTimezoneOffset();
     await timeChar.writeValue(Uint8Array.of(
-      now & 0xff, (now >>> 8) & 0xff, (now >>> 16) & 0xff, (now >>> 24) & 0xff
+      now & 0xff, (now >>> 8) & 0xff, (now >>> 16) & 0xff, (now >>> 24) & 0xff,
+      tzMin & 0xff, (tzMin >> 8) & 0xff
     ));
 
     // 监听 Notify
