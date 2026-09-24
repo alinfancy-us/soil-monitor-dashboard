@@ -1152,6 +1152,12 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         syncBatteryPill();
         state.characteristic = null;   // 中文：显式置空，与 device 双 null 闭合幂等条件
         state.dailyChar = null;
+        // 中文：断开时移除 0xFFEB notify 监听，避免重连复用特征对象时叠加监听导致 notify 重复处理
+        if (state.latestChar && state.latestNotifySubscribed) {
+          state.latestChar.removeEventListener('characteristicvaluechanged', onLatestNotified);
+          state.latestNotifySubscribed = false;
+        }
+        state.lastNotifiedRec = null;   // 清理历史 notify 基线，重连后重新建立
         state.latestChar = null;
         state.devNameChar = null;
         state.device = null;   // 释放旧 device 引用：断链后 connectBtn/visibilitychange 判断自然失效
@@ -1361,6 +1367,14 @@ function clearConnectError() {
        state.fwVersion = fwVersion;
        checkFirmwareUpdate();
 
+       // 连接已建立且特征/notify 就绪：立即使按钮可用（校准/历史数据设备端持久化，
+       // web 只做展示，延后加载不影响正确性——Refresh 时固件返回正常值）
+       setStatus('connected');
+       clearConnectError();
+       log('Connected & Listening for updates.');
+       startPolling();
+
+       // —— 以下为数据加载，串行后台执行，不阻塞按钮 ready ——
        // 读取设备当前温度偏移，同步设置面板滑杆；旧固件无此特征则保持 0 并提示不支持
        if (tempOffsetChar) {
          try {
@@ -1393,11 +1407,6 @@ function clearConnectError() {
            log(`Restored newer latest measurement from 0xFFEB (${formatTime(devLatest.timestamp)})`);
          }
        } catch (_) { /* latest 读取失败不影响连接流程 */ }
-
-       setStatus('connected');
-       clearConnectError();   // 连接成功，清除历史失败提示
-       log('Connected & Listening for updates.');
-       startPolling();
 
        // 读取设备已保存的校准状态（0xFFE9），在干/湿校准点展示"已校准"提示（只提示存在性，不展示具体数值）
        await refreshCalibHints();
