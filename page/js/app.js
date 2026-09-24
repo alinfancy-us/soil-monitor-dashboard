@@ -135,6 +135,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      calibAttempt: loadCalibAttempts(),   // 中文：各校准点最近一次尝试结果（localStorage 持久化，刷新后仍生效）
      lastRecords: null,
      lastDailyRecords: null,
+     lastNotifiedRec: null,       // 最近一次 0xFFEB notify 收到的测量（固件主动推送，不占 GATT 锁）
+     latestNotifySubscribed: false, // latest 特征 notify 是否已订阅成功（失败回退轮询读）
      dailyMetric: 'temp',
      tempUnit: 'F',
    };
@@ -1338,6 +1340,20 @@ function clearConnectError() {
        state.calibChar = calibChar;
        state.refreshChar = refreshChar;
        state.latestChar = latestChar;
+       // 订阅 0xFFEB latest 通知（新固件）：测量完成固件主动推送，前端免轮询、不占 GATT 锁；
+       // 订阅失败（旧固件无 notify / 系统异常）标记 false，waitForLatestMeasurement 回退原轮询读（gattBusy 逻辑不变）
+       state.latestNotifySubscribed = false;
+       state.lastNotifiedRec = null;
+       if (latestChar) {
+         try {
+           await gattOp(() => latestChar.startNotifications(), 'subscribe latest notify (0xFFEB)');
+           latestChar.addEventListener('characteristicvaluechanged', onLatestNotified);
+           state.latestNotifySubscribed = true;
+           log('Latest notify subscribed (0xFFEB)');
+         } catch (err) {
+           log('Latest notify subscribe failed, fallback to polling: ' + err.message);
+         }
+       }
        state.tempOffsetChar = tempOffsetChar;
        state.calibStatusChar = calibStatusChar;
        state.devNameChar = devNameChar;
@@ -1919,15 +1935,31 @@ The device will measure the current probe state first, then apply the calibratio
 
   const REFRESH_POLL_INTERVAL_MS = 1000;
 
-  // 轮询 0xFFEB latest，直到出现比 prev（点击时刻的展示水位）更新的时间戳；超时/断连返回 null。
-  // 与主轮询共用同一把 GATT 互斥锁（state.gattBusy）：主轮询未完成时本拍跳过，本读进行中时
-  // 主轮询让行——两路轮询不再并发 GATT 操作（操作重叠会让浏览器栈抛 NetworkError、
-  // 设备端测量期间响应变慢导致排队超时）
+  // 0xFFEB latest 通知回调：解析固件主动推送的最新测量，更新内存水位（不占 GATT 锁）
+  function onLatestNotified(event) {
+    const rec = BLEProtocol.parseLatestValue(event.target.value);
+    if (rec) state.lastNotifiedRec = rec;
+  }
+
+  // 等待最新测量：优先走 notify（新固件，固件测量完成主动推送 latest）——只查内存 lastNotifiedRec，
+  // 不占 GATT 锁、不跳拍，瞬时响应；notify 未订阅（旧固件/订阅失败）回退原轮询读（保留 gattBusy 逻辑）。
   async function waitForLatestMeasurement(prev) {
     const deadline = Date.now() + REFRESH_RESULT_TIMEOUT_MS;
+    const interval = state.latestNotifySubscribed ? 100 : REFRESH_POLL_INTERVAL_MS;
     while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, REFRESH_POLL_INTERVAL_MS));
+      await new Promise((r) => setTimeout(r, interval));
       if (!state.device?.gatt.connected) return null;
+      // notify 已订阅：只查固件推送的最新值（内存，瞬时、不抢锁）
+      if (state.latestNotifySubscribed) {
+        const rec = state.lastNotifiedRec;
+        if (rec && (!prev || (
+            (rec.measureSeq !== undefined && prev.measureSeq !== undefined)
+              ? rec.measureSeq !== prev.measureSeq
+              : rec.timestamp !== prev.timestamp
+          ))) return rec;
+        continue;
+      }
+      // 回退路径：原轮询读 latest（保留 gattBusy 互斥逻辑）
       if (state.gattBusy) continue;   // 主轮询正在读：本拍跳过，下一拍再看
       state.gattBusy = true;
       try {
@@ -1968,7 +2000,7 @@ The device will measure the current probe state first, then apply the calibratio
       log('Refresh command sent (0xFFE7), measuring now');
       // 水位基线取"当前展示值"：0xFFEB 恢复的上次一次性测量值可能比历史最后一条更新，
       // 且主轮询/通知也可能在等待期间刷新 latestShown——以点击时刻快照为基线最稳
-      const prev = state.latestShown
+      const prev = state.lastNotifiedRec ?? state.latestShown
         ?? (state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null);
       const rec = await waitForLatestMeasurement(prev);
       if (rec) {

@@ -367,10 +367,15 @@ const BLEProtocol = (() => {
    * @param {BluetoothRemoteGATTCharacteristic|null} latestChar
    * @returns {Promise<{timestamp:number,temp:number,hum:number,batt:number,measureSeq?:number}|null>}
    */
-  async function readLatest(latestChar) {
-    if (!latestChar) return null;
-    const view = await latestChar.readValue();
-    if (view.byteLength < RECORD_SIZE) return null;
+  /**
+   * 解析 0xFFEB latest 原始 DataView（10 字节：epoch u32 + 温度 s16 + 湿度 u16 + 电量 u8 + measure_seq u8）为测量记录对象；
+   * 旧固件仅 9 字节（无序号）时 measureSeq 为 undefined，调用方回退时间戳判断。
+   * readLatest() 与 notify 回调（characteristicvaluechanged）共用此解析。
+   * @param {DataView} view
+   * @returns {{timestamp:number,temp:number,hum:number,batt:number,measureSeq?:number}|null}
+   */
+  function parseLatestValue(view) {
+    if (!view || view.byteLength < RECORD_SIZE) return null;
     return {
       timestamp: view.getUint32(0, true),
       temp: view.getInt16(4, true) / 100,
@@ -378,6 +383,12 @@ const BLEProtocol = (() => {
       batt: view.getUint8(8),
       measureSeq: view.byteLength >= 10 ? view.getUint8(9) : undefined,
     };
+  }
+
+  async function readLatest(latestChar) {
+    if (!latestChar) return null;
+    const view = await latestChar.readValue();
+    return parseLatestValue(view);
   }
 
   async function sendRefresh(refreshChar) {
@@ -627,6 +638,7 @@ const BLEProtocol = (() => {
     sendFactoryReset,
     sendHumCalib,
     sendRefresh,
+    parseLatestValue,
     readLatest,
     readTempOffset,
     sendTempOffset,

@@ -11,7 +11,7 @@
   <!-- 中文：Tailwind 已改为构建期编译的静态 CSS（见 tailwind.config.js / build_css.sh），
        不再依赖 cdn.tailwindcss.com 运行时脚本；类名变更后须重跑 ./build_css.sh 并递增版本号。
        本链接的 ?v= 与下方三个业务脚本一致，CI 打包时会统一替换为发布版本号（见 .github/workflows） -->
-  <link rel="stylesheet" href="page/css/tailwind.css?v=1.3.54">
+  <link rel="stylesheet" href="page/css/tailwind.css?v=1.3.55">
   <style>
     :root {
       color-scheme: light;
@@ -883,8 +883,8 @@
        四处（tailwind.css 链接 + 三个业务脚本）统一使用同一版本号，CI 打包时自动从
        git tag / commit 哈希同步替换（含 CSS 链接），本地开发请四处一并递增，
        否则浏览器会继续运行旧版 CSS/JS -->
-  <script src="page/js/config.js?v=1.3.54"></script>
-  <script src="page/js/ble-protocol.js?v=1.3.54"></script>
-  <script src="page/js/app.js?v=1.3.54"></script>
+  <script src="page/js/config.js?v=1.3.55"></script>
+  <script src="page/js/ble-protocol.js?v=1.3.55"></script>
+  <script src="page/js/app.js?v=1.3.55"></script>
 </body>
 </html>
