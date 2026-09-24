@@ -7,7 +7,7 @@ const SoilPulseConfig = (() => {
 
   // 前端页面版本号：与 index.html 的 <script src="...?v=X"> 保持一致，每次功能变更递增。
   // 页面底部会显示该值，便于现场确认浏览器实际加载的是哪一版前端（排查缓存问题）
-  const PAGE_VERSION = '1.3.51';
+  const PAGE_VERSION = '1.3.52';
 
   // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致（固件改名须保留此前缀）。
   // 它参与 requestDevice 的过滤（与 services UUID 同一 filter 内 AND 匹配），
@@ -19,6 +19,9 @@ const SoilPulseConfig = (() => {
   // 广播时位于扫描响应包的 Complete List of 128-bit Service UUIDs 段）；各特征仍为 16 位展开
   const UUIDS = {
     SERVICE: '749b53b7-2662-4658-9fb4-e47241816727',
+    // 旧固件兜底主服务（标准 16 位 FFE0）：旧固件 GATT 表无随机 128 位主服务，
+    // 业务特征 FFE1/FFE2/... 挂在 FFE0 服务下；连接后先试 SERVICE，失败自动降级到此处
+    FFE0_SERVICE: '0000ffe0-0000-1000-8000-00805f9b34fb',
     DATA_CHAR: '0000ffe1-0000-1000-8000-00805f9b34fb',
     TIME_CHAR: '0000ffe2-0000-1000-8000-00805f9b34fb',
     DAILY_CHAR: '0000ffe3-0000-1000-8000-00805f9b34fb',

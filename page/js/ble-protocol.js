@@ -95,19 +95,31 @@ const BLEProtocol = (() => {
    * 阶段1：仅弹出设备选择器（不设超时——用户挑设备时长不受限）。
    * @returns {Promise<BluetoothDevice>}
    */
-  async function requestSoilDevice() {
-    // 按服务 UUID 过滤设备（随机 128 位，与设备名无关），UUIDS.SERVICE 须与固件
-    // bth_soil_sensor.h 的 SOIL_SERVICE_UUID128 一致。UUID 位于扫描响应包的
-    // Complete List of 128-bit Service UUIDs 段（见 app.c soil_app_build_scan_rsp）：
-    // UUID 与 BTHome 各发一条独立空口包，Web Bluetooth 匹配的是广播包+扫描响应包
-    // 的合并数据，主动扫描必能拿到；主广播包的 BTHome 数据供 HA 等被动扫描器使用。
-    return navigator.bluetooth.requestDevice({
-  filters: [{
-  namePrefix: 'SoilPulse'
-}],
-  optionalServices: [UUIDS.OTA_SERVICE,UUIDS.SERVICE]
-});
-  }
+async function requestSoilDevice() {
+  // filters 数组各元素之间是 OR：设备广播了其中任意一个条件即匹配。
+  // 单个 filter 内部的 services 数组是 AND（须同时广播所有列出服务），所以
+  // 多个 UUID 绝不能塞进同一个 filter 的 services 里——设备不会同时广播 OTA 与主服务。
+  // - UUIDS.SERVICE：随机 128 位主服务（新固件），位于扫描响应包的 Complete List of
+  //   128-bit Service UUIDs 段（见 app.c soil_app_build_scan_rsp），与 BTHome 各发
+  //   一条独立空口包，Web Bluetooth 匹配的是广播包+扫描响应包的合并数据，主动扫描必能拿到；
+  //   主广播包的 BTHome 数据供 HA 等被动扫描器使用。
+  // - UUIDS.OTA_SERVICE：Telink OTA 服务（仅 BLE_OTA_SERVER_ENABLE=1 的固件广播）。
+  // - UUIDS.FFE0_SERVICE：旧固件兜底（GATT 表无 128 位主服务，广播标准 FFE0 服务），
+  //   用于先连接旧固件设备、再经网页 OTA 升级到新固件的场景。
+  // - namePrefix：最终名字兜底（如极旧固件不广播任何上述服务 UUID），不需要可删。
+  // optionalServices 是连接后可访问的白名单（与过滤无关），把之后会 getPrimaryService
+  // 的服务全部列上，取并集即可。
+  return navigator.bluetooth.requestDevice({
+    filters: [
+      { services: [UUIDS.SERVICE] },                  // 主服务（随机 128 位，扫描响应包携带）
+      { services: [UUIDS.OTA_SERVICE] },              // Telink OTA 服务
+      { services: [UUIDS.FFE0_SERVICE] },             // 旧固件兜底（标准 FFE0 服务）
+      { namePrefix: DEVICE_NAME },                    // 名字兜底（兼容极旧固件）
+    ],
+    optionalServices: [UUIDS.SERVICE, UUIDS.FFE0_SERVICE, UUIDS.OTA_SERVICE, UUIDS.DIS_SERVICE],
+  });
+}
+
 
   /**
    * 阶段2 主体：gatt.connect + 服务/特征发现 + 时间同步 + 订阅 Notify（原 connectDevice 内容）。
@@ -138,15 +150,33 @@ const BLEProtocol = (() => {
    * 由 finishConnectInner 在 gatt.connect() 成功后调用（带 INIT_TIMEOUT_MS 超时）。
    */
   async function initAfterConnect(server, device, onNotification) {
-    const service = await server.getPrimaryService(UUIDS.SERVICE);
+    // 主服务发现（新旧固件自动兼容）：
+    // 新固件业务特征挂在随机 128 位主服务（UUIDS.SERVICE，扫描响应包携带）下；
+    // 旧固件 GATT 表无该服务，特征 FFE1/FFE2/... 挂在标准 FFE0 服务下。
+    // 先试 128 位主服务，抛 NotFoundError（浏览器对不存在服务的固定错误，即
+    // "No Services matching UUID ... found in Device"）时自动降级到 FFE0，
+    // 业务特征 16 位 UUID 新旧固件一致，后续代码无需区分固件版本。
+    let service;
+    try {
+      service = await server.getPrimaryService(UUIDS.SERVICE);
+    } catch (e) {
+      console.warn('[BLE] 128-bit service not found, falling back to FFE0 (old firmware):', e);
+      service = await server.getPrimaryService(UUIDS.FFE0_SERVICE);
+    }
     const dataChar = await service.getCharacteristic(UUIDS.DATA_CHAR);
     const timeChar = await service.getCharacteristic(UUIDS.TIME_CHAR);
 
-    // 同步时间戳（设备端会在写时间后切换回省电连接参数，见固件 soil_time_sync_onWrite）
-    const now = Math.floor(Date.now() / 1000);
-    await timeChar.writeValue(Uint8Array.of(
-      now & 0xff, (now >>> 8) & 0xff, (now >>> 16) & 0xff, (now >>> 24) & 0xff
-    ));
+    // 同步时间戳（设备端会在写时间后切换回省电连接参数，见固件 soil_time_sync_onWrite）。
+    // 非关键步骤：极旧固件可能无 0xFFE2 时间同步特征或暂不接受写入，
+    // 失败只记录日志不中断连接（历史时间戳会由设备端下次测量兜底）
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      await timeChar.writeValue(Uint8Array.of(
+        now & 0xff, (now >>> 8) & 0xff, (now >>> 16) & 0xff, (now >>> 24) & 0xff
+      ));
+    } catch (e) {
+      console.warn('[BLE] time sync failed (non-fatal):', e);
+    }
 
     // 监听 Notify
     if (dataChar.properties.notify || dataChar.properties.indicate) {
