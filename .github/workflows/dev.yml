@@ -239,6 +239,17 @@ jobs:
       - name: Build Tailwind CSS
         run: ./build_css.sh
 
+      # 生产/预览渠道压缩三个业务 JS（config/ble-protocol/app），体积约省 59%。
+      # 与 deploy.yml 保持一致：放在 PAGE_VERSION / DEBUG_ENABLED 的 sed 之后执行，
+      # 逐个文件独立 minify，不重命名跨文件全局（BLEProtocol / config 常量）。
+      # gzip/brotli 由 GitHub Pages 对文本资源自动处理，无需手工预压缩 .gz。
+      - name: Minify JS (esbuild)
+        run: |
+          npx -y esbuild page/js/config.js page/js/ble-protocol.js page/js/app.js \
+            --minify --outdir=page/js --allow-overwrite
+          echo "JS minify done:"
+          wc -c page/js/config.js page/js/ble-protocol.js page/js/app.js
+
       - name: Assemble clean dist
         run: |
           mkdir -p dist
