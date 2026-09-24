@@ -1932,7 +1932,12 @@ The device will measure the current probe state first, then apply the calibratio
       state.gattBusy = true;
       try {
         const rec = await withGattTimeout(BLEProtocol.readLatest(state.latestChar), 'Refresh poll read (0xFFEB)');
-        if (rec && (!prev || rec.timestamp !== prev.timestamp)) return rec;
+        // 判据优先用 measure_seq 序号（新固件，免跳秒）；序号缺失（旧固件/历史记录）回退时间戳变化
+        if (rec && (!prev || (
+            (rec.measureSeq !== undefined && prev.measureSeq !== undefined)
+              ? rec.measureSeq !== prev.measureSeq
+              : rec.timestamp !== prev.timestamp
+          ))) return rec;
       } catch (err) {
         // 单次读失败（射频瞬态等）继续重试，直到超时兜底
       } finally {
