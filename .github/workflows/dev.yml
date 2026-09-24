@@ -3,9 +3,6 @@ name: github-pages-deploy
 on:
   # push 到 main / dev 分支时自动部署 dev 预览（fw_url 为空，固件走 vars.FW_TAG 回退）
   push:
-    branches:
-      - main
-      - dev
   # 保留手动触发：可临时指定 fw_url / fw_notes 覆盖默认固件来源
   workflow_dispatch:
     inputs:
