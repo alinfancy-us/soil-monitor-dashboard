@@ -2038,13 +2038,16 @@ The device will measure the current probe state first, then apply the calibratio
     refreshBusy = true;
     setRefreshUiBusy(true);
     try {
-      await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)');
-      log('Refresh command sent (0xFFE7), measuring now');
+      // 根治时序竞态：先挂 notify 监听（waitForLatestMeasurement 的 notify 路径同步 addEventListener），
+      // 再发写命令——固件 push 无论多早都在监听挂载之后，不会漏收导致干等 6s 超时。
       // 水位基线取"当前展示值"：0xFFEB 恢复的上次一次性测量值可能比历史最后一条更新，
       // 且主轮询/通知也可能在等待期间刷新 latestShown——以点击时刻快照为基线最稳
       const prev = state.lastNotifiedRec ?? state.latestShown
         ?? (state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null);
-      const rec = await waitForLatestMeasurement(prev);
+      const waitPromise = waitForLatestMeasurement(prev);
+      await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)');
+      log('Refresh command sent (0xFFE7), measuring now');
+      const rec = await waitPromise;
       if (rec) {
         applyLatestRecord(rec);
         log('Refresh: latest measurement updated (0xFFEB)');
