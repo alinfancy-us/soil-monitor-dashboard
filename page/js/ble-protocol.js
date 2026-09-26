@@ -252,7 +252,7 @@ const BLEProtocol = (() => {
     if (val.byteLength < 1) {
       throw new Error('invalid temperature offset length');
     }
-    return new DataView(val.buffer, val.byteOffset, val.byteLength).getInt8(0);
+    return new DataView(val.buffer, val.byteOffset, val.byteLength).getInt16(0, true);  // 小端 int16，0.01℃
   }
 
   /**
@@ -265,8 +265,8 @@ const BLEProtocol = (() => {
       throw new Error('temperature offset characteristic unavailable');
     }
     const clamped = Math.max(TEMP_OFFSET.MIN_X10, Math.min(TEMP_OFFSET.MAX_X10, Math.round(offsetX10)));
-    const v = new Uint8Array(1);
-    new DataView(v.buffer).setInt8(0, clamped);
+    const v = new Uint8Array(2);
+    new DataView(v.buffer).setInt16(0, clamped, true);  // 小端 int16，0.01℃
     await tempOffsetChar.writeValue(v);
   }
 
@@ -381,7 +381,7 @@ const BLEProtocol = (() => {
       temp: view.getInt16(4, true) / 100,
       hum: view.getUint16(6, true) / 100,
       batt: view.getUint8(8),
-      measureSeq: view.byteLength >= 10 ? view.getUint8(9) : undefined,
+      measureSeq: view.getUint8(9),   // 0xFFEB latest 固定 10 字节，measure_seq 必存在（产品锁新固件）
     };
   }
 
