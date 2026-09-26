@@ -1971,7 +1971,9 @@ The device will measure the current probe state first, then apply the calibratio
         // 判据：序号优先、时间戳兜底，识别"这次"测量（防止把点击前的旧缓存值当结果返回）
         if (rec && (!prev || (
             (rec.measureSeq !== undefined && prev.measureSeq !== undefined)
-              ? rec.measureSeq !== prev.measureSeq
+              ? (rec.measureSeq !== prev.measureSeq ||
+                 rec.temp !== prev.temp ||
+                 rec.hum !== prev.hum)
               : rec.timestamp !== prev.timestamp
           ))) finish(rec);
       };
@@ -1997,7 +1999,9 @@ The device will measure the current probe state first, then apply the calibratio
         // 判据优先用 measure_seq 序号（新固件，免跳秒）；序号缺失（旧固件/历史记录）回退时间戳变化
         if (rec && (!prev || (
             (rec.measureSeq !== undefined && prev.measureSeq !== undefined)
-              ? rec.measureSeq !== prev.measureSeq
+              ? (rec.measureSeq !== prev.measureSeq ||
+                 rec.temp !== prev.temp ||
+                 rec.hum !== prev.hum)
               : rec.timestamp !== prev.timestamp
           ))) return rec;
       } catch (err) {
