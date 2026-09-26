@@ -163,7 +163,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      temp: {
        key: 'temp',
        title: 'Temperature',
-       color: '#f97316',
+       color: '#f59e0b',
        formatValue: v => `${v.toFixed(1)}${tempUnitSymbol()}`,
        axisFormatter: v => v.toFixed(1),
        range: null,
@@ -682,7 +682,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
          <tr class="border-b border-slate-50 last:border-0">
            <td class="py-2 pr-2 text-slate-400">${i + 1}</td>
            <td class="py-2 pr-2">${formatTime(r.timestamp)}</td>
-           <td class="py-2 pr-2 text-orange-500 font-medium">${fmtTemp(r.temp)}</td>
+           <td class="py-2 pr-2 text-amber-500 font-medium">${fmtTemp(r.temp)}</td>
            <td class="py-2 pr-2 text-sky-500 font-medium">${r.hum.toFixed(1)}%</td>
            <td class="py-2 text-emerald-600 font-medium">${r.batt}%</td>
          </tr>`)
@@ -738,7 +738,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      const hHi = 100;
 
      drawAxisFrame(ctx, padTop, padLeft, padRight, w, plotH);
-     drawYAxisTicks(ctx, tRange.lo, tRange.hi, padTop, plotH, padLeft - 6, 'right', '#f97316', v => v.toFixed(1));
+     drawYAxisTicks(ctx, tRange.lo, tRange.hi, padTop, plotH, padLeft - 6, 'right', '#f59e0b', v => v.toFixed(1));
      drawYAxisTicks(ctx, hLo, hHi, padTop, plotH, w - padRight + 6, 'left', '#0ea5e9', v => v.toFixed(0));
 
      if (records.length < 2) {
@@ -750,7 +750,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        ctx.fillStyle = '#fff';
        ctx.fill();
        ctx.lineWidth = 2;
-       ctx.strokeStyle = '#f97316';
+       ctx.strokeStyle = '#f59e0b';
        ctx.stroke();
        ctx.beginPath();
        ctx.arc(x, yH, compact ? 4 : 5, 0, Math.PI * 2);
@@ -804,7 +804,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      };
 
      plotSeries(hums, '#0ea5e9', hLo, hHi, true);
-     plotSeries(temps, '#f97316', tRange.lo, tRange.hi, false);
+     plotSeries(temps, '#f59e0b', tRange.lo, tRange.hi, false);
 
      ctx.fillStyle = '#94a3b8';
      ctx.font = compact ? '8.5px sans-serif' : '9px sans-serif';
@@ -967,7 +967,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      const active = state.tempUnit;
      (els.tempUnitToggle?.querySelectorAll('.temperature-unit-btn') || []).forEach(btn => {
        const isActive = btn.dataset.unit === active;
-       btn.className = `temperature-unit-btn px-1.5 py-0.5 text-[10px] font-semibold rounded-md transition ${isActive ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`;
+       btn.className = `temperature-unit-btn rounded-md transition font-semibold leading-none ${isActive ? 'bg-amber-500 text-white shadow-sm px-1.5 py-[3px] text-sm' : 'text-slate-500 px-1 py-[3px] text-[10px]'}`;
      });
      try { localStorage.setItem(`${CACHE_PREFIX}tempUnit:v1`, active); } catch (_) {}
      if (els.tempUnitLabel) els.tempUnitLabel.textContent = 'Temperature';   // 单位由 °F/°C 切换器高亮表达，label 不再重复后缀
@@ -1382,7 +1382,7 @@ function clearConnectError() {
            log('Latest notify subscribed (0xFFEB)');
          } catch (err) {
            state.latestNotifySubscribed = false;
-           log('Latest notify subscribe failed, fallback to polling: ' + err.message);
+           log('Latest notify subscribe failed (Refresh 将走读兜底): ' + err.message);
          }
        }
        startPolling();
@@ -1965,75 +1965,62 @@ The device will measure the current probe state first, then apply the calibratio
     if (rec) state.lastNotifiedRec = rec;
   }
 
-  // notify 主路径（新固件）：纯事件回调等本次测量推送——无轮询、不占 GATT 锁。
-  // Refresh 写命令后挂一次性 characteristicvaluechanged 监听，固件推送满足判据即 resolve；
-  // 6s 超时兜底（notify 无 ACK 可能丢包），无论成功/超时都清理监听避免残留。
-  function waitForLatestNotify(prev) {
+  // 单一 notify 路径 + 主动读兜底（产品锁新固件，去掉 polling 回退与 timestamp 兼容）
+  // notify 正常：事件回调命中 seq 即返回（快路径）；notify 丢包/未推：
+  // 等待窗口内每 1s 主动读 0xFFEB 兜底（seq 判据命中即返回），保证 ≤测量耗时+1s 出结果。
+  async function waitForLatestMeasurement(prev) {
     return new Promise((resolve) => {
-      let timer = null;
       let settled = false;
+      let timeoutTimer = null;
+      let readTimer = null;
+
+      // 判据：只认 measure_seq（新固件 10 字节必有序号），去掉 timestamp 回退
+      const hits = (rec) => rec && (!prev ||
+        rec.measureSeq !== prev.measureSeq ||
+        rec.temp !== prev.temp ||
+        rec.hum !== prev.hum);
+
       const finish = (rec) => {
-        if (settled) return;
+        if (settled) return;                  // 幂等
         settled = true;
-        if (timer) clearTimeout(timer);
-        if (state.latestChar) {
-          state.latestChar.removeEventListener('characteristicvaluechanged', onNotified);
-        }
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        if (readTimer) clearTimeout(readTimer);
+        if (state.latestChar) state.latestChar.removeEventListener('characteristicvaluechanged', onNotified);
         resolve(rec);
       };
+
+      // 主入口：notify 到达，seq 命中即返回
       const onNotified = (event) => {
         const rec = BLEProtocol.parseLatestValue(event.target.value);
-        // 判据：序号优先、时间戳兜底，识别"这次"测量（防止把点击前的旧缓存值当结果返回）
-        if (rec && (!prev || (
-            (rec.measureSeq !== undefined && prev.measureSeq !== undefined)
-              ? (rec.measureSeq !== prev.measureSeq ||
-                 rec.temp !== prev.temp ||
-                 rec.hum !== prev.hum)
-              : rec.timestamp !== prev.timestamp
-          ))) finish(rec);
+        if (hits(rec)) finish(rec);
       };
-      timer = setTimeout(() => finish(null), REFRESH_RESULT_TIMEOUT_MS);
+
+      // 读兜底：notify 未到/丢包时，每拍主动读 0xFFEB（尊重 gattBusy，跳拍避让主轮询）
+      const readFallback = async () => {
+        if (settled || !state.device?.gatt.connected) return;
+        if (state.gattBusy) {                 // 主轮询在读：本拍跳避，下一拍再看
+          readTimer = setTimeout(readFallback, REFRESH_POLL_INTERVAL_MS);
+          return;
+        }
+        state.gattBusy = true;
+        try {
+          const rec = await withGattTimeout(BLEProtocol.readLatest(state.latestChar), 'Refresh fallback read (0xFFEB)');
+          if (hits(rec)) { finish(rec); return; }
+        } catch (_) { /* 单次读失败：继续，直到超时兜底 */ }
+        finally {
+          state.gattBusy = false;
+          if (!settled) readTimer = setTimeout(readFallback, REFRESH_POLL_INTERVAL_MS);
+        }
+      };
+
+      timeoutTimer = setTimeout(() => finish(null), REFRESH_RESULT_TIMEOUT_MS);  // 6s 兜底
       if (state.latestChar) {
         state.latestChar.addEventListener('characteristicvaluechanged', onNotified);
+        readFallback();                       // 启动读兜底
       } else {
-        finish(null);   // latest 特征不存在（极旧固件）：立即超时
+        finish(null);                         // 无 0xFFEB：新固件不应发生，直接超时
       }
     });
-  }
-
-  // 回退路径（旧固件/notify 订阅失败）：原轮询读 latest，保留 gattBusy 互斥逻辑
-  async function waitForLatestPolling(prev) {
-    const deadline = Date.now() + REFRESH_RESULT_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, REFRESH_POLL_INTERVAL_MS));
-      if (!state.device?.gatt.connected) return null;
-      if (state.gattBusy) continue;   // 主轮询正在读：本拍跳过，下一拍再看
-      state.gattBusy = true;
-      try {
-        const rec = await withGattTimeout(BLEProtocol.readLatest(state.latestChar), 'Refresh poll read (0xFFEB)');
-        // 判据优先用 measure_seq 序号（新固件，免跳秒）；序号缺失（旧固件/历史记录）回退时间戳变化
-        if (rec && (!prev || (
-            (rec.measureSeq !== undefined && prev.measureSeq !== undefined)
-              ? (rec.measureSeq !== prev.measureSeq ||
-                 rec.temp !== prev.temp ||
-                 rec.hum !== prev.hum)
-              : rec.timestamp !== prev.timestamp
-          ))) return rec;
-      } catch (err) {
-        // 单次读失败（射频瞬态等）继续重试，直到超时兜底
-      } finally {
-        state.gattBusy = false;
-      }
-    }
-    return null;
-  }
-
-  // 等待最新测量：notify 已订阅走纯回调；未订阅（旧固件/订阅失败）回退轮询读（gattBusy 逻辑不变）
-  async function waitForLatestMeasurement(prev) {
-    if (state.latestNotifySubscribed) {
-      return waitForLatestNotify(prev);
-    }
-    return waitForLatestPolling(prev);
   }
 
   els.refreshBtn.addEventListener('click', gattButton('Refresh', async () => {
@@ -2375,20 +2362,20 @@ The device will measure the current probe state first, then apply the calibratio
   function tempOffsetRange() {
     return state.tempUnit === 'F'
       ? { min: TEMP_OFFSET.MIN_F, max: TEMP_OFFSET.MAX_F, step: 1 }
-      : { min: TEMP_OFFSET.MIN_X10, max: TEMP_OFFSET.MAX_X10, step: TEMP_OFFSET.STEP_X10 };
+      : { min: TEMP_OFFSET.MIN_X10 / 10, max: TEMP_OFFSET.MAX_X10 / 10, step: TEMP_OFFSET.STEP_X10 };
   }
   // 数字框当前值 -> 格数（当前单位 0.1 的整数格，非法输入按 0 处理）
   function tempOffsetTicksFromInput() {
     const raw = parseFloat(String(els.tempOffsetInput.value).replace(',', '.'));
     return Number.isFinite(raw) ? Math.round(raw * 10) : 0;
   }
-  // 设备值(0.1℃) -> 格数（显示单位的 0.1）
-  function tempOffsetToTicks(x10) {
-    return state.tempUnit === 'F' ? Math.round(x10 * 9 / 5) : x10;
+  // 设备值(0.01℃=x100) -> 格数（显示单位 0.1）：°F = x100*9/50，°C = x100/10；展示效果与旧 0.1℃ 版一致
+  function tempOffsetToTicks(x100) {
+    return state.tempUnit === 'F' ? Math.round(x100 * 9 / 50) : Math.round(x100 / 10);
   }
-  // 格数 -> 设备值(0.1℃)，四舍五入对齐 0.1℃ 网格
+  // 格数 -> 设备值(0.01℃=x100)：°F = ticks*50/9，°C = ticks*10；0.01℃ 精度下 °F 任意 0.1 值均可精确落位
   function ticksToTempOffset(ticks) {
-    return state.tempUnit === 'F' ? Math.round(ticks * 5 / 9) : ticks;
+    return state.tempUnit === 'F' ? Math.round(ticks * 50 / 9) : ticks * 10;
   }
 
   // 统一写入口：±0.1 微调 / 手动输入规范化 / 单位切换回显 共用——按“当前单位 0.1”
@@ -2416,11 +2403,11 @@ The device will measure the current probe state first, then apply the calibratio
   els.dailyMetricTempBtn.addEventListener('click', () => setDailyMetric('temp'));
   els.dailyMetricHumBtn.addEventListener('click', () => setDailyMetric('hum'));
   els.dailyMetricBattBtn.addEventListener('click', () => setDailyMetric('batt'));
-  (els.tempUnitToggle?.querySelectorAll('.temperature-unit-btn') || []).forEach(btn => {
-    btn.addEventListener('click', () => {
-      state.tempUnit = btn.dataset.unit === 'C' ? 'C' : 'F';
-      updateTempUnitUI();
-    });
+  // 单位切换：点击切换器任意位置（含按钮、灰底间隙、以及当前激活的单位）都翻转单位（°F ↔ °C）。
+  // 用户期望“按到上面就切换”——即使当前在 °C，按到 °C 上也切回 °F，故统一 toggle，不做“切到该按钮单位”的区分。
+  els.tempUnitToggle?.addEventListener('click', () => {
+    state.tempUnit = state.tempUnit === 'C' ? 'F' : 'C';
+    updateTempUnitUI();
   });
   els.mainTabDataBtn.addEventListener('click', () => switchMainTab('data'));
   els.mainTabGuideBtn.addEventListener('click', () => switchMainTab('guide'));
