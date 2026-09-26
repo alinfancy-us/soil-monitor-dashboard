@@ -269,6 +269,13 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     }
   }
 
+  // 连接/断开过程锁定 Connect 按钮：连接建立中或断开进行中置灰，避免过程中重复点击
+  function setConnectBusy(busy) {
+    els.connectBtn.disabled = busy;
+    els.connectBtn.classList.toggle('opacity-40', busy);
+    els.connectBtn.classList.toggle('cursor-not-allowed', busy);
+  }
+
   // 失败后才露出重试按钮；hidden 与 flex 互斥，需成对切换
   function setOtaRetryVisible(show) {
     els.otaRetryBtn.classList.toggle('hidden', !show);
@@ -1147,6 +1154,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         stopPolling();         // 先停定时器：防止清理期间轮询再跑一拍（断开后 GATT 报错噪音的来源）
         cancelRefreshWait();   // 若 refresh 正在等待测量结果，断连后立即恢复按钮
         state.otaRunning = false;
+        setConnectBusy(false);   // 断开完成：解锁 Connect 按钮
         setOtaUiLock(false);
         setStatus('disconnected');
         syncBatteryPill();
@@ -1307,6 +1315,7 @@ function clearConnectError() {
 
      const token = ++connectToken;
      clearConnectError();   // 新的连接尝试开始，清除上一次失败的红字提示
+     setConnectBusy(true);   // 进入连接流程：锁定 Connect 按钮，防止连接过程中重复点击
      try {
        setStatus('connecting');
        log('Requesting Bluetooth Device...');
@@ -1348,6 +1357,21 @@ function clearConnectError() {
        state.latestChar = latestChar;
        // 订阅 0xFFEB latest 通知（新固件）：测量完成固件主动推送，前端免轮询、不占 GATT 锁；
        // 订阅失败（旧固件无 notify / 系统异常）标记 false，waitForLatestMeasurement 回退原轮询读（gattBusy 逻辑不变）
+       state.tempOffsetChar = tempOffsetChar;
+       state.calibStatusChar = calibStatusChar;
+       state.devNameChar = devNameChar;
+       state.otaChar = otaChar;
+       state.fwVersion = fwVersion;
+       checkFirmwareUpdate();
+
+       // 设备已连上 GATT 即置 connected：按钮立即可用；notify 订阅移后台，不再阻塞按钮 ready
+       setStatus('connected');
+       clearConnectError();
+       setConnectBusy(false);   // 连接成功：解锁 Connect 按钮（此时才允许点击 Disconnect）
+       log('Connected & Listening for updates.');
+
+       // 后台订阅 0xFFEB latest（新固件）：测量完成固件主动推送，前端免轮询、不占 GATT 锁；
+       // 订阅失败（旧固件无 notify / 系统异常）标记 false，waitForLatestMeasurement 回退原轮询读（gattBusy 逻辑不变）
        state.latestNotifySubscribed = false;
        state.lastNotifiedRec = null;
        if (latestChar) {
@@ -1357,21 +1381,10 @@ function clearConnectError() {
            state.latestNotifySubscribed = true;
            log('Latest notify subscribed (0xFFEB)');
          } catch (err) {
+           state.latestNotifySubscribed = false;
            log('Latest notify subscribe failed, fallback to polling: ' + err.message);
          }
        }
-       state.tempOffsetChar = tempOffsetChar;
-       state.calibStatusChar = calibStatusChar;
-       state.devNameChar = devNameChar;
-       state.otaChar = otaChar;
-       state.fwVersion = fwVersion;
-       checkFirmwareUpdate();
-
-       // 连接已建立且特征/notify 就绪：立即使按钮可用（校准/历史数据设备端持久化，
-       // web 只做展示，延后加载不影响正确性——Refresh 时固件返回正常值）
-       setStatus('connected');
-       clearConnectError();
-       log('Connected & Listening for updates.');
        startPolling();
 
        // —— 以下为数据加载，串行后台执行，不阻塞按钮 ready ——
@@ -1417,6 +1430,7 @@ function clearConnectError() {
        
      } catch (err) {
        if (token !== connectToken) return;   // 超时/失败期间用户已重新点击，不被覆盖
+       setConnectBusy(false);   // 连接失败：解锁 Connect 按钮，允许重新尝试
        setStatus('disconnected');
        syncBatteryPill();
        const errMsg = String(err && err.message);
@@ -1439,6 +1453,7 @@ function clearConnectError() {
  
    function handleDisconnect() {
      if (state.device?.gatt.connected) {
+       setConnectBusy(true);   // 断开进行中：锁定按钮，防止重复点击
        state.device.gatt.disconnect();
      } else {
        onDisconnected();
