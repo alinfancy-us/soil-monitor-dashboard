@@ -11,7 +11,7 @@
   <!-- 中文：Tailwind 已改为构建期编译的静态 CSS（见 tailwind.config.js / build_css.sh），
        不再依赖 cdn.tailwindcss.com 运行时脚本；类名变更后须重跑 ./build_css.sh 并递增版本号。
        本链接的 ?v= 与下方三个业务脚本一致，CI 打包时会统一替换为发布版本号（见 .github/workflows） -->
-  <link rel="stylesheet" href="page/css/tailwind.css?v=1.3.59">
+  <link rel="stylesheet" href="page/css/tailwind.css?v=1.3.63">
   <style>
     :root {
       color-scheme: light;
@@ -125,7 +125,7 @@
     /* 实时指标卡底色（手机/PC 通用）：温度橙 / 湿度蓝。
        （电量卡已移除：电量数值迁入 tab 导航上方设备状态卡的绿色胶囊，元素 id 仍为 #battValue） */
     .live-metrics .metric-card:nth-child(1) {
-      background: #fff7ed;
+      background: #fffbeb;
     }
 
     .live-metrics .metric-card:nth-child(2) {
@@ -136,7 +136,7 @@
        手机端的列色块样式在下方媒体查询中另有 flex 布局覆盖 */
     .history-table th:nth-child(3),
     .history-table td:nth-child(3) {
-      background: #fff7ed;
+      background: #fffbeb;
     }
 
     .history-table th:nth-child(4),
@@ -432,11 +432,11 @@
       }
 
       #tempUnitToggle .temperature-unit-btn {
-        font-size: 9px;
-        padding-top: 6px;
-        padding-bottom: 6px;
-        padding-left: 4px;
-        padding-right: 4px;
+        /* font-size 交由 JS 的激活/非激活类控制（激活大、非激活小）；这里仅收窄内边距防窄屏溢出 */
+        padding-top: 3px;
+        padding-bottom: 3px;
+        padding-left: 5px;
+        padding-right: 5px;
       }
     }
 
@@ -456,11 +456,11 @@
 
       /* 极窄屏（320px 级）：°F/°C 切换器再收窄一档，与温度数值同行仍不溢出 */
       #tempUnitToggle .temperature-unit-btn {
-        font-size: 8.5px;
-        padding-top: 5px;
-        padding-bottom: 5px;
-        padding-left: 3px;
-        padding-right: 3px;
+        /* font-size 交由 JS 的激活/非激活类控制；这里仅收窄内边距防极窄屏溢出 */
+        padding-top: 3px;
+        padding-bottom: 3px;
+        padding-left: 4px;
+        padding-right: 4px;
       }
     }
   </style>
@@ -536,21 +536,21 @@
            图标 emoji 用 grayscale 灰度化表达禁用态。忙碌态由 app.js setRefreshUiBusy 只替换图标与文字 span 内容 -->
       <!-- 移动端下边距由 .grid.live-metrics 媒体查询控制；桌面端 sm:mb-5 生效 -->
       <div class="grid grid-cols-3 gap-2 live-metrics sm:gap-4 sm:mb-5">
-        <div class="p-4 text-center dashboard-card metric-card rounded-2xl" style="--metric-color: #f97316">
+        <div class="px-4 py-2 text-center dashboard-card metric-card rounded-2xl" style="--metric-color: #f59e0b">
           <!-- 当前单位由切换器高亮表达，label 不带单位后缀；°F/°C 切换与数值同行（微小间距），
                手机端由媒体查询收窄切换器避免溢出。app.js updateTempUnitUI 重写按钮 class 后，
                ≤639px 的 #tempUnitToggle .temperature-unit-btn 规则（优先级更高）仍会覆盖 px-*/text-*，
                因此 JS 侧无需同步尺寸 -->
           <div id="tempUnitLabel" class="text-xs metric-label sm:text-sm text-slate-500">Temperature</div>
           <div class="temp-value-row mt-1 flex items-center justify-center gap-1.5">
-            <div id="tempValue" class="text-3xl font-bold text-orange-600 metric-value sm:text-4xl">--</div>
-            <div id="tempUnitToggle" class="inline-flex shrink-0 p-0.5 rounded-lg bg-slate-100" role="group" aria-label="Temperature unit">
-              <button type="button" class="temperature-unit-btn px-1.5 py-0.5 text-[10px] font-semibold rounded-md transition" data-unit="F">°F</button>
-              <button type="button" class="temperature-unit-btn px-1.5 py-0.5 text-[10px] font-semibold rounded-md transition" data-unit="C">°C</button>
+            <div id="tempValue" class="text-3xl font-bold text-amber-600 metric-value sm:text-4xl">--</div>
+            <div id="tempUnitToggle" class="inline-flex shrink-0 rounded-lg bg-slate-100" role="group" aria-label="Temperature unit">
+              <button type="button" class="temperature-unit-btn px-2.5 py-1 text-xs font-semibold rounded-md transition" data-unit="F">°F</button>
+              <button type="button" class="temperature-unit-btn px-2.5 py-1 text-xs font-semibold rounded-md transition" data-unit="C">°C</button>
             </div>
           </div>
         </div>
-        <div class="p-4 text-center dashboard-card metric-card rounded-2xl" style="--metric-color: #0ea5e9">
+        <div class="px-4 py-2 text-center dashboard-card metric-card rounded-2xl" style="--metric-color: #0ea5e9">
           <div class="text-xs metric-label sm:text-sm text-slate-500">Moisture %</div>
           <div id="humValue" class="mt-1 text-3xl font-bold metric-value text-sky-600 sm:text-4xl">--</div>
         </div>
@@ -574,11 +574,11 @@
 
         <div id="trendTabPanel">
           <!-- 色线图例（标签下方·居中）：橙线=Temperature，蓝线=Moisture。
-               取色须与 app.js drawChart() 保持一致：#f97316(温度) / #0ea5e9(湿度) -->
+               取色须与 app.js drawChart() 保持一致：#f59e0b(温度) / #0ea5e9(湿度) -->
           <div class="flex flex-wrap items-center justify-center gap-y-1 mb-1 text-[10px] text-slate-400">
             <!-- 内联 margin 兜底：即使 tailwind.css 被缓存（gap-x-5 未生效），两项之间也保有 16px 间距 -->
             <span class="inline-flex items-center gap-1" style="margin:0 8px">
-              <span style="display:inline-block;width:12px;height:3px;border-radius:9999px;background:#f97316"></span>
+              <span style="display:inline-block;width:12px;height:3px;border-radius:9999px;background:#f59e0b"></span>
               Temperature
             </span>
             <span class="inline-flex items-center gap-1" style="margin:0 8px">
@@ -595,7 +595,7 @@
         <div id="dailyTabPanel" class="hidden">
           <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
             <div class="inline-flex p-1 rounded-xl bg-slate-100">
-              <button id="dailyMetricTempBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold bg-white text-orange-600 shadow-sm">Temperature</button>
+              <button id="dailyMetricTempBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold bg-white text-amber-600 shadow-sm">Temperature</button>
               <button id="dailyMetricHumBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-500">Moisture</button>
               <button id="dailyMetricBattBtn" class="daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-500">Battery</button>
             </div>
@@ -884,8 +884,8 @@
        四处（tailwind.css 链接 + 三个业务脚本）统一使用同一版本号，CI 打包时自动从
        git tag / commit 哈希同步替换（含 CSS 链接），本地开发请四处一并递增，
        否则浏览器会继续运行旧版 CSS/JS -->
-  <script src="page/js/config.js?v=1.3.59"></script>
-  <script src="page/js/ble-protocol.js?v=1.3.59"></script>
-  <script src="page/js/app.js?v=1.3.59"></script>
+  <script src="page/js/config.js?v=1.3.63"></script>
+  <script src="page/js/ble-protocol.js?v=1.3.63"></script>
+  <script src="page/js/app.js?v=1.3.63"></script>
 </body>
 </html>
