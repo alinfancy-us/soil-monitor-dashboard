@@ -88,6 +88,7 @@ const SoilPulseConfig = (() => {
   // 未安装则回退 App Store（deep link scheme 未公开文档，需真机验证）
   const DASHBOARD_URL = 'https://soilpulse.alinfancy.com';
   const BLUEFY_APPSTORE_URL = 'https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055';
+  const BEACIO_APPSTORE_URL = 'https://apps.apple.com/app/beacio/id6761301368';
 
   // 2. 将 PAGE_VERSION 追加到 DASHBOARD_URL 中
   const targetUrl = new URL(DASHBOARD_URL);
@@ -130,6 +131,7 @@ const SoilPulseConfig = (() => {
     CALIB_STATUS_FLAGS,
     DASHBOARD_URL,
     BLUEFY_APPSTORE_URL,
+    BEACIO_APPSTORE_URL,
     BLUEFY_DEEPLINK,
     DEBUG_ENABLED,
     POLL_ENABLED,

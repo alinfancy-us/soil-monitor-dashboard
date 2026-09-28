@@ -3,6 +3,12 @@
  */
  (() => {
    'use strict';
+
+   // 页面加载完成后才启用 Connect 按钮（HTML 初始为 disabled，避免加载过程中被误点）
+   window.addEventListener('load', () => {
+     els.connectBtn.disabled = false;
+     els.connectBtn.classList.remove('opacity-40', 'cursor-not-allowed');
+   });
  
    // 集中配置统一取自 page/js/config.js，方便后续维护管理
    const {
@@ -10,7 +16,7 @@
      DEV_NAME_MAX_BYTES,
      DEVICE_NAME,
      DEBUG_ENABLED, POLL_ENABLED, POLL_INTERVAL,
-     DASHBOARD_URL, BLUEFY_APPSTORE_URL, BLUEFY_DEEPLINK,
+     DASHBOARD_URL, BLUEFY_APPSTORE_URL, BLUEFY_DEEPLINK, BEACIO_APPSTORE_URL,
      DAILY_EPOCH_MIN_VALID, DAILY_EPOCH_MAX_VALID, TREND_EPOCH_MAX_VALID,
      CACHE_PREFIX, CACHE_MAX_ITEM_BYTES, CACHE_MAX_TOTAL_BYTES,
      FIRMWARE_MANIFEST_URL,
@@ -967,7 +973,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      const active = state.tempUnit;
      (els.tempUnitToggle?.querySelectorAll('.temperature-unit-btn') || []).forEach(btn => {
        const isActive = btn.dataset.unit === active;
-       btn.className = `temperature-unit-btn rounded-md transition font-semibold leading-none ${isActive ? 'bg-amber-500 text-white shadow-sm px-1.5 py-[3px] text-sm' : 'text-slate-500 px-1 py-[3px] text-[10px]'}`;
+       btn.className = `temperature-unit-btn rounded-md transition font-semibold leading-none ${isActive ? 'bg-amber-500 text-white shadow-sm px-1 py-[3px] text-sm' : 'text-slate-500 px-0.5 py-[3px] text-[10px]'}`;
      });
      try { localStorage.setItem(`${CACHE_PREFIX}tempUnit:v1`, active); } catch (_) {}
      if (els.tempUnitLabel) els.tempUnitLabel.textContent = 'Temperature';   // 单位由 °F/°C 切换器高亮表达，label 不再重复后缀
@@ -1190,6 +1196,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
  
    // 剪贴板写入（iOS Safari 兼容）：优先 Clipboard API（要求 HTTPS + 在用户手势内调用），
    // 失败或不可用时回退到隐藏 textarea + document.execCommand('copy') 的同步复制方案。
+   // standalone（添加到主屏幕的 App 模式）在 iOS 上不支持 Web Bluetooth（beacio 扩展也不注入）。
+   // 此函数用于 showModal 里分流提示用户回 Safari 连接；与 PWA 安装引导无关。
+   const isStandalone = () =>
+     window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
    async function copyTextToClipboard(text) {
      if (navigator.clipboard && navigator.clipboard.writeText) {
        try {
@@ -1228,43 +1238,109 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      return ok;
    }
 
-   function showModal(isIOS, isAndroid) {
+    // 从 UA 解析 iOS 主版本号。注意 iOS 26+ 的 UA 里 "iPhone OS xx like Mac OS X"
+   // 仍报旧基线号（如 18_7），真实系统版本在 "Version/26.x"（Safari 版本号≈iOS 主版本），
+   // 因此优先取 Version/；取不到再退回 "OS xx like Mac OS X"。非 iOS 返回 null。
+   function parseIOSVersion(ua) {
+     const v = /Version\/([\d_.]+)/.exec(ua);
+     if (v) return parseFloat(v[1].replace(/_/g, '.'));
+     const m = /OS ([\d_]+) like Mac OS X/.exec(ua);
+     return m ? parseFloat(m[1].replace(/_/g, '.')) : null;
+   }
+
+  function showModal(isIOS, isAndroid) {
      const ua = navigator.userAgent;
      const isWeChat = /MicroMessenger/i.test(ua);
      const isChrome = /Chrome/.test(ua) && !/wv/i.test(ua) && !/WebView/i.test(ua);
  
      if (isIOS) {
        els.modalIcon.innerHTML = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
-       els.modalTitle.textContent = 'Bluetooth Unavailable in Browser';
-       els.modalMessage.textContent = 'iOS Browser does not support Web Bluetooth. Tap "Open in Bluefy" to continue — the dashboard link will be copied to your clipboard so you can paste it into Bluefy after installing.';
-       els.modalActionBtn.textContent = 'Open in Bluefy';
-       els.modalActionBtn.href = BLUEFY_APPSTORE_URL;
-       els.modalActionBtn.onclick = async (e) => {
-         e.preventDefault();
-         // iOS Safari 只允许在用户手势内写剪贴板，且此刻还无法判断是否已安装 Bluefy，
-         // 因此必须"先复制、后跳转"：已安装 → 深链直接打开 Bluefy 加载 Dashboard；
-         // 未安装 → 回退 App Store，用户装好 Bluefy 后打开它，长按地址栏粘贴剪贴板里
-         // 的地址即可进入本页。加 400ms 超时兜底，避免剪贴板写入异常时卡住深链跳转。
-         const copied = await Promise.race([
-           copyTextToClipboard(window.location.href),
-           new Promise((resolve) => setTimeout(() => resolve(false), 400)),
-         ]);
-         els.modalMessage.textContent = copied
-           ? '✅ Dashboard link copied to clipboard. Opening Bluefy… If it is not installed, you will be taken to the App Store — after installing, open Bluefy and paste the link to continue.'
-           : `After installing Bluefy from the App Store, open it and manually enter this address: ${window.location.href}`;
+       if (isStandalone()) {
+         // iOS 添加到主屏幕的 standalone App 模式不支持 Web Bluetooth（beacio 扩展也不注入）。
+         // iOS 平台限制：standalone 无法程序化打开完整 Safari 标签页（target="_blank" 对 scope 内
+         // URL 实测不跳转）。因此退化为最可靠方案：复制链接，指引用户手动去 Safari 打开连接。
+         els.modalTitle.textContent = 'Open in Safari to Connect';
+         els.modalMessage.textContent = `This App mode on iPhone can't use Web Bluetooth. Tap "Copy Link", then open it in the Safari browser and tap Connect there. Tip: if you want to keep this page on your Home Screen, uncheck \"Open as Web App\" when adding it, so it opens in Safari with Bluetooth available.`;
+         els.modalActionBtn.textContent = 'Copy Link';
+         els.modalActionBtn.href = '#';
+         els.modalActionBtn.onclick = async (e) => {
+           e.preventDefault();
+           const copied = await Promise.race([
+             copyTextToClipboard(window.location.href),
+             new Promise((resolve) => setTimeout(() => resolve(false), 400)),
+           ]);
+           els.modalMessage.textContent = copied
+             ? '✅ Link copied. Now open the Safari browser, paste this address in the address bar and tap Connect.'
+             : `Please open Safari and manually enter this address: ${window.location.href}`;
+           els.modalActionBtn.classList.add('hidden');
+         };
+       } else {
+         // beacio Safari 扩展要求 iOS 26.2+；26.2+ 优先引导 beacio（新增分支），
+         // 低于该版本（或版本解析失败）走回原有、稳定的 Bluefy 引导（原逻辑未改动）
+         const iosVer = parseIOSVersion(ua);
+         if (iosVer !== null && iosVer >= 26.2) {
+           // beacio.js 主导 iOS 蓝牙引导（官方脚本能识别"已安装未启用"并引导开启）。
+           // 为避免我们的弹窗抢在 beacio.js 之前弹出（beacio.js 的状态是异步设置的），这里不立即弹窗，
+           // 而是轮询等待 beacio.js 设置 documentElement.dataset.beacioCdnState：
+           //   - 一旦设置（任意状态）→ 交给 beacio.js（它在用户点 Connect / requestDevice 时弹原生引导），
+           //     我们不显示自己的弹窗，避免双弹窗或抢弹；
+           //   - 仅在超时（beacio.js 未加载成功）时，才用我们自己的兜底引导（安装 + 开启步骤）。
+           const decide = (remaining) => {
+             const st = typeof document !== 'undefined'
+               ? document.documentElement.dataset.beacioCdnState : undefined;
+             if (st !== undefined) {
+               // beacio.js 已接管 → 保持我们的弹窗隐藏，引导交给 beacio.js
+               return;
+             }
+             if (remaining <= 0) {
+               // 兜底：beacio.js 未加载 → 我们自己的引导（安装 + 开启步骤）
+               els.modalTitle.textContent = 'Bluetooth needs beacio';
+               els.modalMessage.textContent = 'To connect on iPhone you need the free beacio Safari extension (iOS 26.2+), installed AND enabled. Install it from the App Store, then enable it: tap the "aA" icon in the address bar → Manage Extensions → turn on beacio → choose "Allow on Every Website", then refresh this page. beacio injects Bluetooth into Safari, so no separate browser or link pasting is needed.';
+               els.modalActionBtn.textContent = 'Install beacio (free)';
+               els.modalActionBtn.href = BEACIO_APPSTORE_URL;
+               els.modalActionBtn.onclick = null;
+               els.modalActionBtn.classList.remove('hidden');
+               els.modal.classList.remove('hidden');
+               els.modal.classList.add('flex');
+               return;
+             }
+             setTimeout(() => decide(remaining - 1), 100);
+           };
+           decide(20); // 最多等待约 2s，让 beacio.js 完成检测
+           return;     // 不走到末尾的统一显示，由 decide 决定是否显示
+         } else {
+           els.modalTitle.textContent = 'Bluetooth Unavailable in Browser';
+           els.modalMessage.textContent = 'iOS Browser does not support Web Bluetooth. Tap "Open in Bluefy" to continue — the dashboard link will be copied to your clipboard so you can paste it into Bluefy after installing.';
+           els.modalActionBtn.textContent = 'Open in Bluefy';
+           els.modalActionBtn.href = BLUEFY_APPSTORE_URL;
+           els.modalActionBtn.onclick = async (e) => {
+             e.preventDefault();
+             // iOS Safari 只允许在用户手势内写剪贴板，且此刻还无法判断是否已安装 Bluefy，
+             // 因此必须"先复制、后跳转"：已安装 → 深链直接打开 Bluefy 加载 Dashboard；
+             // 未安装 → 回退 App Store，用户装好 Bluefy 后打开它，长按地址栏粘贴剪贴板里
+             // 的地址即可进入本页。加 400ms 超时兜底，避免剪贴板写入异常时卡住深链跳转。
+             const copied = await Promise.race([
+               copyTextToClipboard(window.location.href),
+               new Promise((resolve) => setTimeout(() => resolve(false), 400)),
+             ]);
+             els.modalMessage.textContent = copied
+               ? '✅ Dashboard link copied to clipboard. Opening Bluefy… If it is not installed, you will be taken to the App Store — after installing, open Bluefy and paste the link to continue.'
+               : `After installing Bluefy from the App Store, open it and manually enter this address: ${window.location.href}`;
 
-         const start = Date.now();
-         // 先尝试 Bluefy 深链直接加载 Dashboard；2.5s 后页面仍在前台说明深链未拉起（未安装），
-         // 回退 App Store。已安装时页面被切到后台：pagehide 会清除定时器；即使定时器被系统
-         // 暂停后恢复触发，此时页面已隐藏（document.hidden）或 elapsed 已超 5s，均不会误跳。
-         const fallback = setTimeout(() => {
-           if (!document.hidden && Date.now() - start < 5000) {
-             window.location.href = BLUEFY_APPSTORE_URL;
-           }
-         }, 2500);
-         window.addEventListener('pagehide', () => clearTimeout(fallback), { once: true });
-         window.location.href = BLUEFY_DEEPLINK;
-       };
+             const start = Date.now();
+             // 先尝试 Bluefy 深链直接加载 Dashboard；2.5s 后页面仍在前台说明深链未拉起（未安装），
+             // 回退 App Store。已安装时页面被切到后台：pagehide 会清除定时器；即使定时器被系统
+             // 暂停后恢复触发，此时页面已隐藏（document.hidden）或 elapsed 已超 5s，均不会误跳。
+             const fallback = setTimeout(() => {
+               if (!document.hidden && Date.now() - start < 5000) {
+                 window.location.href = BLUEFY_APPSTORE_URL;
+               }
+             }, 2500);
+             window.addEventListener('pagehide', () => clearTimeout(fallback), { once: true });
+             window.location.href = BLUEFY_DEEPLINK;
+           };
+         }
+       }
        els.modalActionBtn.classList.remove('hidden');
      } else if (isAndroid) {
        els.modalIcon.innerHTML = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
