@@ -1254,7 +1254,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
          // iOS 平台限制：standalone 无法程序化打开完整 Safari 标签页（target="_blank" 对 scope 内
          // URL 实测不跳转）。因此退化为最可靠方案：复制链接，指引用户手动去 Safari 打开连接。
          els.modalTitle.textContent = 'Open in Safari to Connect';
-         els.modalMessage.textContent = `This App mode on iPhone can't use Web Bluetooth. Tap "Copy Link", then open it in the Safari browser and tap Connect there.`;
+         els.modalMessage.textContent = `This App mode on iPhone can't use Web Bluetooth. Tap "Copy Link", then open it in the Safari browser and tap Connect there. Tip: if you want to keep this page on your Home Screen, uncheck \"Open as Web App\" when adding it, so it opens in Safari with Bluetooth available.`;
          els.modalActionBtn.textContent = 'Copy Link';
          els.modalActionBtn.href = '#';
          els.modalActionBtn.onclick = async (e) => {
