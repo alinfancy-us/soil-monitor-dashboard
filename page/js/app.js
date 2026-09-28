@@ -3,6 +3,12 @@
  */
  (() => {
    'use strict';
+
+   // 页面加载完成后才启用 Connect 按钮（HTML 初始为 disabled，避免加载过程中被误点）
+   window.addEventListener('load', () => {
+     els.connectBtn.disabled = false;
+     els.connectBtn.classList.remove('opacity-40', 'cursor-not-allowed');
+   });
  
    // 集中配置统一取自 page/js/config.js，方便后续维护管理
    const {
@@ -1273,19 +1279,35 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
          // 低于该版本（或版本解析失败）走回原有、稳定的 Bluefy 引导（原逻辑未改动）
          const iosVer = parseIOSVersion(ua);
          if (iosVer !== null && iosVer >= 26.2) {
-           // beacio.js CDN 已接管引导（官方脚本能识别"已安装未启用"并引导开启），为避免双弹窗：
-           // 检测到 beacio.js 已加载（documentElement.dataset.beacioCdnState）时，关闭我们的弹窗、交给 beacio.js。
-           if (typeof document !== 'undefined' && document.documentElement.dataset.beacioCdnState !== undefined) {
-             els.modal.classList.add('hidden');
-             els.modal.classList.remove('flex');
-             return;
-           }
-           // 兜底：beacio.js 未加载时，用我们自己的引导（安装 + 开启步骤）
-           els.modalTitle.textContent = 'Bluetooth needs beacio';
-           els.modalMessage.textContent = 'To connect on iPhone you need the free beacio Safari extension (iOS 26.2+), installed AND enabled. Install it from the App Store, then enable it: tap the "aA" icon in the address bar → Manage Extensions → turn on beacio → choose "Allow on Every Website", then refresh this page. beacio injects Bluetooth into Safari, so no separate browser or link pasting is needed.';
-           els.modalActionBtn.textContent = 'Install beacio (free)';
-           els.modalActionBtn.href = BEACIO_APPSTORE_URL;
-           els.modalActionBtn.onclick = null;
+           // beacio.js 主导 iOS 蓝牙引导（官方脚本能识别"已安装未启用"并引导开启）。
+           // 为避免我们的弹窗抢在 beacio.js 之前弹出（beacio.js 的状态是异步设置的），这里不立即弹窗，
+           // 而是轮询等待 beacio.js 设置 documentElement.dataset.beacioCdnState：
+           //   - 一旦设置（任意状态）→ 交给 beacio.js（它在用户点 Connect / requestDevice 时弹原生引导），
+           //     我们不显示自己的弹窗，避免双弹窗或抢弹；
+           //   - 仅在超时（beacio.js 未加载成功）时，才用我们自己的兜底引导（安装 + 开启步骤）。
+           const decide = (remaining) => {
+             const st = typeof document !== 'undefined'
+               ? document.documentElement.dataset.beacioCdnState : undefined;
+             if (st !== undefined) {
+               // beacio.js 已接管 → 保持我们的弹窗隐藏，引导交给 beacio.js
+               return;
+             }
+             if (remaining <= 0) {
+               // 兜底：beacio.js 未加载 → 我们自己的引导（安装 + 开启步骤）
+               els.modalTitle.textContent = 'Bluetooth needs beacio';
+               els.modalMessage.textContent = 'To connect on iPhone you need the free beacio Safari extension (iOS 26.2+), installed AND enabled. Install it from the App Store, then enable it: tap the "aA" icon in the address bar → Manage Extensions → turn on beacio → choose "Allow on Every Website", then refresh this page. beacio injects Bluetooth into Safari, so no separate browser or link pasting is needed.';
+               els.modalActionBtn.textContent = 'Install beacio (free)';
+               els.modalActionBtn.href = BEACIO_APPSTORE_URL;
+               els.modalActionBtn.onclick = null;
+               els.modalActionBtn.classList.remove('hidden');
+               els.modal.classList.remove('hidden');
+               els.modal.classList.add('flex');
+               return;
+             }
+             setTimeout(() => decide(remaining - 1), 100);
+           };
+           decide(20); // 最多等待约 2s，让 beacio.js 完成检测
+           return;     // 不走到末尾的统一显示，由 decide 决定是否显示
          } else {
            els.modalTitle.textContent = 'Bluetooth Unavailable in Browser';
            els.modalMessage.textContent = 'iOS Browser does not support Web Bluetooth. Tap "Open in Bluefy" to continue — the dashboard link will be copied to your clipboard so you can paste it into Bluefy after installing.';
