@@ -1266,6 +1266,109 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      return m ? parseFloat(m[1].replace(/_/g, '.')) : null;
    }
 
+  // ===== 自研 beacio 检测（2026-09-28 替换原 decide(20) 轮询；保留 beacio.js 注入与兜底弹窗）=====
+  // 核心事实：扩展运行时才会注入标记/回握手；网页层无法区分"已装未开"与"未装"，
+  // 统一判 not-installed，"已装/未装"靠跳转后是否被拉起分流（2.5s 回退 App Store）。
+  const BEACIO_ONBOARDING_START = 'https://link.beacio.com/onboarding-start';
+  let beacioL = false;          // active：扩展注入真 API
+  let beacioX = false;          // installed：标记残留
+  let beacioFinalized = false;  // 检测是否已收尾（≤~1s 握手 + 兜底）
+  let beacioDetectStarted = false;
+
+  function beacioCheckInstalled() {
+    if (beacioX) return true;
+    try {
+      if (document.documentElement.dataset.beacioInstalled === 'true') {
+        beacioX = true;
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  function beacioMarkActive() {
+    if (beacioL) return;
+    beacioL = true;
+    beacioX = true;
+    try { localStorage.setItem('beacio_seen', JSON.stringify({ ts: Date.now(), v: 1 })); } catch (e) {}
+    beacioFinalize();
+  }
+  function beacioFinalize() {
+    if (beacioFinalized) return;
+    beacioFinalized = true;
+    beacioCheckInstalled();
+  }
+  function beacioState() {
+    return beacioL ? 'active' : beacioX ? 'installed-inactive' : 'not-installed';
+  }
+  function startBeacioDetect() {
+    if (beacioDetectStarted) return;   // 幂等：初始化与 handleConnect 均可安全调用
+    beacioDetectStarted = true;
+    const ua = navigator.userAgent;
+    if (!/iPad|iPhone|iPod/.test(ua) || window.MSStream) return;
+    beacioCheckInstalled();
+    try {
+      if (document.documentElement.dataset.beacioExtension === 'true') { beacioMarkActive(); return; }
+    } catch (e) {}
+    if (navigator.beacio !== undefined) { beacioMarkActive(); return; }
+    window.addEventListener('beacio:extension:ready', beacioMarkActive, { once: true });
+    // ping/pong 握手：nonce 匹配，最多 5 次 ×100ms（对齐官方握手协议）
+    const nonce = 'beacio-ping-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+    const onPong = (e) => {
+      const d = e.detail;
+      if (d && d.nonce === nonce) {
+        window.removeEventListener('beacio:extension:pong', onPong);
+        beacioMarkActive();
+      }
+    };
+    window.addEventListener('beacio:extension:pong', onPong);
+    let n = 0;
+    const sendPing = () => {
+      n += 1;
+      try { window.dispatchEvent(new CustomEvent('beacio:extension:ping', { detail: { nonce } })); } catch (e) {}
+      if (n >= 5) window.removeEventListener('beacio:extension:pong', onPong);
+      else setTimeout(sendPing, 100);
+    };
+    sendPing();
+    setTimeout(beacioFinalize, 1000);  // 收尾判定
+    setTimeout(beacioFinalize, 3000);  // 绝对兜底
+  }
+  function beacioGotoOnboarding() {
+    let u;
+    try {
+      u = new URL(BEACIO_ONBOARDING_START);
+      u.searchParams.set('origin', window.location.origin);
+      u.searchParams.set('source', 'request-device');
+      u.searchParams.set('url', window.location.href);
+      u.searchParams.set('return', 'https://link.beacio.com/return?url=' + encodeURIComponent(window.location.href));
+    } catch (e) {
+      // URL 构造失败属极异常：同样走安装引导弹窗，不直接跳系统 App Store（避免用户无预期跳转）
+      beacioShowInstallGuide();
+      return;
+    }
+    const start = Date.now();
+    // 2.5s 未被拉起 → 判定未装 beacio app → 回退显示我们自己的安装引导弹窗，
+    // 由用户主动点击 Install 按钮才跳 App Store（产品要求：不直接跳转，避免突兀）
+    const fallback = setTimeout(() => {
+      if (!document.hidden && Date.now() - start < 5000) {
+        beacioShowInstallGuide();
+      }
+    }, 2500);
+    window.addEventListener('pagehide', () => clearTimeout(fallback), { once: true });
+    window.location.href = u.toString();
+  }
+  // 安装引导弹窗：跳转 onboarding-start 未被拉起（未装 beacio app）时回退显示。
+  // 复用同一 modal：标题/文案/按钮换成安装指引 + App Store 链接按钮（用户主动点击才跳转）
+  function beacioShowInstallGuide() {
+    els.modalTitle.textContent = 'Bluetooth needs beacio';
+    els.modalMessage.textContent = 'The beacio Safari extension does not appear to be installed on this iPhone. To connect, install the free beacio extension (iOS 26.2+), then enable it: tap the "aA" icon in the address bar → Manage Extensions → turn on beacio → choose "Allow on Every Website", then refresh this page and tap Connect.';
+    els.modalActionBtn.textContent = 'Install beacio (free)';
+    els.modalActionBtn.href = BEACIO_APPSTORE_URL;
+    els.modalActionBtn.onclick = null;
+    els.modalActionBtn.classList.remove('hidden');
+    els.modal.classList.remove('hidden');
+    els.modal.classList.add('flex');
+  }
+
   function showModal(isIOS, isAndroid) {
      const ua = navigator.userAgent;
      const isWeChat = /MicroMessenger/i.test(ua);
@@ -1297,35 +1400,41 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
          // 低于该版本（或版本解析失败）走回原有、稳定的 Bluefy 引导（原逻辑未改动）
          const iosVer = parseIOSVersion(ua);
          if (iosVer !== null && iosVer >= 26.2) {
-           // beacio.js 主导 iOS 蓝牙引导（官方脚本能识别"已安装未启用"并引导开启）。
-           // 为避免我们的弹窗抢在 beacio.js 之前弹出（beacio.js 的状态是异步设置的），这里不立即弹窗，
-           // 而是轮询等待 beacio.js 设置 documentElement.dataset.beacioCdnState：
-           //   - 一旦设置（任意状态）→ 交给 beacio.js（它在用户点 Connect / requestDevice 时弹原生引导），
-           //     我们不显示自己的弹窗，避免双弹窗或抢弹；
-           //   - 仅在超时（beacio.js 未加载成功）时，才用我们自己的兜底引导（安装 + 开启步骤）。
-           const decide = (remaining) => {
-             const st = typeof document !== 'undefined'
-               ? document.documentElement.dataset.beacioCdnState : undefined;
-             if (st !== undefined) {
-               // beacio.js 已接管 → 保持我们的弹窗隐藏，引导交给 beacio.js
-               return;
-             }
-             if (remaining <= 0) {
-               // 兜底：beacio.js 未加载 → 我们自己的引导（安装 + 开启步骤）
-               els.modalTitle.textContent = 'Bluetooth needs beacio';
-               els.modalMessage.textContent = 'To connect on iPhone you need the free beacio Safari extension (iOS 26.2+), installed AND enabled. Install it from the App Store, then enable it: tap the "aA" icon in the address bar → Manage Extensions → turn on beacio → choose "Allow on Every Website", then refresh this page. beacio injects Bluetooth into Safari, so no separate browser or link pasting is needed.';
-               els.modalActionBtn.textContent = 'Install beacio (free)';
-               els.modalActionBtn.href = BEACIO_APPSTORE_URL;
-               els.modalActionBtn.onclick = null;
-               els.modalActionBtn.classList.remove('hidden');
-               els.modal.classList.remove('hidden');
-               els.modal.classList.add('flex');
-               return;
-             }
-             setTimeout(() => decide(remaining - 1), 100);
+           // 自研 beacio 检测替代原 decide(20) 轮询：主动握手判定（标记/ready/ping-pong，≤1s 收尾）。
+           //   - active（扩展已开启并注入真 API）→ 不弹窗，Connect 走正常 requestDevice；
+           //   - 非 active（已装未开 / 未装，网页层无法区分）→ 弹我们自己的引导弹窗，
+           //     用户点按钮后才跳转（onboarding-start + 2.5s 未被拉起 → 回退安装引导弹窗，
+           //     由用户主动点 Install 才跳 App Store，不直接跳转避免突兀）；兜底弹窗按产品要求保留。
+           const showBeacioGuide = () => {
+             els.modalTitle.textContent = 'Bluetooth needs beacio';
+             els.modalMessage.textContent = 'To connect on iPhone, the free beacio Safari extension (iOS 26.2+) must be installed and enabled. Tap Continue — if beacio is already installed, it will guide you through turning it on in Safari; if not, you will be shown install instructions. After enabling it, refresh this page and tap Connect.';
+             els.modalActionBtn.textContent = 'Continue';
+             els.modalActionBtn.href = '#';
+             els.modalActionBtn.onclick = (e) => {
+               e.preventDefault();
+               beacioGotoOnboarding();
+             };
+             els.modalActionBtn.classList.remove('hidden');
+             els.modal.classList.remove('hidden');
+             els.modal.classList.add('flex');
            };
-           decide(20); // 最多等待约 2s，让 beacio.js 完成检测
-           return;     // 不走到末尾的统一显示，由 decide 决定是否显示
+           if (beacioState() === 'active') {
+             return;   // beacio 已接管，不显示我们的弹窗
+           }
+           if (beacioFinalized) {
+             showBeacioGuide();
+           } else {
+             // 自研握手尚未收尾（≤~1s）：等待收尾后再决定，active 不弹、否则弹引导
+             let waited = 0;
+             const waitFinal = () => {
+               if (beacioState() === 'active') return;
+               if (beacioFinalized || waited >= 30) { showBeacioGuide(); return; }
+               waited += 1;
+               setTimeout(waitFinal, 100);
+             };
+             waitFinal();
+           }
+           return;     // 不走到末尾的统一显示，由上方决定
          } else {
            els.modalTitle.textContent = 'Bluetooth Unavailable in Browser';
            els.modalMessage.textContent = 'iOS Browser does not support Web Bluetooth. Tap "Open in Bluefy" to continue — the dashboard link will be copied to your clipboard so you can paste it into Bluefy after installing.';
@@ -1404,6 +1513,12 @@ function clearConnectError() {
      if (!navigator.bluetooth) {
        const ua = navigator.userAgent;
        showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
+       return;
+     }
+     // iOS Safari：自研检测非 active 时走引导弹窗（不调用 requestDevice，
+     // 避免 beacio.js 的 stub 在 requestDevice 里直接跳转、用户无预期）
+     if (/iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream && beacioState() !== 'active') {
+       showModal(true, false);
        return;
      }
 
@@ -2555,6 +2670,7 @@ The device will measure the current probe state first, then apply the calibratio
   state.activeDeviceId = getLastDeviceId();
   if (state.activeDeviceId) restoreCachedCharts(state.activeDeviceId);
  
+   startBeacioDetect();   // 启动自研 beacio 检测（幂等）：active 判定 + 非 active 引导弹窗
    if (!navigator.bluetooth) {
      const ua = navigator.userAgent;
      showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
