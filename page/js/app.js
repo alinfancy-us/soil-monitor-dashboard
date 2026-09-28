@@ -1266,9 +1266,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      return m ? parseFloat(m[1].replace(/_/g, '.')) : null;
    }
 
-  // ===== 自研 beacio 检测（2026-09-28 替换原 decide(20) 轮询；保留 beacio.js 注入与兜底弹窗）=====
+  // ===== 自研 beacio 检测（2026-09-28 替换原 decide(20) 轮询；beacio.js 已不再加载）=====
   // 核心事实：扩展运行时才会注入标记/回握手；网页层无法区分"已装未开"与"未装"，
-  // 统一判 not-installed，"已装/未装"靠跳转后是否被拉起分流（2.5s 回退 App Store）。
+  // 统一判 not-installed，"已装/未装"靠 window.open 探测 onboarding-start 分流：
+  // 已装被拉起（原页面 hidden）→ app 引导开启；未装（2.5s 仍在）→ 关探测标签 + 直接跳 App Store。
   const BEACIO_ONBOARDING_START = 'https://link.beacio.com/onboarding-start';
   let beacioL = false;          // active：扩展注入真 API
   let beacioX = false;          // installed：标记残留
@@ -1341,22 +1342,33 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       u.searchParams.set('url', window.location.href);
       u.searchParams.set('return', 'https://link.beacio.com/return?url=' + encodeURIComponent(window.location.href));
     } catch (e) {
-      // URL 构造失败属极异常：同样走安装引导弹窗，不直接跳系统 App Store（避免用户无预期跳转）
+      beacioShowInstallGuide();
+      return;
+    }
+    // 探测法（绕过 onboarding-start 未装时的 302→setup.html 吞掉回退）：
+    // 用 window.open 在新标签打开 onboarding-start（Universal Link）——
+    //   · 已装 beacio app → iOS 切走拉起 app（原页面 hidden，pagehide/visibilitychange 清定时器，无回退）
+    //   · 未装 → 新标签被 302 到 setup.html，原页面仍在 → 2.5s 判定未装：
+    //       关闭探测标签 + 直接跳 App Store（产品要求：不经过 setup.html、不直接弹安装弹窗）
+    let popup = null;
+    try { popup = window.open(u.toString(), '_blank'); } catch (e) {}
+    if (!popup) {
+      // 探测标签被拦截（极少数）：无法判定装/未装，回退安装引导弹窗（用户主动点 Install 才跳）
       beacioShowInstallGuide();
       return;
     }
     const start = Date.now();
-    // 2.5s 未被拉起 → 判定未装 beacio app → 回退显示我们自己的安装引导弹窗，
-    // 由用户主动点击 Install 按钮才跳 App Store（产品要求：不直接跳转，避免突兀）
     const fallback = setTimeout(() => {
       if (!document.hidden && Date.now() - start < 5000) {
-        beacioShowInstallGuide();
+        try { popup.close(); } catch (e) {}
+        window.location.href = BEACIO_APPSTORE_URL;   // 未装：直接跳 App Store
       }
     }, 2500);
-    window.addEventListener('pagehide', () => clearTimeout(fallback), { once: true });
-    window.location.href = u.toString();
+    const cleanup = () => clearTimeout(fallback);
+    window.addEventListener('pagehide', cleanup, { once: true });
+    window.addEventListener('visibilitychange', () => { if (document.hidden) cleanup(); }, { once: true });
   }
-  // 安装引导弹窗：跳转 onboarding-start 未被拉起（未装 beacio app）时回退显示。
+  // 安装引导弹窗：仅兜底场景使用（URL 构造失败 / 探测标签被拦截无法判定装未装）。
   // 复用同一 modal：标题/文案/按钮换成安装指引 + App Store 链接按钮（用户主动点击才跳转）
   function beacioShowInstallGuide() {
     els.modalTitle.textContent = 'Bluetooth needs beacio';
@@ -1403,11 +1415,12 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
            // 自研 beacio 检测替代原 decide(20) 轮询：主动握手判定（标记/ready/ping-pong，≤1s 收尾）。
            //   - active（扩展已开启并注入真 API）→ 不弹窗，Connect 走正常 requestDevice；
            //   - 非 active（已装未开 / 未装，网页层无法区分）→ 弹我们自己的引导弹窗，
-           //     用户点按钮后才跳转（onboarding-start + 2.5s 未被拉起 → 回退安装引导弹窗，
-           //     由用户主动点 Install 才跳 App Store，不直接跳转避免突兀）；兜底弹窗按产品要求保留。
+           //     用户点按钮后跳转（onboarding-start 新标签探测：已装拉起 app 引导开启；
+           //     未装 2.5s 后关探测标签直接跳 App Store，不经过 setup.html）；
+           //     兜底弹窗仅用于探测标签被拦截等异常。
            const showBeacioGuide = () => {
              els.modalTitle.textContent = 'Bluetooth needs beacio';
-             els.modalMessage.textContent = 'To connect on iPhone, the free beacio Safari extension (iOS 26.2+) must be installed and enabled. Tap Continue — if beacio is already installed, it will guide you through turning it on in Safari; if not, you will be shown install instructions. After enabling it, refresh this page and tap Connect.';
+             els.modalMessage.textContent = 'To connect on iPhone, the free beacio Safari extension (iOS 26.2+) must be installed and enabled. Tap Continue — if beacio is already installed, it will guide you through turning it on in Safari; if not, you will be taken to the App Store. After enabling it, refresh this page and tap Connect.';
              els.modalActionBtn.textContent = 'Continue';
              els.modalActionBtn.href = '#';
              els.modalActionBtn.onclick = (e) => {
