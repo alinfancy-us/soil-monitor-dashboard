@@ -1269,7 +1269,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
   // ===== 自研 beacio 检测（2026-09-28 替换原 decide(20) 轮询；beacio.js 已不再加载）=====
   // 核心事实：扩展运行时才会注入标记/回握手；网页层无法区分"已装未开"与"未装"，
   // 统一判 not-installed，"已装/未装"靠 window.open 探测 onboarding-start 分流：
-  // 已装被拉起（原页面 hidden）→ app 引导开启；未装（2.5s 仍在）→ 关探测标签 + 直接跳 App Store。
+  // 已装被拉起（popup 不加载，load 不触发）→ app 引导开启；未装（popup load 触发：setup.html 加载）
+  // → 关探测标签 + 直接跳 App Store。
   const BEACIO_ONBOARDING_START = 'https://link.beacio.com/onboarding-start';
   let beacioL = false;          // active：扩展注入真 API
   let beacioX = false;          // installed：标记残留
@@ -1347,28 +1348,32 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     }
     // 探测法（绕过 onboarding-start 未装时的 302→setup.html 吞掉回退）：
     // 用 window.open 在新标签打开 onboarding-start（Universal Link）——
-    //   · 已装 beacio app → iOS 切走拉起 app（原页面 hidden，pagehide/visibilitychange 清定时器，无回退）
-    //   · 未装 → 新标签被 302 到 setup.html，原页面仍在 → 2.5s 判定未装：
-    //       关闭探测标签 + 直接跳 App Store（产品要求：不经过 setup.html、不直接弹安装弹窗）
+    //   · 已装 beacio app → iOS 拦截导航拉起 app（popup 不加载，load 不触发）→ app 引导开启 → return 回跳
+    //   · 未装 → 服务端 302 到 setup.html 在 popup 中加载完成 → popup load 事件触发 → 判定未装：
+    //       关闭探测标签 + 直接跳 App Store（产品要求：不经过 setup.html 停留、不直接弹安装弹窗）
     let popup = null;
     try { popup = window.open(u.toString(), '_blank'); } catch (e) {}
     if (!popup) {
-      // 探测标签被拦截（极少数）：无法判定装/未装，回退安装引导弹窗（用户主动点 Install 才跳）
-      beacioShowInstallGuide();
+      // 探测标签被拦截（极少数）：顶层跳转 onboarding-start，至少保证已装用户可被拉起
+      window.location.href = u.toString();
       return;
     }
-    const start = Date.now();
-    const fallback = setTimeout(() => {
-      if (!document.hidden && Date.now() - start < 5000) {
-        try { popup.close(); } catch (e) {}
-        window.location.href = BEACIO_APPSTORE_URL;   // 未装：直接跳 App Store
-      }
-    }, 2500);
-    const cleanup = () => clearTimeout(fallback);
+    const onLoaded = () => {
+      try { popup.close(); } catch (e) {}   // 关掉 setup.html 探测标签（尽力而为）
+      if (!document.hidden) window.location.href = BEACIO_APPSTORE_URL;   // 未装：直接跳 App Store
+    };
+    try { popup.addEventListener('load', onLoaded); } catch (e) {}
+    // 兜底：5s 后 popup 既未 load（已装拉起中，正常）也未关闭 → 清理监听，不做跳转
+    const safety = setTimeout(() => {
+      try { popup.removeEventListener('load', onLoaded); } catch (e) {}
+    }, 5000);
+    const cleanup = () => {
+      try { popup.removeEventListener('load', onLoaded); } catch (e) {}
+      clearTimeout(safety);
+    };
     window.addEventListener('pagehide', cleanup, { once: true });
-    window.addEventListener('visibilitychange', () => { if (document.hidden) cleanup(); }, { once: true });
   }
-  // 安装引导弹窗：仅兜底场景使用（URL 构造失败 / 探测标签被拦截无法判定装未装）。
+  // 安装引导弹窗：仅兜底场景使用（URL 构造失败等异常，此时无法探测装/未装）。
   // 复用同一 modal：标题/文案/按钮换成安装指引 + App Store 链接按钮（用户主动点击才跳转）
   function beacioShowInstallGuide() {
     els.modalTitle.textContent = 'Bluetooth needs beacio';
@@ -1416,8 +1421,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
            //   - active（扩展已开启并注入真 API）→ 不弹窗，Connect 走正常 requestDevice；
            //   - 非 active（已装未开 / 未装，网页层无法区分）→ 弹我们自己的引导弹窗，
            //     用户点按钮后跳转（onboarding-start 新标签探测：已装拉起 app 引导开启；
-           //     未装 2.5s 后关探测标签直接跳 App Store，不经过 setup.html）；
-           //     兜底弹窗仅用于探测标签被拦截等异常。
+           //     未装 popup load 触发后关探测标签直接跳 App Store，不经过 setup.html 停留）；
+           //     兜底仅用于探测标签被拦截等异常。
            const showBeacioGuide = () => {
              els.modalTitle.textContent = 'Bluetooth needs beacio';
              els.modalMessage.textContent = 'To connect on iPhone, the free beacio Safari extension (iOS 26.2+) must be installed and enabled. Tap Continue — if beacio is already installed, it will guide you through turning it on in Safari; if not, you will be taken to the App Store. After enabling it, refresh this page and tap Connect.';
