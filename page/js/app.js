@@ -1335,44 +1335,42 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     setTimeout(beacioFinalize, 3000);  // 绝对兜底
   }
   function beacioGotoOnboarding() {
-    let u;
-    try {
-      u = new URL(BEACIO_ONBOARDING_START);
-      u.searchParams.set('origin', window.location.origin);
-      u.searchParams.set('source', 'request-device');
-      u.searchParams.set('url', window.location.href);
-      u.searchParams.set('return', 'https://link.beacio.com/return?url=' + encodeURIComponent(window.location.href));
-    } catch (e) {
-      beacioShowInstallGuide();
-      return;
-    }
-    // 探测法（绕过 onboarding-start 未装时的 302→setup.html 吞掉回退）：
-    // 用 window.open 在新标签打开 onboarding-start（Universal Link）——
-    //   · 已装 beacio app → iOS 拦截导航拉起 app（popup 不加载，load 不触发）→ app 引导开启 → return 回跳
-    //   · 未装 → 服务端 302 到 setup.html 在 popup 中加载完成 → popup load 事件触发 → 判定未装：
-    //       关闭探测标签 + 直接跳 App Store（产品要求：不经过 setup.html 停留、不直接弹安装弹窗）
-    let popup = null;
-    try { popup = window.open(u.toString(), '_blank'); } catch (e) {}
-    if (!popup) {
-      // 探测标签被拦截（极少数）：顶层跳转 onboarding-start，至少保证已装用户可被拉起
+    // 双按钮知情分流（替代探测法）：iOS Safari 不允许脚本关闭探测标签（popup.close 被忽略），
+    // 探测会在未装时残留 setup.html 标签；改为让用户自述已装/未装，主站页面永不导航走：
+    //   · 已安装 → 顶层跳 onboarding-start：已装 → iOS 拦截拉起 beacio app 强引导开启（Safari 标签保留，页面不丢）
+    //   · 未安装 → 直接 App Store 商品页（零 setup，页面不丢）
+    const oldWrap = document.getElementById('beacioDualBtns');
+    if (oldWrap) oldWrap.remove();
+    const wrapper = document.createElement('div');
+    wrapper.id = 'beacioDualBtns';
+    wrapper.style.cssText = 'margin-top:12px;display:flex;flex-direction:column;gap:8px;';
+    wrapper.innerHTML =
+      '<button id="beacioInstalledBtn" type="button" style="display:block;width:100%;padding:10px 12px;font-size:14px;font-weight:600;border:none;border-radius:8px;background:#16a34a;color:#fff;cursor:pointer;">Yes, installed — guide me to enable it</button>' +
+      '<button id="beacioNotInstalledBtn" type="button" style="display:block;width:100%;padding:10px 12px;font-size:14px;font-weight:600;border:none;border-radius:8px;background:#2563eb;color:#fff;cursor:pointer;">No, not installed — go to App Store</button>' +
+      '<div style="font-size:12px;color:#94a3b8;text-align:center;margin-top:2px;">Choose the first only if you really installed beacio before. After enabling or installing, return here, refresh the page, and tap Connect again.</div>';
+    els.modalActionBtn.classList.add('hidden');
+    els.modalActionBtn.parentNode.insertBefore(wrapper, els.modalActionBtn);
+    els.modal.classList.remove('hidden');
+    els.modal.classList.add('flex');
+    document.getElementById('beacioInstalledBtn').addEventListener('click', () => {
+      let u;
+      try {
+        u = new URL(BEACIO_ONBOARDING_START);
+        u.searchParams.set('origin', window.location.origin);
+        u.searchParams.set('source', 'request-device');
+        u.searchParams.set('url', window.location.href);
+        u.searchParams.set('return', 'https://link.beacio.com/return?url=' + encodeURIComponent(window.location.href));
+      } catch (e) {
+        beacioShowInstallGuide();
+        return;
+      }
       window.location.href = u.toString();
-      return;
-    }
-    const onLoaded = () => {
-      try { popup.close(); } catch (e) {}   // 关掉 setup.html 探测标签（尽力而为）
-      if (!document.hidden) window.location.href = BEACIO_APPSTORE_URL;   // 未装：直接跳 App Store
-    };
-    try { popup.addEventListener('load', onLoaded); } catch (e) {}
-    // 兜底：5s 后 popup 既未 load（已装拉起中，正常）也未关闭 → 清理监听，不做跳转
-    const safety = setTimeout(() => {
-      try { popup.removeEventListener('load', onLoaded); } catch (e) {}
-    }, 5000);
-    const cleanup = () => {
-      try { popup.removeEventListener('load', onLoaded); } catch (e) {}
-      clearTimeout(safety);
-    };
-    window.addEventListener('pagehide', cleanup, { once: true });
+    });
+    document.getElementById('beacioNotInstalledBtn').addEventListener('click', () => {
+      window.location.href = BEACIO_APPSTORE_URL;
+    });
   }
+
   // 安装引导弹窗：仅兜底场景使用（URL 构造失败等异常，此时无法探测装/未装）。
   // 复用同一 modal：标题/文案/按钮换成安装指引 + App Store 链接按钮（用户主动点击才跳转）
   function beacioShowInstallGuide() {
@@ -1425,16 +1423,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
            //     兜底仅用于探测标签被拦截等异常。
            const showBeacioGuide = () => {
              els.modalTitle.textContent = 'Bluetooth needs beacio';
-             els.modalMessage.textContent = 'To connect on iPhone, the free beacio Safari extension (iOS 26.2+) must be installed and enabled. Tap Continue — if beacio is already installed, it will guide you through turning it on in Safari; if not, you will be taken to the App Store. After enabling it, refresh this page and tap Connect.';
-             els.modalActionBtn.textContent = 'Continue';
-             els.modalActionBtn.href = '#';
-             els.modalActionBtn.onclick = (e) => {
-               e.preventDefault();
-               beacioGotoOnboarding();
-             };
-             els.modalActionBtn.classList.remove('hidden');
-             els.modal.classList.remove('hidden');
-             els.modal.classList.add('flex');
+             els.modalMessage.textContent = 'To connect on iPhone, the free beacio Safari extension (iOS 26.2+) must be installed and enabled. Have you installed beacio before?';
+             beacioGotoOnboarding();
            };
            if (beacioState() === 'active') {
              return;   // beacio 已接管，不显示我们的弹窗
