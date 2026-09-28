@@ -103,11 +103,14 @@ const BLEProtocol = (() => {
     // 的合并数据；主广播包的 BTHome 数据供 HA 等被动扫描器使用。
     // namePrefix 为过渡期兜底：兼容尚未刷新固件（无 128 位 UUID 广播）的旧设备；
     // 全部设备刷新固件后可移除该 filter，恢复按 UUID 精确识别
+    // optionalServices 必须包含 DIS_SERVICE(0x180A)：Web Bluetooth 只允许访问
+    // 此处声明过的服务，Chrome（安卓/桌面）会严格执行——漏声明时连接后读 DIS
+    // 0x2A26 固件版本直接抛 SecurityError，版本徽章永远显示 unknown 并误报升级
     return navigator.bluetooth.requestDevice({
   filters: [{
   namePrefix: 'SoilPulse'
 }],
-  optionalServices: [UUIDS.OTA_SERVICE,UUIDS.SERVICE]
+  optionalServices: [UUIDS.OTA_SERVICE, UUIDS.SERVICE, UUIDS.DIS_SERVICE]
 });
   }
 

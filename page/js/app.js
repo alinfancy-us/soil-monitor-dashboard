@@ -444,6 +444,24 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     }
   }
 
+  // 按设备缓存最近一次确认的固件版本：版本读取成功 / OTA 升级成功时写入；
+  // 读取失败（DIS 0x2A26 偶发失败）时回退用缓存值参与更新比对，
+  // 避免已升到最新的设备因“版本未知”被反复提示升级
+  function getCachedFwVersion(deviceId) {
+    try {
+      return localStorage.getItem(`${CACHE_PREFIX}fwVer:${deviceId}`) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function setCachedFwVersion(deviceId, version) {
+    if (!deviceId || !version) return;
+    try {
+      localStorage.setItem(`${CACHE_PREFIX}fwVer:${deviceId}`, version);
+    } catch (_) {}
+  }
+
   // 设备展示名徽章：设置文字并显示，同时持久化到 localStorage——断开连接、刷新页面后
   // 仍展示最近一次连接的设备名（需求：disconnect 时不隐藏设备名）
   function showDeviceNameBadge(name) {
@@ -1437,7 +1455,13 @@ function clearConnectError() {
        state.calibStatusChar = calibStatusChar;
        state.devNameChar = devNameChar;
        state.otaChar = otaChar;
-       state.fwVersion = fwVersion;
+       // DIS 读取失败（返回空串/null）时回退按设备缓存的版本；读取成功则刷新缓存
+       state.fwVersion = fwVersion || getCachedFwVersion(device.id);
+       if (fwVersion) {
+         setCachedFwVersion(device.id, fwVersion);
+       } else {
+         log('Firmware version read failed (DIS 0x2A26), fallback to cached: ' + (state.fwVersion || 'none'));
+       }
        checkFirmwareUpdate();
 
        // 设备已连上 GATT 即置 connected：按钮立即可用；notify 订阅移后台，不再阻塞按钮 ready
@@ -2237,7 +2261,7 @@ The device will measure the current probe state first, then apply the calibratio
     try {
       const res = await fetch(upd.url, { cache: "no-store" });
       if (!res.ok) throw new Error(`firmware download failed: HTTP ${res.status}`);
-      await runOtaUpdate(await res.arrayBuffer(), upd.bin);
+      await runOtaUpdate(await res.arrayBuffer(), upd.bin, upd.version);
     } catch (err) {
       els.otaStatus.textContent = formatOtaError(err);
       els.otaStatus.className = "text-xs font-medium text-rose-600";
@@ -2258,13 +2282,13 @@ The device will measure the current probe state first, then apply the calibratio
       els.otaStatus.className = "text-xs font-medium text-rose-600";
       return;
     }
-    await runOtaUpdate(last.firmware, last.label);
+    await runOtaUpdate(last.firmware, last.label, last.version);
   });
 
   // OTA 推送主流程（手动选文件 / 一键升级共用）：进度条 + 结果展示 + 按钮态恢复
-  async function runOtaUpdate(firmware, label) {
+  async function runOtaUpdate(firmware, label, version) {
     state.otaRunning = true;
-    state.otaLastFirmware = { firmware, label };
+    state.otaLastFirmware = { firmware, label, version };
     stopPolling(); // OTA 期间暂停轮询，避免 GATT 读写抢占升级链路
     setOtaUiLock(true);
     els.otaProgressWrap.classList.remove("hidden");
@@ -2309,6 +2333,12 @@ The device will measure the current probe state first, then apply the calibratio
       log(`[OTA] ${message}`);
       if (ok) {
         state.fwUpdate = null;
+        // 升级成功：徽章立即切换为新版本，并写入按设备缓存——设备重启重连后
+        // 即使 DIS 读取再失败，也不会因“版本未知”再次提示升级
+        if (version) {
+          state.fwVersion = version;
+          setCachedFwVersion(state.activeDeviceId, version);
+        }
         renderFirmwareCard();
       }
     } catch (err) {
@@ -2358,6 +2388,13 @@ The device will measure the current probe state first, then apply the calibratio
       // isforce：dev 渠道发布的强制升级清单，跳过版本号比较直接提醒升级（用于测试固件下发，
       // 以及填入正式版 URL 后把测试固件覆盖回正式版）；设备已在该版本上时（字符串相等，
       // 测试固件版本为 commit hash）仍不提醒，避免重复打扰
+      // 版本未知（DIS 读取失败且本地无缓存）时绝不能当作“旧版本”提示升级——
+      // 否则刚升到最新的设备会被反复提示升级；跳过检查并保持卡片中性展示
+      if (!state.fwVersion) {
+        log('[OTA] firmware version unknown, update check skipped');
+        renderFirmwareCard();
+        return;
+      }
       const isForce = m.latest.isforce === true;
       if (String(state.fwVersion || "") === String(m.latest.version)
         || (!isForce && compareVersions(m.latest.version, state.fwVersion) <= 0)) {
@@ -2406,7 +2443,7 @@ The device will measure the current probe state first, then apply the calibratio
   // 渲染 Setting 面板里的 Firmware 卡片状态（当前版本 / 更新提示 / 红点 / What's new 列表）
   function renderFirmwareCard() {
     const upd = state.fwUpdate;
-    const ver = state.fwVersion || 'unknown';
+    const ver = state.fwVersion || '--';
     els.otaCurrentVersionBadge.textContent = `v${ver}`;
     const hasUpdate = !!upd;
     els.otaUpdateHint.classList.toggle('hidden', !hasUpdate);
