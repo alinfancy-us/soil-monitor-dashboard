@@ -1454,6 +1454,24 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
              waitFinal();
            }
            return;     // 不走到末尾的统一显示，由上方决定
+         } else if (iosVer !== null && iosVer >= 26.2) {
+           // 系统 ≥iOS 26.2（支持 beacio 扩展）但当前不是原生 Safari（Chrome iOS / Edge iOS 等）：
+           // beacio 是 Safari 扩展、仅原生 Safari 生效，引导复制链接去 Safari 打开后连接。
+           els.modalTitle.textContent = 'Open in Safari to Connect';
+           els.modalMessage.textContent = 'Your iPhone supports the beacio extension (iOS 26.2+), but this browser does not support Web Bluetooth. Tap "Copy Link", then open it in the Safari browser and tap Connect there.';
+           els.modalActionBtn.textContent = 'Copy Link';
+           els.modalActionBtn.href = '#';
+           els.modalActionBtn.onclick = async (e) => {
+             e.preventDefault();
+             const copied = await Promise.race([
+               copyTextToClipboard(window.location.href),
+               new Promise((resolve) => setTimeout(() => resolve(false), 400)),
+             ]);
+             els.modalMessage.textContent = copied
+               ? '✅ Link copied. Now open the Safari browser, paste this address in the address bar and tap Connect.'
+               : `Please open Safari and manually enter this address: ${window.location.href}`;
+             els.modalActionBtn.classList.add('hidden');
+           };
          } else {
            els.modalTitle.textContent = 'Bluetooth Unavailable in Browser';
            els.modalMessage.textContent = 'iOS Browser does not support Web Bluetooth. Tap "Open in Bluefy" to continue — the dashboard link will be copied to your clipboard so you can paste it into Bluefy after installing.';
