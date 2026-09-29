@@ -1686,10 +1686,19 @@ function clearConnectError() {
          // 阶段2b：已连上但服务发现/时间同步/订阅初始化超时——多为射频信号差或慢平台
          showConnectError('Connected, but setup timed out — weak signal? Move closer and reconnect');
          log('Post-connect setup timed out after 20s');
-       } else if (/cancel|chooser/i.test(errMsg)) {
+       } else if (/cancel|chooser/i.test(errMsg) || /NotFoundError|AbortError/i.test(err && err.name)) {
          log('Connection chooser dismissed by user (not an error)');
+       } else if (/NotSupportedError|SecurityError/i.test(err && err.name)) {
+         // 浏览器不支持/禁止 Web Bluetooth：requestDevice 抛 NotSupportedError/SecurityError
+         // （小米等 Chromium 内核但未完整实现 Web Bluetooth 的 Android 浏览器），改为可见引导，不再静默吞掉
+         if (/Android/.test(navigator.userAgent)) {
+           showModal(false, true);   // Android：复用"请用 Google Chrome"引导弹窗
+         } else {
+           showConnectError('This browser does not support Web Bluetooth. Please use Google Chrome.');
+         }
+         log(`Web Bluetooth unsupported by this browser: ${err.name}`);
        } else {
-         log(`Connection failed: ${err.message || err}`);
+         log(`Connection failed: ${err.name}: ${err.message || err}`);
        }
      }
    }
