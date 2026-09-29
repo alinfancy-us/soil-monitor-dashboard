@@ -1393,8 +1393,6 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
 
   function showModal(isIOS, isAndroid) {
      const ua = navigator.userAgent;
-     const isWeChat = /MicroMessenger/i.test(ua);
-     const isChrome = /Chrome/.test(ua) && !/wv/i.test(ua) && !/WebView/i.test(ua);
      // iOS 上所有浏览器壳都是 WKWebView、UA 都以 Safari 结尾，用排除法识别原生 Safari。
      // beacio 是 Safari 扩展、仅在 Safari 生效，故 beacio 引导弹窗只对原生 Safari 显示，
      // 防止 Chrome iOS(CriOS)/Firefox(FxiOS)/Edge(EdgiOS) 等其他浏览器也弹 beacio 引导。
@@ -1504,13 +1502,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      } else if (isAndroid) {
        els.modalIcon.innerHTML = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
        els.modalTitle.textContent = 'Browser Web Bluetooth Unavailable';
-       if (isWeChat) {
-         els.modalMessage.textContent = 'WeChat\'s built-in browser does not support Web Bluetooth. Tap the menu in the top-right corner and choose "Open in Browser", then use Google Chrome.';
-       } else if (!isChrome) {
-         els.modalMessage.textContent = 'Your browser does not support Web Bluetooth. Please open this page in Google Chrome.';
-       } else {
-         els.modalMessage.textContent = 'Your browser does not support Web Bluetooth. Please use Google Chrome.';
-       }
+       // 统一引导：Android 只有 Chrome/Edge（canUseBluetooth 已放行）可直连，其余一律提示开启蓝牙并用 Chrome 打开
+       els.modalMessage.textContent = 'Turn on Bluetooth, then open this page in Google Chrome to connect your sensor.';
        els.modalActionBtn.textContent = 'Get Chrome on Google Play';
        els.modalActionBtn.href = 'https://play.google.com/store/apps/details?id=com.android.chrome';
        els.modalActionBtn.classList.remove('hidden');
