@@ -1534,15 +1534,9 @@ function clearConnectError() {
        showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
        return;
      }
-     // iOS Safari 的 beacio 场景：beacio 未激活时走引导弹窗（不调用 requestDevice，
-     // 避免 beacio.js 的 stub 在 requestDevice 里直接跳转、用户无预期）。
-     // 仅对原生 Safari 拦截：Bluefy 等其他自带真实 Web Bluetooth 的 iOS 环境
-     // 应直接连接，不能进入 beacio/Bluefy 引导。
-     if (/iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream && isNativeSafari() && beacioState() !== 'active') {
-       showModal(true, false);
-       return;
-     }
-
+     // 有 Web Bluetooth 时直接连接（Bluefy / beacio active / 桌面等真实 API）。
+     // 无 Web Bluetooth 时由上方 showModal 引导；beacio 未激活不会注入 API（会走上方
+     // !navigator.bluetooth 分支），故无需按浏览器/UA 额外拦截。
      const token = ++connectToken;
      clearConnectError();   // 新的连接尝试开始，清除上一次失败的红字提示
      setConnectBusy(true);   // 进入连接流程：锁定 Connect 按钮，防止连接过程中重复点击
