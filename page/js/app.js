@@ -1541,8 +1541,22 @@ function clearConnectError() {
   els.connectErrorText.classList.add('hidden');
 }
 
+   // Android 下 Web Bluetooth 支持碎片化：很多非 Chrome 浏览器（微信内嵌、三星等）即使
+   // navigator.bluetooth 存在也常为"假支持"（拉不起系统选择器），单看该字段会误判直连。
+   // 改为"有 bluetooth 且浏览器可信"：Android 只信任 Chrome（且非微信/WebView）；iOS/桌面有 bluetooth 即可用
+   function canUseBluetooth() {
+     if (!navigator.bluetooth) return false;
+     const ua = navigator.userAgent;
+     if (/Android/.test(ua)) {
+       const isWeChat = /MicroMessenger/i.test(ua);
+       const isChrome = /Chrome/.test(ua) && !/wv/i.test(ua) && !/WebView/i.test(ua);
+       return isChrome && !isWeChat;
+     }
+     return true;
+   }
+
    async function handleConnect() {
-     if (!navigator.bluetooth) {
+     if (!canUseBluetooth()) {
        const ua = navigator.userAgent;
        showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
        return;
@@ -2713,13 +2727,13 @@ The device will measure the current probe state first, then apply the calibratio
   if (state.activeDeviceId) restoreCachedCharts(state.activeDeviceId);
  
    startBeacioDetect();   // 启动自研 beacio 检测（幂等）：active 判定 + 非 active 引导弹窗
-   if (!navigator.bluetooth) {
+   if (!canUseBluetooth()) {
      // 给 beacio 扩展注入留窗口：iOS Safari 从后台恢复重建页面时，扩展注入可能晚于页面脚本，
      // 立即同步判断会把"beacio 即将就绪"误判为"无 Web Bluetooth"而误弹窗（表现为切后台回来自动弹）。
      // 延迟重查：beacio 注入完成后 navigator.bluetooth 出现则正常可用（不弹不禁用）；
      // 仍无 bluetooth 才提示并禁用按钮（弹一次，按钮禁用后不会每次点击重复弹）。
      setTimeout(() => {
-       if (navigator.bluetooth) return;
+       if (canUseBluetooth()) return;
        const ua = navigator.userAgent;
        showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
        els.connectBtn.disabled = true;
