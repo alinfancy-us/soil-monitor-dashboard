@@ -1553,12 +1553,14 @@ function clearConnectError() {
      const token = ++connectToken;
      clearConnectError();   // 新的连接尝试开始，清除上一次失败的红字提示
      setConnectBusy(true);   // 进入连接流程：锁定 Connect 按钮，防止连接过程中重复点击
+     let devicePicked = false;   // 是否已通过 requestDevice 拿到设备：区分"浏览器拉不起蓝牙"与"连接/信号失败"
      try {
        setStatus('connecting');
        log('Requesting Bluetooth Device...');
 
        // 阶段1：仅弹设备选择器（不设超时，用户挑设备时长不受限）
        const device = await BLEProtocol.requestSoilDevice();
+       devicePicked = true;   // 已拿到设备：此后失败属连接/信号问题，不再归因"浏览器拉不起蓝牙"
        if (token !== connectToken) return;   // 期间用户又发起了新连接，丢弃本次
 
        // 阶段2：gatt.connect + 服务/特征发现，由 finishConnect 内部保证 5s 超时
@@ -1688,17 +1690,20 @@ function clearConnectError() {
          log('Post-connect setup timed out after 20s');
        } else if (/cancel|chooser/i.test(errMsg) || /NotFoundError|AbortError/i.test(err && err.name)) {
          log('Connection chooser dismissed by user (not an error)');
-       } else if (/NotSupportedError|SecurityError/i.test(err && err.name)) {
-         // 浏览器不支持/禁止 Web Bluetooth：requestDevice 抛 NotSupportedError/SecurityError
-         // （小米等 Chromium 内核但未完整实现 Web Bluetooth 的 Android 浏览器），改为可见引导，不再静默吞掉
+       } else if (!devicePicked) {
+         // requestDevice 阶段失败（还没选到设备）：加载时无法判断浏览器能否真正拉起蓝牙，
+         // 只有真到这步才知道。不依赖 err.name 枚举（小米等会抛 NotAllowedError 等未枚举名，
+         // 会被旧 else 静默成"闪一下没反应"），统一走可见引导：Android → 用 Chrome；其他 → 显示具体错误
          if (/Android/.test(navigator.userAgent)) {
            showModal(false, true);   // Android：复用"请用 Google Chrome"引导弹窗
          } else {
-           showConnectError('This browser does not support Web Bluetooth. Please use Google Chrome.');
+           showConnectError(`This browser could not start Bluetooth (${(err && err.name) || 'error'}). Please use Google Chrome.`);
          }
-         log(`Web Bluetooth unsupported by this browser: ${err.name}`);
+         log(`Bluetooth could not start (requestDevice): ${(err && err.name) || '?'}: ${(err && err.message) || err}`);
        } else {
-         log(`Connection failed: ${err.name}: ${err.message || err}`);
+         // 已选到设备，后续连接/初始化失败 → 设备/信号问题，不引导 Chrome
+         showConnectError(`Connection failed (${(err && err.name) || 'error'}). Check signal and retry.`);
+         log(`Connection failed after device pick: ${(err && err.name) || '?'}: ${(err && err.message) || err}`);
        }
      }
    }
