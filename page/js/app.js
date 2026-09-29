@@ -2687,9 +2687,16 @@ The device will measure the current probe state first, then apply the calibratio
  
    startBeacioDetect();   // 启动自研 beacio 检测（幂等）：active 判定 + 非 active 引导弹窗
    if (!navigator.bluetooth) {
-     const ua = navigator.userAgent;
-     showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
-     els.connectBtn.disabled = true;
-     els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
+     // 给 beacio 扩展注入留窗口：iOS Safari 从后台恢复重建页面时，扩展注入可能晚于页面脚本，
+     // 立即同步判断会把"beacio 即将就绪"误判为"无 Web Bluetooth"而误弹窗（表现为切后台回来自动弹）。
+     // 延迟重查：beacio 注入完成后 navigator.bluetooth 出现则正常可用（不弹不禁用）；
+     // 仍无 bluetooth 才提示并禁用按钮（弹一次，按钮禁用后不会每次点击重复弹）。
+     setTimeout(() => {
+       if (navigator.bluetooth) return;
+       const ua = navigator.userAgent;
+       showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
+       els.connectBtn.disabled = true;
+       els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
+     }, 800);
    }
  })();
