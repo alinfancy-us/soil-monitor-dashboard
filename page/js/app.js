@@ -1346,8 +1346,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     wrapper.style.cssText = 'margin-top:12px;display:flex;flex-direction:column;gap:8px;';
     wrapper.innerHTML =
       '<button id="beacioInstalledBtn" type="button" style="display:block;width:100%;padding:10px 12px;font-size:14px;font-weight:600;border:none;border-radius:8px;background:#16a34a;color:#fff;cursor:pointer;">Yes, installed — guide me to enable it</button>' +
-      '<button id="beacioNotInstalledBtn" type="button" style="display:block;width:100%;padding:10px 12px;font-size:14px;font-weight:600;border:none;border-radius:8px;background:#2563eb;color:#fff;cursor:pointer;">No, not installed — go to App Store</button>' +
-      '<div style="font-size:12px;color:#94a3b8;text-align:center;margin-top:2px;">Choose the first only if you really installed beacio before. After enabling or installing, return here, refresh the page, and tap Connect again.</div>';
+      '<button id="beacioNotInstalledBtn" type="button" style="display:block;width:100%;padding:10px 12px;font-size:14px;font-weight:600;border:none;border-radius:8px;background:#2563eb;color:#fff;cursor:pointer;">No, not installed — go to App Store</button>';
     els.modalActionBtn.classList.add('hidden');
     els.modalActionBtn.parentNode.insertBefore(wrapper, els.modalActionBtn);
     els.modal.classList.remove('hidden');
@@ -1388,6 +1387,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      const ua = navigator.userAgent;
      const isWeChat = /MicroMessenger/i.test(ua);
      const isChrome = /Chrome/.test(ua) && !/wv/i.test(ua) && !/WebView/i.test(ua);
+     // iOS 上所有浏览器壳都是 WKWebView、UA 都以 Safari 结尾，用排除法识别原生 Safari。
+     // beacio 是 Safari 扩展、仅在 Safari 生效，故 beacio 引导弹窗只对原生 Safari 显示，
+     // 防止 Chrome iOS(CriOS)/Firefox(FxiOS)/Edge(EdgiOS) 等其他浏览器也弹 beacio 引导。
+     const isSafari = /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|Aviator|Mercury|DuckDuckGo|wv|WebView/i.test(ua);
  
      if (isIOS) {
        els.modalIcon.innerHTML = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
@@ -1414,7 +1417,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
          // beacio Safari 扩展要求 iOS 26.2+；26.2+ 优先引导 beacio（新增分支），
          // 低于该版本（或版本解析失败）走回原有、稳定的 Bluefy 引导（原逻辑未改动）
          const iosVer = parseIOSVersion(ua);
-         if (iosVer !== null && iosVer >= 26.2) {
+         if (isSafari && iosVer !== null && iosVer >= 26.2) {
            // 自研 beacio 检测替代原 decide(20) 轮询：主动握手判定（标记/ready/ping-pong，≤1s 收尾）。
            //   - active（扩展已开启并注入真 API）→ 不弹窗，Connect 走正常 requestDevice；
            //   - 非 active（已装未开 / 未装，网页层无法区分）→ 弹我们自己的引导弹窗，
@@ -1423,7 +1426,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
            //     兜底仅用于探测标签被拦截等异常。
            const showBeacioGuide = () => {
              els.modalTitle.textContent = 'Bluetooth needs beacio';
-             els.modalMessage.textContent = 'To connect on iPhone, the free beacio Safari extension (iOS 26.2+) must be installed and enabled. Have you installed beacio before?';
+             els.modalMessage.textContent = 'To connect on iPhone, the free beacio Safari extension (iOS 26.2+) must be installed and enabled. Have you installed beacio before? Choose the first option only if you really installed it before — after enabling or installing, return here, refresh the page, and tap Connect again.';
              beacioGotoOnboarding();
            };
            if (beacioState() === 'active') {
