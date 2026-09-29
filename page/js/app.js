@@ -1383,6 +1383,14 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     els.modal.classList.add('flex');
   }
 
+  // iOS 上所有浏览器壳都是 WKWebView、UA 都以 Safari 结尾，用排除法识别原生 Safari。
+  // beacio 是 Safari 扩展、仅在原生 Safari 生效；Bluefy 等自带真实 Web Bluetooth 的浏览器
+  // 应直接走连接、不进入 beacio/Bluefy 引导，故一并排除（Bluefy UA 含 "Bluefy"）。
+  function isNativeSafari() {
+    const ua = navigator.userAgent;
+    return /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|Aviator|Mercury|DuckDuckGo|Bluefy|wv|WebView/i.test(ua);
+  }
+
   function showModal(isIOS, isAndroid) {
      const ua = navigator.userAgent;
      const isWeChat = /MicroMessenger/i.test(ua);
@@ -1390,7 +1398,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      // iOS 上所有浏览器壳都是 WKWebView、UA 都以 Safari 结尾，用排除法识别原生 Safari。
      // beacio 是 Safari 扩展、仅在 Safari 生效，故 beacio 引导弹窗只对原生 Safari 显示，
      // 防止 Chrome iOS(CriOS)/Firefox(FxiOS)/Edge(EdgiOS) 等其他浏览器也弹 beacio 引导。
-     const isSafari = /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|Aviator|Mercury|DuckDuckGo|wv|WebView/i.test(ua);
+     const isSafari = isNativeSafari();
  
      if (isIOS) {
        els.modalIcon.innerHTML = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
@@ -1526,9 +1534,11 @@ function clearConnectError() {
        showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
        return;
      }
-     // iOS Safari：自研检测非 active 时走引导弹窗（不调用 requestDevice，
-     // 避免 beacio.js 的 stub 在 requestDevice 里直接跳转、用户无预期）
-     if (/iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream && beacioState() !== 'active') {
+     // iOS Safari 的 beacio 场景：beacio 未激活时走引导弹窗（不调用 requestDevice，
+     // 避免 beacio.js 的 stub 在 requestDevice 里直接跳转、用户无预期）。
+     // 仅对原生 Safari 拦截：Bluefy 等其他自带真实 Web Bluetooth 的 iOS 环境
+     // 应直接连接，不能进入 beacio/Bluefy 引导。
+     if (/iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream && isNativeSafari() && beacioState() !== 'active') {
        showModal(true, false);
        return;
      }
