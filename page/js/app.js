@@ -1541,16 +1541,17 @@ function clearConnectError() {
   els.connectErrorText.classList.add('hidden');
 }
 
-   // Android 下 Web Bluetooth 支持碎片化：很多非 Chrome 浏览器（微信内嵌、三星等）即使
-   // navigator.bluetooth 存在也常为"假支持"（拉不起系统选择器），单看该字段会误判直连。
-   // 改为"有 bluetooth 且浏览器可信"：Android 只信任 Chrome（且非微信/WebView）；iOS/桌面有 bluetooth 即可用
+   // Android 实测：仅 Chromium 内核的 Chrome / Edge 能可靠拉起 Web Bluetooth，
+   // 其余（Firefox、三星、微信内嵌等）即使 navigator.bluetooth 存在也常为假支持。
+   // 故 Android 下"有 bluetooth 且浏览器可信（Chrome/Edge）"才直连；iOS/桌面有 bluetooth 即可用。
    function canUseBluetooth() {
      if (!navigator.bluetooth) return false;
      const ua = navigator.userAgent;
      if (/Android/.test(ua)) {
        const isWeChat = /MicroMessenger/i.test(ua);
-       const isChrome = /Chrome/.test(ua) && !/wv/i.test(ua) && !/WebView/i.test(ua);
-       return isChrome && !isWeChat;
+       const isSamsung = /SamsungBrowser/i.test(ua);
+       const isChromium = /(Chrome|Edg)/i.test(ua) && !/wv/i.test(ua) && !/WebView/i.test(ua);
+       return isChromium && !isWeChat && !isSamsung;
      }
      return true;
    }
