@@ -378,7 +378,7 @@ const BLEProtocol = (() => {
    * @returns {{timestamp:number,temp:number,hum:number,batt:number,measureSeq?:number}|null}
    */
   function parseLatestValue(view) {
-    if (!view || view.byteLength < RECORD_SIZE) return null;
+    if (!view || view.byteLength < 10) return null;
     return {
       timestamp: view.getUint32(0, true),
       temp: view.getInt16(4, true) / 100,
