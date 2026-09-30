@@ -1537,6 +1537,7 @@ function clearConnectError() {
    // 页面层无法区分"已装未开"与"未装"；且能进入本引导时 beacio 必然未注入（active 时
    // navigator.bluetooth 已存在、不会走到这里），无需再做握手等待（原 waitFinal 死逻辑已删）。
    function guideBeacio() {
+     startBeacioDetect();   // beacio 握手检测移到点击时触发（不在页面加载时跑，幂等可重复调用）
      showGuideModal({
        iconHtml: GUIDE_LOGO_ICON,
        title: 'Bluetooth needs beacio',
@@ -1629,20 +1630,34 @@ function clearConnectError() {
    // iOS 判定顺序（Safari 优先 + Bluefy 特判）：② Bluefy 自带真实 API → ③ 原生 Safari?
    // → ④ navigator.bluetooth（beacio active 注入为真直接放行）→ ⑤ standalone / beacio /
    // Bluefy 三条路。
+   // iOS 点击 Connect 时的全量判定（②～⑤ 级联；④⑤ 依赖 beacio 注入 / standalone 等
+   // 运行时状态，统一延迟到点击时执行，不在页面加载时判定）
+   function ensureIosEnv() {
+     if (isBluefy() && navigator.bluetooth) { log('[gate] ios: Bluefy + API → direct'); return true; }   // ② Bluefy 直连
+     if (!isNativeSafari()) { log('[gate] ios: non-native-Safari shell → x-safari guide'); guideIosNonSafari(); return false; }   // ③ Safari 优先
+     if (navigator.bluetooth) { log('[gate] ios: Safari + API (beacio active) → direct'); return true; }   // ④ beacio active 注入 → 直连
+     if (isStandalone()) { log('[gate] ios: standalone PWA → copy link guide'); guideIosStandalone(); return false; }
+     const iosVer = parseIOSVersion(navigator.userAgent);
+     if (iosVer !== null && iosVer >= 26.2) { log(`[gate] ios: v${iosVer} ≥ 26.2 → beacio guide`); guideBeacio(); return false; }
+     log(`[gate] ios: v${iosVer} < 26.2 → Bluefy guide`);
+     guideBluefy();
+     return false;
+   }
+
+   // iOS 页面加载时的轻量判定（beacio 注入时机不定，④⑤ 延迟到点击 Connect）：
+   // 仅识别浏览器——Bluefy（有真实 API）与原生 Safari 放行（页面保持正常，不弹窗不禁用）；
+   // 壳浏览器（Chrome iOS 等）返回 false，由调用方立即引导跳 Safari 并禁用 Connect
+   function checkIosBrowserAtLoad() {
+     if (isBluefy() && navigator.bluetooth) { log('[gate] load ios: Bluefy + API → pass'); return true; }
+     if (isNativeSafari()) { log('[gate] load ios: native Safari → pass（④⑤ 判定延迟到点击 Connect）'); return true; }
+     log('[gate] load ios: non-Safari shell → x-safari guide + disable Connect');
+     return false;
+   }
+
    function ensureBluetoothEnv() {
      const platform = detectPlatform();
      log(`[gate] check: platform=${platform} bluetooth=${!!navigator.bluetooth} secure=${window.isSecureContext}`);
-     if (platform === 'ios') {
-       if (isBluefy() && navigator.bluetooth) { log('[gate] ios: Bluefy + API → direct'); return true; }   // ② Bluefy 直连
-       if (!isNativeSafari()) { log('[gate] ios: non-native-Safari shell → x-safari guide'); guideIosNonSafari(); return false; }   // ③ Safari 优先
-       if (navigator.bluetooth) { log('[gate] ios: Safari + API (beacio active) → direct'); return true; }   // ④ beacio active 注入 → 直连
-       if (isStandalone()) { log('[gate] ios: standalone PWA → copy link guide'); guideIosStandalone(); return false; }
-       const iosVer = parseIOSVersion(navigator.userAgent);
-       if (iosVer !== null && iosVer >= 26.2) { log(`[gate] ios: v${iosVer} ≥ 26.2 → beacio guide`); guideBeacio(); return false; }
-       log(`[gate] ios: v${iosVer} < 26.2 → Bluefy guide`);
-       guideBluefy();
-       return false;
-     }
+     if (platform === 'ios') return ensureIosEnv();
      if (platform === 'android') {
        const allowed = isBrowserAllowed('android');
        log(`[gate] android: browserAllowed=${allowed}${allowed ? ' → direct' : ' → intent Chrome guide'}`);
@@ -2828,17 +2843,27 @@ The device will measure the current probe state first, then apply the calibratio
      log(`[env] v${PAGE_VERSION} secure=${window.isSecureContext} bluetooth=${!!navigator.bluetooth} platform=${detectPlatform()} brands=${brands} ua=${navigator.userAgent}`);
    } catch (_) { /* 环境日志失败不影响功能 */ }
 
-   startBeacioDetect();   // 启动自研 beacio 检测（幂等）：为 iOS Safari 的 beacio 引导留注入窗口
-   // 页面加载自动体检：延迟 800ms 统一跑一次环境闸门（800ms 等 iOS beacio 扩展注入完成，
-   // 避免把“扩展即将就绪”误判为“无 Web Bluetooth”）。不通过的平台自动弹对应引导并禁用
-   // Connect——Android 假支持浏览器（小米/UC/微信/三星等 navigator.bluetooth 存在但实现坏）
-   // 也在此触发浏览器判定；点击 Connect 时闸门会再同步兜底跑一次。
-   setTimeout(() => {
+   // 页面加载自动体检（立即执行，无延迟）：
+   //   - Android / 桌面：全量判定，假支持浏览器（小米/UC/微信/三星）与无 API 浏览器
+   //     （Safari/Firefox）加载即弹对应引导并禁用 Connect；
+   //   - iOS：仅识别浏览器——Bluefy / 原生 Safari 放行（页面保持正常，后续 beacio active /
+   //     standalone / beacio / Bluefy 判定延迟到点击 Connect 时触发）；壳浏览器（Chrome iOS
+   //     等）立即引导跳 Safari 并禁用 Connect。800ms 等待已移除（各分支均无注入等待需求）。
+   const loadGatePlatform = detectPlatform();
+   if (loadGatePlatform === 'ios') {
+     const ok = checkIosBrowserAtLoad();
+     log(`[gate] load check (ios): ${ok ? 'pass' : 'fail → x-safari guide + disable Connect'}`);
+     if (!ok) {
+       guideIosNonSafari();
+       els.connectBtn.disabled = true;
+       els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
+     }
+   } else {
      const ok = ensureBluetoothEnv();
-     log(`[gate] load check: ${ok ? 'pass' : 'fail → disable Connect until environment fixed'}`);
+     log(`[gate] load check (${loadGatePlatform}): ${ok ? 'pass' : 'fail → disable Connect until environment fixed'}`);
      if (!ok) {
        els.connectBtn.disabled = true;
        els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
      }
-   }, 800);
+   }
  })();
