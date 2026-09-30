@@ -1415,17 +1415,43 @@ function clearConnectError() {
      return 'desktop';
    }
 
-   // 浏览器白名单：Android 实测仅 Chromium 内核的 Chrome / Edge 能可靠拉起 Web Bluetooth，
-   // 其余（Firefox、三星、微信内嵌等）即使 navigator.bluetooth 存在也常为假支持。
-   // iOS 的 Safari 判定在 ensureBluetoothEnv 内单独做（Safari 优先于 navigator.bluetooth）；
-   // 桌面仅 Chrome/Edge 等 Chromium 浏览器注入 navigator.bluetooth，以其存在为白名单信号。
-   function isBrowserAllowed(platform) {
-     if (platform !== 'android') return true;
+   // UA-CH 品牌精确识别：真实 Chrome 上报 "Google Chrome"、Edge 上报 "Microsoft Edge"，
+   // 其余 Chromium 系浏览器（Brave/Opera/Vivaldi/Arc/微信 XWeb/三星 等）只报自己或 Chromium。
+   // 返回 true/false = 品牌判定结果；null = UA-CH 不可用（旧内核），无法判定品牌。
+   function isTrustedChromiumBrand() {
+     const uad = navigator.userAgentData;
+     if (uad && Array.isArray(uad.brands)) {
+       return uad.brands.some((b) => /^(Google Chrome|Microsoft Edge)$/i.test((b && b.brand) || ''));
+     }
+     return null;
+   }
+
+   // 浏览器白名单：Android 与桌面均只信任 Google Chrome / Microsoft Edge。
+   // iOS 的 Safari/Bluefy 判定在 ensureBluetoothEnv 内单独做（本函数只处理 android/desktop）。
+   // 已知第三方浏览器 UA 标记：安卓国产/厂商浏览器全部为 Chromium 内核、UA 同样携带
+   // "Chrome/xxx"，仅凭 /(Chrome|Edg)/ 会误放行 UC / QQ / 夸克 / 小米 / Vivo / OPPO / 华为
+   // 等"假支持"浏览器，须整表排除（新增浏览器时在此追加标记即可）。
+   const THIRD_PARTY_BROWSER_UA_RE = /(MicroMessenger|SamsungBrowser|OPR|Opera|UCBrowser|UCWEB|MQQBrowser|QQBrowser|Quark|baidubrowser|baiduboxapp|MiuiBrowser|VivoBrowser|HeyTapBrowser|HuaweiBrowser|HiBrowser|DuckDuckGo)/i;
+
+   // Android：Chromium 标记 + 排除第三方 + UA-CH 品牌判定，三级过滤
+   function isAllowedAndroidBrowser() {
      const ua = navigator.userAgent;
-     const isWeChat = /MicroMessenger/i.test(ua);
-     const isSamsung = /SamsungBrowser/i.test(ua);
+     if (THIRD_PARTY_BROWSER_UA_RE.test(ua)) return false;   // 微信/三星/UC/QQ/小米…假支持
      const isChromium = /(Chrome|Edg)/i.test(ua) && !/wv/i.test(ua) && !/WebView/i.test(ua);
-     return isChromium && !isWeChat && !isSamsung;
+     if (!isChromium) return false;                          // Firefox 等非 Chromium
+     return isTrustedChromiumBrand() !== false;              // null（无 UA-CH）= 旧内核回退放行
+   }
+
+   // 桌面：真实 API（排除 Safari/Firefox）+ 品牌收紧到 Chrome/Edge
+   //（Brave/Opera/Vivaldi/Arc 等有真实 API 但非白名单品牌 → 引导换 Chrome）；
+   // 无 UA-CH 的旧内核 Chromium 回退能力判定放行，避免误杀
+   function isAllowedDesktopBrowser() {
+     if (!navigator.bluetooth) return false;
+     return isTrustedChromiumBrand() !== false;              // null（无 UA-CH）= 回退放行
+   }
+
+   function isBrowserAllowed(platform) {
+     return platform === 'android' ? isAllowedAndroidBrowser() : isAllowedDesktopBrowser();
    }
 
    // 兼容性引导弹窗统一渲染：一次调用设置图标/标题/文案/按钮并显示 modal
@@ -1607,7 +1633,7 @@ function clearConnectError() {
        guideAndroidChrome();
        return false;
      }
-     if (navigator.bluetooth) return true;   // 桌面：仅 Chrome/Edge 等 Chromium 浏览器注入该 API
+     if (isBrowserAllowed('desktop')) return true;   // 桌面：仅 Chrome/Edge（UA-CH 品牌判定，旧内核回退能力判定）
      guideDesktopChrome();
      return false;
    }
