@@ -1579,15 +1579,23 @@ function clearConnectError() {
      });
    }
 
+   // Bluefy（iOS App Store 的 Web BLE 浏览器）：自带真实 Web Bluetooth 实现，UA 含
+   // "Bluefy" 标识、isNativeSafari 会排除它；只要 API 存在即直连，不引导去 Safari。
+   function isBluefy() {
+     return /Bluefy/i.test(navigator.userAgent);
+   }
+
    // ===== 环境闸门（页面加载与点击 Connect 共用） =====
    // 返回 true = 环境可直连（进入连接执行层）；false = 已弹出对应平台引导（不应继续连接）。
-   // iOS 判定顺序（Safari 优先）：② 原生 Safari? → ③ navigator.bluetooth（beacio active
-   // 注入为真直接放行）→ ④ standalone / beacio / Bluefy 三条路。
+   // iOS 判定顺序（Safari 优先 + Bluefy 特判）：② Bluefy 自带真实 API → ③ 原生 Safari?
+   // → ④ navigator.bluetooth（beacio active 注入为真直接放行）→ ⑤ standalone / beacio /
+   // Bluefy 三条路。
    function ensureBluetoothEnv() {
      const platform = detectPlatform();
      if (platform === 'ios') {
-       if (!isNativeSafari()) { guideIosNonSafari(); return false; }
-       if (navigator.bluetooth) return true;
+       if (isBluefy() && navigator.bluetooth) return true;   // ② Bluefy 直连
+       if (!isNativeSafari()) { guideIosNonSafari(); return false; }   // ③ Safari 优先
+       if (navigator.bluetooth) return true;   // ④ beacio active 注入 → 直连
        if (isStandalone()) { guideIosStandalone(); return false; }
        const iosVer = parseIOSVersion(navigator.userAgent);
        if (iosVer !== null && iosVer >= 26.2) { guideBeacio(); return false; }
