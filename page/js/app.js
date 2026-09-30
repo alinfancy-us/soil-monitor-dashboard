@@ -1436,18 +1436,31 @@ function clearConnectError() {
    // Android：Chromium 标记 + 排除第三方 + UA-CH 品牌判定，三级过滤
    function isAllowedAndroidBrowser() {
      const ua = navigator.userAgent;
-     if (THIRD_PARTY_BROWSER_UA_RE.test(ua)) return false;   // 微信/三星/UC/QQ/小米…假支持
+     if (THIRD_PARTY_BROWSER_UA_RE.test(ua)) {
+       log('[gate] android: third-party browser UA → blocked (fake Web Bluetooth)');
+       return false;   // 微信/三星/UC/QQ/小米…假支持
+     }
      const isChromium = /(Chrome|Edg)/i.test(ua) && !/wv/i.test(ua) && !/WebView/i.test(ua);
-     if (!isChromium) return false;                          // Firefox 等非 Chromium
-     return isTrustedChromiumBrand() !== false;              // null（无 UA-CH）= 旧内核回退放行
+     if (!isChromium) {
+       log('[gate] android: non-Chromium UA → blocked');
+       return false;                                         // Firefox 等非 Chromium
+     }
+     const brand = isTrustedChromiumBrand();
+     log(`[gate] android: UA-CH brand check=${brand}`);      // null（无 UA-CH）= 旧内核回退放行
+     return brand !== false;
    }
 
    // 桌面：真实 API（排除 Safari/Firefox）+ 品牌收紧到 Chrome/Edge
    //（Brave/Opera/Vivaldi/Arc 等有真实 API 但非白名单品牌 → 引导换 Chrome）；
    // 无 UA-CH 的旧内核 Chromium 回退能力判定放行，避免误杀
    function isAllowedDesktopBrowser() {
-     if (!navigator.bluetooth) return false;
-     return isTrustedChromiumBrand() !== false;              // null（无 UA-CH）= 回退放行
+     if (!navigator.bluetooth) {
+       log('[gate] desktop: no navigator.bluetooth (Safari/Firefox or non-secure context) → blocked');
+       return false;
+     }
+     const brand = isTrustedChromiumBrand();
+     log(`[gate] desktop: UA-CH brand check=${brand}`);      // null（无 UA-CH）= 回退放行
+     return brand !== false;
    }
 
    function isBrowserAllowed(platform) {
@@ -1618,22 +1631,28 @@ function clearConnectError() {
    // Bluefy 三条路。
    function ensureBluetoothEnv() {
      const platform = detectPlatform();
+     log(`[gate] check: platform=${platform} bluetooth=${!!navigator.bluetooth} secure=${window.isSecureContext}`);
      if (platform === 'ios') {
-       if (isBluefy() && navigator.bluetooth) return true;   // ② Bluefy 直连
-       if (!isNativeSafari()) { guideIosNonSafari(); return false; }   // ③ Safari 优先
-       if (navigator.bluetooth) return true;   // ④ beacio active 注入 → 直连
-       if (isStandalone()) { guideIosStandalone(); return false; }
+       if (isBluefy() && navigator.bluetooth) { log('[gate] ios: Bluefy + API → direct'); return true; }   // ② Bluefy 直连
+       if (!isNativeSafari()) { log('[gate] ios: non-native-Safari shell → x-safari guide'); guideIosNonSafari(); return false; }   // ③ Safari 优先
+       if (navigator.bluetooth) { log('[gate] ios: Safari + API (beacio active) → direct'); return true; }   // ④ beacio active 注入 → 直连
+       if (isStandalone()) { log('[gate] ios: standalone PWA → copy link guide'); guideIosStandalone(); return false; }
        const iosVer = parseIOSVersion(navigator.userAgent);
-       if (iosVer !== null && iosVer >= 26.2) { guideBeacio(); return false; }
+       if (iosVer !== null && iosVer >= 26.2) { log(`[gate] ios: v${iosVer} ≥ 26.2 → beacio guide`); guideBeacio(); return false; }
+       log(`[gate] ios: v${iosVer} < 26.2 → Bluefy guide`);
        guideBluefy();
        return false;
      }
      if (platform === 'android') {
-       if (isBrowserAllowed('android')) return true;
+       const allowed = isBrowserAllowed('android');
+       log(`[gate] android: browserAllowed=${allowed}${allowed ? ' → direct' : ' → intent Chrome guide'}`);
+       if (allowed) return true;
        guideAndroidChrome();
        return false;
      }
-     if (isBrowserAllowed('desktop')) return true;   // 桌面：仅 Chrome/Edge（UA-CH 品牌判定，旧内核回退能力判定）
+     const allowed = isBrowserAllowed('desktop');
+     log(`[gate] desktop: browserAllowed=${allowed}${allowed ? ' → direct' : ' → copy link guide'}`);
+     if (allowed) return true;   // 桌面：仅 Chrome/Edge（UA-CH 品牌判定，旧内核回退能力判定）
      guideDesktopChrome();
      return false;
    }
@@ -2802,17 +2821,24 @@ The device will measure the current probe state first, then apply the calibratio
   state.activeDeviceId = getLastDeviceId();
   if (state.activeDeviceId) restoreCachedCharts(state.activeDeviceId);
  
+   // 核心环境日志（现场排查第一条）：页面版本 / 安全上下文 / Web Bluetooth / 平台 / UA-CH 品牌 / UA
+   try {
+     const uad = navigator.userAgentData;
+     const brands = (uad && Array.isArray(uad.brands)) ? uad.brands.map((b) => b.brand).join('|') : 'n/a';
+     log(`[env] v${PAGE_VERSION} secure=${window.isSecureContext} bluetooth=${!!navigator.bluetooth} platform=${detectPlatform()} brands=${brands} ua=${navigator.userAgent}`);
+   } catch (_) { /* 环境日志失败不影响功能 */ }
+
    startBeacioDetect();   // 启动自研 beacio 检测（幂等）：为 iOS Safari 的 beacio 引导留注入窗口
-   if (!navigator.bluetooth) {
-     // 给 beacio 扩展注入留窗口：iOS Safari 从后台恢复重建页面时，扩展注入可能晚于页面脚本，
-     // 立即同步判断会把“beacio 即将就绪”误判为“无 Web Bluetooth”而误弹窗（表现为切后台回来自动弹）。
-     // 延迟重查：注入完成后 ensureBluetoothEnv 正常放行（不弹不禁用）；仍无 bluetooth 才按平台
-     // 弹引导并禁用按钮。Android 假支持浏览器 navigator.bluetooth 存在、不进此分支，
-     // 其浏览器引导在点击 Connect 时由 ensureBluetoothEnv 触发（intent:// 跳 Chrome 需用户点击）。
-     setTimeout(() => {
-       if (ensureBluetoothEnv()) return;
+   // 页面加载自动体检：延迟 800ms 统一跑一次环境闸门（800ms 等 iOS beacio 扩展注入完成，
+   // 避免把“扩展即将就绪”误判为“无 Web Bluetooth”）。不通过的平台自动弹对应引导并禁用
+   // Connect——Android 假支持浏览器（小米/UC/微信/三星等 navigator.bluetooth 存在但实现坏）
+   // 也在此触发浏览器判定；点击 Connect 时闸门会再同步兜底跑一次。
+   setTimeout(() => {
+     const ok = ensureBluetoothEnv();
+     log(`[gate] load check: ${ok ? 'pass' : 'fail → disable Connect until environment fixed'}`);
+     if (!ok) {
        els.connectBtn.disabled = true;
        els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
-     }, 800);
-   }
+     }
+   }, 800);
  })();
