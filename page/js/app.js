@@ -1,7 +1,7 @@
 /**
  * SoilPulse Dashboard Application UI Manager
  */
- (() => {
+ (async () => {
    'use strict';
 
    // 页面加载完成后才启用 Connect 按钮（HTML 初始为 disabled，避免加载过程中被误点）
@@ -1331,6 +1331,29 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     setTimeout(beacioFinalize, 1000);  // 收尾判定
     setTimeout(beacioFinalize, 3000);  // 绝对兜底
   }
+
+  // 等待 beacio 重新注入（方案A）：后台切回时扩展注入可能被系统挂起，navigator.bluetooth 瞬时不可用。
+  // 重新触发自研握手并等待恢复：① navigator.bluetooth 出现；② beacio:extension:ready 事件；
+  // ③ ping/pong 握手成功（beacioL）。超时未恢复返回 false，由 ensureIosEnv 走正常引导。
+  function waitBeacioActive(timeoutMs) {
+    return new Promise((resolve) => {
+      startBeacioDetect();                     // 幂等，重新触发官方 ping/pong 握手
+      if (beacioL || navigator.bluetooth) { resolve(true); return; }
+      let timer = null;
+      const onReady = () => { finish(true); };
+      const onPong = (e) => { if (e && e.detail && e.detail.nonce) finish(true); };
+      function finish(ok) {
+        clearTimeout(timer);
+        window.removeEventListener('beacio:extension:ready', onReady);
+        window.removeEventListener('beacio:extension:pong', onPong);
+        resolve(ok);
+      }
+      window.addEventListener('beacio:extension:ready', onReady, { once: true });
+      window.addEventListener('beacio:extension:pong', onPong);
+      timer = setTimeout(() => finish(!!(beacioL || navigator.bluetooth)), timeoutMs);
+    });
+  }
+
   function beacioGotoOnboarding() {
     // 双按钮知情分流（替代探测法）：iOS Safari 不允许脚本关闭探测标签（popup.close 被忽略），
     // 探测会在未装时残留 setup.html 标签；改为让用户自述已装/未装，主站页面永不导航走：
@@ -1632,11 +1655,18 @@ function clearConnectError() {
    // Bluefy 三条路。
    // iOS 点击 Connect 时的全量判定（②～⑤ 级联；④⑤ 依赖 beacio 注入 / standalone 等
    // 运行时状态，统一延迟到点击时执行，不在页面加载时判定）
-   function ensureIosEnv() {
+   async function ensureIosEnv() {
      if (isBluefy() && navigator.bluetooth) { log('[gate] ios: Bluefy + API → direct'); return true; }   // ② Bluefy 直连
      if (!isNativeSafari()) { log('[gate] ios: non-native-Safari shell → x-safari guide'); guideIosNonSafari(); return false; }   // ③ Safari 优先
      if (navigator.bluetooth) { log('[gate] ios: Safari + API (beacio active) → direct'); return true; }   // ④ beacio active 注入 → 直连
      if (isStandalone()) { log('[gate] ios: standalone PWA → copy link guide'); guideIosStandalone(); return false; }
+     // ④' 后台切回时 beacio 注入可能被系统挂起，navigator.bluetooth 瞬时不可用：
+     //     重新触发自研握手并等待 beacio 恢复注入；恢复则直连，超时才走引导，避免误弹安装框。
+     if (await waitBeacioActive(1500)) {
+       log('[gate] ios: beacio recovered (reinject) → direct');
+       return true;
+     }
+     log('[gate] ios: no beacio API after wait → guide');
      const iosVer = parseIOSVersion(navigator.userAgent);
      if (iosVer !== null && iosVer >= 26.2) { log(`[gate] ios: v${iosVer} ≥ 26.2 → beacio guide`); guideBeacio(); return false; }
      log(`[gate] ios: v${iosVer} < 26.2 → Bluefy guide`);
@@ -1654,7 +1684,7 @@ function clearConnectError() {
      return false;
    }
 
-   function ensureBluetoothEnv() {
+   async function ensureBluetoothEnv() {
      const platform = detectPlatform();
      log(`[gate] check: platform=${platform} bluetooth=${!!navigator.bluetooth} secure=${window.isSecureContext}`);
      if (platform === 'ios') return ensureIosEnv();
@@ -1675,7 +1705,7 @@ function clearConnectError() {
 
    async function handleConnect() {
      // 环境闸门（与页面加载共用）：不满足时已弹出对应平台引导，直接返回不进入连接流程
-     if (!ensureBluetoothEnv()) return;
+     if (!(await ensureBluetoothEnv())) return;
      // 通过闸门即代表环境可直连（beacio active 注入 / Android Chrome/Edge / 桌面 Chromium
      // 等真实 API），无需再按浏览器/UA 额外拦截；未通过时 ensureBluetoothEnv 已弹对应引导。
      const token = ++connectToken;
@@ -2859,7 +2889,7 @@ The device will measure the current probe state first, then apply the calibratio
        els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
      }
    } else {
-     const ok = ensureBluetoothEnv();
+     const ok = await ensureBluetoothEnv();
      log(`[gate] load check (${loadGatePlatform}): ${ok ? 'pass' : 'fail → disable Connect until environment fixed'}`);
      if (!ok) {
        els.connectBtn.disabled = true;
