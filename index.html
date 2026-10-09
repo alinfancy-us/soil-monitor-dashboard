@@ -99,6 +99,55 @@
       box-shadow: 0 12px 35px rgba(27, 66, 55, 0.07);
     }
 
+    /* Guide 传感器图解：绿色编号圆点 + 朝右短线/箭头（复刻说明书 pin 标注） */
+    .guide-pin {
+      position: absolute;
+      z-index: 10;
+      display: flex !important;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #0c5d44;
+      color: #fff;
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+      border: 1.5px solid #fff;
+    }
+    .guide-pin > span {
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      width: 100%;
+      height: 100%;
+      line-height: 1;
+    }
+    .guide-pin::before {
+      content: '';
+      position: absolute;
+      left: calc(100% + 1px);
+      top: 50%;
+      transform: translateY(-50%);
+      width: 16px;
+      height: 2px;
+      background: #0c5d44;
+    }
+    .guide-pin::after {
+      content: '';
+      position: absolute;
+      left: calc(100% + 17px);
+      top: 50%;
+      transform: translateY(-50%);
+      width: 0;
+      height: 0;
+      border-top: 6px solid transparent;
+      border-bottom: 6px solid transparent;
+      border-left: 12px solid #0c5d44;
+    }
+
     .metric-card {
       min-width: 0;
       border-top: 3px solid var(--metric-color);
@@ -782,101 +831,195 @@
     <!-- ================= Panel: Guide ================= -->
     <section id="mainTabGuidePanel" class="hidden" role="tabpanel">
       <div class="p-5 dashboard-card rounded-2xl sm:p-6">
-        <!-- Introduction（内容自印刷手册 introduction.pdf 迁入，取代原 quick-start PDF 跳转展示） -->
+
+        <!-- Introduction -->
         <h2 class="text-base font-bold text-emerald-800">Introduction</h2>
-        <p class="mt-1 text-sm leading-6 text-slate-500">SoilPulse monitors your soil — moisture, temperature and battery. Just plant, connect, and check on the spot.</p>
+        <p class="mt-1 text-sm leading-6 text-slate-500">SoilPulse delivers real-time root-zone insights straight to your device. Insert into soil, tap, and connect — get instant soil insights in seconds.</p>
         <ul class="mt-2 space-y-1.5 list-disc pl-4 text-xs leading-5 text-slate-500">
-          <li><b class="text-slate-700">Live soil metrics</b> — true root-zone moisture &amp; temperature (not surface estimates), plus battery status.</li>
-          <li><b class="text-slate-700">No app required</b> — open directly in the Bluetooth-enabled browser.</li>
-          <li><b class="text-slate-700">Seamless Home Assistant integration</b>, no gateway needed.</li>
+          <li><b class="text-slate-700">Root-Zone Accuracy</b> — moisture and temperature right where roots drink.</li>
+          <li><b class="text-slate-700">Instant Local Access</b> — open directly in browser; 100% private with no cloud subscription.</li>
+          <li><b class="text-slate-700">Smart Home Ready</b> — seamless Home Assistant integration via Bluetooth.</li>
         </ul>
 
         <!-- Meet Your Sensor -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Meet Your Sensor</h2>
-        <img src="page/images/product_image.webp" alt="SoilPulse sensor" loading="lazy" decoding="async"
-          class="w-full mx-auto mt-2 border rounded-xl border-slate-100">
+        <div class="flex flex-col md:flex-row items-start gap-6 mt-2">
+          <!-- 左：正反两图，等高720、保持原始比例 -->
+          <div class="flex justify-center gap-8 shrink-0">
+            <div class="flex flex-col items-center">
+              <div class="relative flex justify-center" style="height: 720px;">
+                <img src="page/images/product_front.webp" alt="Front" loading="lazy" decoding="async" class="h-full w-auto block rounded-lg border border-slate-100">
+                <span class="guide-pin" style="left:-8px; top:48%;"><span>2</span></span>
+                <span class="guide-pin" style="left:-8px; top:60%;"><span>3</span></span>
+     <span class="guide-pin" style="left:-8px; bottom:8%;"><span>4</span></span>
+              </div>
+              <p class="mt-1 text-[10px] uppercase tracking-wide text-slate-400">Front</p>
+            </div>
+            <div class="flex flex-col items-center">
+              <div class="relative flex justify-center" style="height: 720px;">
+                <img src="page/images/product_back_clean.webp" alt="Back" loading="lazy" decoding="async" class="h-full w-auto block rounded-lg border border-slate-100">
+                <span class="guide-pin" style="left:-8px; top:26%;"><span>1</span></span>
+              </div>
+              <p class="mt-1 text-[10px] uppercase tracking-wide text-slate-400">Back</p>
+            </div>
+          </div>
+          <!-- 右：部位说明 -->
+          <div class="min-w-0 flex-1 space-y-3 md:mt-2">
+            <div class="flex items-start gap-2.5">
+              <span class="flex items-center justify-center shrink-0 w-8 h-8 rounded-full bg-emerald-700 text-white text-base font-bold"><span class="leading-none">1</span></span>
+              <div class="text-base leading-7 text-slate-500"><b class="text-slate-700">Touch Pad</b> — tap to wake Bluetooth.</div>
+            </div>
+            <div class="flex items-start gap-2.5">
+              <span class="flex items-center justify-center shrink-0 w-8 h-8 rounded-full bg-emerald-700 text-white text-base font-bold"><span class="leading-none">2</span></span>
+              <div class="text-base leading-7 text-slate-500"><b class="text-slate-700">Device QR</b> — scan with camera.</div>
+            </div>
+            <div class="flex items-start gap-2.5">
+              <span class="flex items-center justify-center shrink-0 w-8 h-8 rounded-full bg-emerald-700 text-white text-base font-bold"><span class="leading-none">3</span></span>
+              <div class="text-base leading-7 text-slate-500"><b class="text-slate-700">Optimal Depth</b> — insert to the line (&asymp; 2.4 in).</div>
+            </div>
+            <div class="flex items-start gap-2.5">
+              <span class="flex items-center justify-center shrink-0 w-8 h-8 rounded-full bg-emerald-700 text-white text-base font-bold"><span class="leading-none">4</span></span>
+              <div class="text-base leading-7 text-slate-500"><b class="text-slate-700">Temperature Sensor</b> — root-zone temperature probe.</div>
+            </div>
+          </div>
+        </div>
 
-        <!-- Setup -->
-        <h2 class="mt-6 text-base font-bold text-emerald-800">Setup</h2>
+        <!-- Quick Setup -->
+        <h2 class="mt-6 text-base font-bold text-emerald-800">Quick Setup</h2>
         <ol class="mt-2 space-y-1.5 list-decimal pl-4 text-xs leading-5 text-slate-500">
-          <li><b class="text-slate-700">Insert 2× AAA</b> batteries.</li>
-          <li><b class="text-slate-700">Plant the probe</b> to the OPTIMAL DEPTH line (≈ 2.4 in).</li>
-          <li><b class="text-slate-700">Tap the touch pad</b> to wake it.</li>
-          <li><b class="text-slate-700">Choose your setup method</b> — follow the guides below to connect via <b class="text-slate-700">Web Dashboard</b> or <b class="text-slate-700">Home Assistant</b>.</li>
+          <li><b class="text-slate-700">Install batteries</b> — Open cover, insert 2&times; AAA (+/&minus;), seal tightly.</li>
+          <li><b class="text-slate-700">Insert into soil</b> — Insert probe to the <b class="text-slate-700">OPTIMAL DEPTH</b> line (&asymp; 2.4 in). Pack soil around probe.</li>
+          <li><b class="text-slate-700">Wake sensor</b> — Tap the top touch pad to activate the device.</li>
         </ol>
+        <div class="flex items-center gap-3 p-3 mt-3 border rounded-xl border-emerald-100 bg-emerald-50/60">
+          <img src="page/images/touch_wake.webp" alt="Touch to Wake" loading="lazy" decoding="async" class="w-24 h-24 object-cover rounded-lg shrink-0 border border-emerald-100">
+          <div class="text-xs leading-5 text-slate-600">
+            <p class="font-bold text-emerald-800">Touch to Wake &amp; Connect</p>
+            <p class="mt-0.5">&bull; Wakes from sleep mode</p>
+            <p>&bull; Starts Bluetooth broadcast</p>
+            <p>&bull; Ready to pair &amp; connect</p>
+          </div>
+        </div>
 
         <!-- Connect — Web Dashboard -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Connect — Web Dashboard</h2>
-        <p class="mt-1 text-xs leading-5 text-slate-500">Requires a <b class="text-slate-700">Bluetooth-enabled</b> phone or PC with Bluetooth turned on.</p>
-        <div class="flex items-center gap-3 p-3 mt-3 border rounded-xl border-slate-100 bg-slate-50/60">
-          <img src="page/images/qrcode.webp" alt="QR code" loading="lazy" decoding="async"
-            class="w-20 h-20 border rounded-lg shrink-0 border-slate-100 sm:h-24 sm:w-24">
+        <p class="mt-3 text-xs leading-5 text-slate-500"><b class="text-slate-700">1. Open the Web Dashboard</b></p>
+        <div class="flex items-center gap-3 p-3 mt-2 border rounded-xl border-slate-100 bg-slate-50/60">
+          <img src="page/images/qrcode.webp" alt="QR code" loading="lazy" decoding="async" class="w-20 h-20 border rounded-lg shrink-0 border-slate-100 sm:h-24 sm:w-24">
           <div class="text-xs leading-5 text-slate-500">
-            <p class="font-semibold text-slate-700">Scan to open Dashboard</p>
-            <p>• Opens in your browser instantly</p>
-            <p>• Built-in interactive setup guide</p>
+            <p class="font-semibold text-slate-700">Scan QR code or visit directly</p>
+            <p><a href="https://soilpulse.alinfancy.com" class="font-semibold underline break-all text-emerald-700 underline-offset-2">https://soilpulse.alinfancy.com</a></p>
+            <p class="mt-1"><b class="text-slate-700">iOS:</b> Safari + <b class="text-slate-700">Beacio</b> extension <span class="text-slate-400">(older iOS: <b class="text-slate-500">Bluefy</b>)</span></p>
+            <p><b class="text-slate-700">Android / PC:</b> Chrome</p>
           </div>
         </div>
         <div class="p-3 mt-2 text-xs leading-5 text-orange-700 border border-orange-100 rounded-xl bg-orange-50">
-          <b>Can't find it?</b> Tap <b>touch pad</b> to wake device and allow Bluetooth permissions.<br>
-          • <b>Android / PC:</b> Use <b>Chrome</b>.<br>
-          • <b>iPhone / iPad:</b> Download &amp; use <b>Bluefy app</b> (iOS Safari/Chrome does not support Web Bluetooth).
+          &#9889; Turn on <b>Bluetooth</b> &amp; grant <b>browser permission</b>.
         </div>
+        <p class="mt-2 text-xs leading-5 text-slate-500"><b class="text-slate-700">2. Click &ldquo;Connect&rdquo;</b> and select SoilPulse.</p>
+                <div style="margin: 2px 0 3px 0; position: relative; display: block; width: 100%; overflow: hidden;">
+          <img src="page/images/connect_btn.webp" alt="Connect button" loading="lazy" decoding="async" class="w-full border rounded-xl border-slate-100">
+          <!-- 精准定位的小手指：指向 Connect 按钮 -->
+        <div style="position: absolute; right: 24%; bottom: 25%; pointer-events: none; width: 8%; aspect-ratio: 1 / 1; transform: rotate(120deg);">
+          <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 36 36">
+            <defs>
+            <linearGradient id="hand-skin-p3" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#ffdfcc" />
+            <stop offset="100%" stop-color="#f09673" />
+            </linearGradient>
+            <filter id="hand-shadow-p3" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0.5" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.2"/>
+            </filter>
+            </defs>
+            <g filter="url(#hand-shadow-p3)">
+            <path fill="url(#hand-skin-p3)" d="M 12.5,7.9 A 1.5,1.5 0 0,1 15.4,7.9 L 15.4,19.4 L 17.4,19.8 L 17.4,15.2 A 1.5,1.5 0 0,1 20.3,15.2 L 20.3,20.3 L 21.9,20.6 L 21.9,15.4 A 1.5,1.5 0 0,1 24.8,15.4 L 24.8,20.9 L 26.4,21.2 L 26.4,16.6 A 1.5,1.5 0 0,1 29.3,16.6 L 29.3,22.4 C 29.3,25.3 28.3,28.2 26.4,30.5 L 26.4,33.1 L 14.2,33.1 L 14.2,31.7 C 13.5,31.0 12.8,30.1 12.3,29.2 C 11.7,28.0 11.3,26.8 11.1,25.6 L 6.3,19.9 A 1.7,1.7 0 0,1 8.7,17.5 L 11.6,20.4 L 12.5,19.9 Z" />
+            <path fill="#2b1a14" d="M30.4 17.6c-1.8-1.9-4.2-3.2-6.7-3.7q-1.65-.45-3.3-.6c2.8-3.3 2.3-8.3-1-11.1s-8.3-2.3-11.1 1s-2.3 8.3 1 11.1c.6.5 1.2.9 1.8 1.1v2.2l-1.6-1.5c-1.4-1.4-3.7-1.4-5.2 0c-1.4 1.4-1.5 3.6-.1 5l4.6 5.4c.2 1.4.7 2.7 1.4 3.9c.5.9 1.2 1.8 1.9 2.5v1.9c0 .6.4 1 1 1h13.6c.5 0 1-.5 1-1v-2.6c1.9-2.3 2.9-5.2 2.9-8.1v-5.8c.1-.4 0-.6-.2-.7m-22-9.4c0-3.3 2.7-5.9 6-5.8c3.3 0 5.9 2.7 5.8 6c0 1.8-.8 3.4-2.2 4.5v-5a3.4 3.4 0 0 0-3.4-3.2c-1.8-.1-3.4 1.4-3.4 3.2v5.2c-1.7-1-2.7-2.9-2.8-4.9M28.7 24c.1 2.6-.8 5.1-2.5 7.1c-.2.2-.4.4-.4.7v2.1H14.2v-1.4c0-.3-.2-.6-.4-.8c-.7-.6-1.3-1.3-1.8-2.2c-.6-1-1-2.2-1.2-3.4c0-.2-.1-.4-.2-.6l-4.8-5.7c-.3-.3-.5-.7-.5-1.2c0-.4.2-.9.5-1.2c.7-.6 1.7-.6 2.4 0l2.9 2.9v3l1.9-1V7.9c.1-.7.7-1.3 1.5-1.2c.7 0 1.4.5 1.4 1.2v11.5l2 .4v-4.6c.1-.1.2-.1.3-.2c.7 0 1.4.1 2.1.2v5.1l1.6.3v-5.2l1.2.3c.5.1 1 .3 1.5.5v5l1.6.3v-4.6c.9.4 1.7 1 2.4 1.7z" />
+            </g>
+          </svg>
+        </div>
+        </div>
+
+        <!-- Web Dashboard Tips -->
+        <h2 class="mt-6 text-base font-bold text-emerald-800">Web Dashboard Tips</h2>
+        <ul class="mt-2 space-y-2 text-xs leading-5 text-slate-500">
+          <li><b class="text-slate-700">&#128202; Live Data &amp; Trends</b> — real-time readings &amp; chart history.</li>
+          <li><b class="text-slate-700">&#128260; On-Demand Refresh</b> — click Refresh for instant sync.</li>
+          <li><b class="text-slate-700">&#9881;&#65039; Settings &amp; Management</b> — rename, calibration, OTA, and reset.</li>
+        </ul>
 
         <!-- Connect — Home Assistant -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Connect — Home Assistant</h2>
-        <p class="mt-1 text-xs leading-5 text-slate-500">Uses <b class="text-slate-700">BTHome</b>— <b class="text-slate-700">Requires Bluetooth enabled</b> in Home Assistant.</p>
+        <p class="mt-1 text-xs leading-5 text-slate-500">Powered by <b class="text-slate-700">BTHome</b> — requires Bluetooth <b class="text-slate-700">enabled</b> in Home Assistant.</p>
         <ol class="mt-2 space-y-1.5 list-decimal pl-4 text-xs leading-5 text-slate-500">
-          <li>Settings → Devices &amp; Services → <b class="text-slate-700">Add device</b>.</li>
-          <li>Tap the sensor's <b class="text-slate-700">touch pad</b> to wake it.</li>
-          <li>HA adds temperature, moisture &amp; battery.</li>
+          <li><b class="text-slate-700">Open HA</b> — Navigate to Settings &rarr; Devices &amp; Services.</li>
+          <li><b class="text-slate-700">Wake sensor</b> — Tap touch pad to make it discoverable.</li>
+          <li><b class="text-slate-700">Add device</b> — Click <b class="text-slate-700">Add</b> on the discovered SoilPulse card.</li>
         </ol>
+                <div style="margin: 2px 0 3px 0; position: relative; display: block; width: 100%; overflow: hidden;">
+          <img src="page/images/ha_card.webp" alt="Home Assistant integration" loading="lazy" decoding="async" class="w-full border rounded-xl border-slate-100">
+          <div style="position: absolute; left: 48%; top: 73%; pointer-events: none; width: 10%; aspect-ratio: 1 / 1; transform: rotate(120deg);">
+          <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 36 36">
+            <defs>
+            <linearGradient id="hand-skin-p4" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#ffdfcc" />
+            <stop offset="100%" stop-color="#f09673" />
+            </linearGradient>
+            <filter id="hand-shadow-p4" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0.5" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.2"/>
+            </filter>
+            </defs>
+            <g filter="url(#hand-shadow-p4)">
+            <path fill="url(#hand-skin-p4)" d="M 12.5,7.9 A 1.5,1.5 0 0,1 15.4,7.9 L 15.4,19.4 L 17.4,19.8 L 17.4,15.2 A 1.5,1.5 0 0,1 20.3,15.2 L 20.3,20.3 L 21.9,20.6 L 21.9,15.4 A 1.5,1.5 0 0,1 24.8,15.4 L 24.8,20.9 L 26.4,21.2 L 26.4,16.6 A 1.5,1.5 0 0,1 29.3,16.6 L 29.3,22.4 C 29.3,25.3 28.3,28.2 26.4,30.5 L 26.4,33.1 L 14.2,33.1 L 14.2,31.7 C 13.5,31.0 12.8,30.1 12.3,29.2 C 11.7,28.0 11.3,26.8 11.1,25.6 L 6.3,19.9 A 1.7,1.7 0 0,1 8.7,17.5 L 11.6,20.4 L 12.5,19.9 Z" />
+            <path fill="#2b1a14" d="M30.4 17.6c-1.8-1.9-4.2-3.2-6.7-3.7q-1.65-.45-3.3-.6c2.8-3.3 2.3-8.3-1-11.1s-8.3-2.3-11.1 1s-2.3 8.3 1 11.1c.6.5 1.2.9 1.8 1.1v2.2l-1.6-1.5c-1.4-1.4-3.7-1.4-5.2 0c-1.4 1.4-1.5 3.6-.1 5l4.6 5.4c.2 1.4.7 2.7 1.4 3.9c.5.9 1.2 1.8 1.9 2.5v1.9c0 .6.4 1 1 1h13.6c.5 0 1-.5 1-1v-2.6c1.9-2.3 2.9-5.2 2.9-8.1v-5.8c.1-.4 0-.6-.2-.7m-22-9.4c0-3.3 2.7-5.9 6-5.8c3.3 0 5.9 2.7 5.8 6c0 1.8-.8 3.4-2.2 4.5v-5a3.4 3.4 0 0 0-3.4-3.2c-1.8-.1-3.4 1.4-3.4 3.2v5.2c-1.7-1-2.7-2.9-2.8-4.9M28.7 24c.1 2.6-.8 5.1-2.5 7.1c-.2.2-.4.4-.4.7v2.1H14.2v-1.4c0-.3-.2-.6-.4-.8c-.7-.6-1.3-1.3-1.8-2.2c-.6-1-1-2.2-1.2-3.4c0-.2-.1-.4-.2-.6l-4.8-5.7c-.3-.3-.5-.7-.5-1.2c0-.4.2-.9.5-1.2c.7-.6 1.7-.6 2.4 0l2.9 2.9v3l1.9-1V7.9c.1-.7.7-1.3 1.5-1.2c.7 0 1.4.5 1.4 1.2v11.5l2 .4v-4.6c.1-.1.2-.1.3-.2c.7 0 1.4.1 2.1.2v5.1l1.6.3v-5.2l1.2.3c.5.1 1 .3 1.5.5v5l1.6.3v-4.6c.9.4 1.7 1 2.4 1.7z" />
+            </g>
+          </svg>
+        </div>
+        </div>
+        <div class="p-3 mt-2 text-xs leading-5 text-slate-600 border rounded-xl border-slate-100 bg-slate-50/60">
+          <b class="text-slate-700">&#9889; Power Saver Design:</b> Sensor broadcasts every 10 min. Brief &ldquo;Unavailable&rdquo; status between updates in HA is normal.
+        </div>
 
-        <!-- Using the Web Dashboard -->
-        <h2 class="mt-6 text-base font-bold text-emerald-800">Using the Web Dashboard</h2>
-        <ul class="mt-2 space-y-2 text-xs leading-5 text-slate-500">
-          <li><b class="text-slate-700">Data Tab</b> — live temperature, moisture &amp; battery; history with last 5 readings and 7-day average charts.</li>
-          <li>
-            <b class="text-slate-700">Refresh &amp; Clear</b>
-            <ul class="pl-4 mt-1 space-y-1 list-disc">
-              <li><b class="text-slate-700">Refresh</b>: triggers an immediate measurement.</li>
-              <li><b class="text-slate-700">Clear Data</b>: clears local &amp; history data.</li>
-            </ul>
-          </li>
-          <li>
-            <b class="text-slate-700">Setting Tab</b>
-            <ul class="pl-4 mt-1 space-y-1 list-disc">
-              <li><b class="text-slate-700">Calibration &amp; Temperature</b>: Dry/Wet moisture calibration &amp; temperature offset adjustments.</li>
-              <li><b class="text-slate-700">Device Management</b>: Custom device renaming &amp; factory reset.</li>
-              <li><b class="text-slate-700">Firmware Updates</b>: Displays a prompt when new updates are available.</li>
-            </ul>
-          </li>
-        </ul>
+        <!-- Specifications -->
+        <h2 class="mt-6 text-base font-bold text-emerald-800">Specifications</h2>
+        <table class="w-full mt-2 text-xs">
+          <tbody class="divide-y divide-slate-100">
+            <tr><td class="py-1.5 pr-3 font-semibold text-slate-700 align-top">In the Box</td><td class="py-1.5 text-slate-500">SoilPulse Sensor <i>(Batteries not included)</i></td></tr>
+            <tr><td class="py-1.5 pr-3 font-semibold text-slate-700 align-top">Battery</td><td class="py-1.5 text-slate-500">2&times; AAA (Alkaline recommended)</td></tr>
+            <tr><td class="py-1.5 pr-3 font-semibold text-slate-700 align-top">Battery life</td><td class="py-1.5 text-slate-500">Up to 1&ndash;2 years (depending on battery &amp; usage)</td></tr>
+            <tr><td class="py-1.5 pr-3 font-semibold text-slate-700 align-top">Operating Temperature</td><td class="py-1.5 text-slate-500">&minus;20 to +60 &deg;C (&minus;4 to +140 &deg;F)</td></tr>
+            <tr><td class="py-1.5 pr-3 font-semibold text-slate-700 align-top">Wireless range</td><td class="py-1.5 text-slate-500">Up to 100&nbsp;ft (open space)</td></tr>
+            <tr><td class="py-1.5 pr-3 font-semibold text-slate-700 align-top">Interval</td><td class="py-1.5 text-slate-500">Every 10 min</td></tr>
+            <tr><td class="py-1.5 pr-3 font-semibold text-slate-700 align-top">Water resistance</td><td class="py-1.5 text-slate-500">Weatherproof (rain &amp; watering safe &amp; brief pooling safe)</td></tr>
+            <tr><td class="py-1.5 pr-3 font-semibold text-slate-700 align-top">Connectivity</td><td class="py-1.5 text-slate-500">Web Bluetooth LE</td></tr>
+            <tr><td class="py-1.5 pr-3 font-semibold text-slate-700 align-top">Smart Home</td><td class="py-1.5 text-slate-500">Home Assistant via BTHome</td></tr>
+          </tbody>
+        </table>
 
         <!-- Troubleshooting -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Troubleshooting</h2>
         <ul class="mt-2 space-y-2 text-xs leading-5 text-slate-500">
-          <li><b class="text-slate-700">Can't connect?</b> Tap the touch pad to wake it, allow Bluetooth permissions, then click <b class="text-slate-700">Connect</b>.</li>
-          <li><b class="text-slate-700">No new data?</b> Connect and click <b class="text-slate-700">Refresh</b> — new data should arrive within a few seconds.</li>
-          <li><b class="text-slate-700">Odd moisture?</b> Insert the probe to the <b class="text-slate-700">OPTIMAL DEPTH line</b> without leaving loose gaps in soil.</li>
-          <li><b class="text-slate-700">Shows unavailable in Home Assistant?</b> This is normal. The sensor updates every 10 minutes to save power — new data will still arrive automatically.</li>
+          <li><b class="text-slate-700">Can&rsquo;t connect?</b> Wake sensor by tapping touch pad, grant Bluetooth permission, then tap <b class="text-slate-700">Connect device</b>.</li>
+          <li><b class="text-slate-700">No new data?</b> Click <b class="text-slate-700">Refresh</b> after connecting &mdash; updates in a few seconds.</li>
+          <li><b class="text-slate-700">Odd readings?</b> Insert probe fully to the <b class="text-slate-700">OPTIMAL DEPTH</b> line; avoid air gaps in soil.</li>
+          <li><b class="text-slate-700">Unavailable in HA?</b> Normal &mdash; sensor broadcasts every 10 min. Data arrives automatically.</li>
         </ul>
 
         <!-- Support -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">Support</h2>
         <p class="mt-1 text-xs leading-5 text-slate-500">Email: <a href="mailto:support@alinfancy.com" class="font-semibold underline text-emerald-700 underline-offset-2">support@alinfancy.com</a></p>
-        <p class="mt-0.5 text-xs leading-5 text-slate-500">Questions or feedback? Please email us — we're happy to help. Thank you for your support!</p>
+        <p class="mt-0.5 text-xs leading-5 text-slate-500">Questions or feedback? We&rsquo;re happy to help. Thank you for choosing SoilPulse!</p>
 
-        <!-- FCC Statement（自印刷手册 introduction.pdf 补充，置于 Guide 最后） -->
+        <!-- Battery Safety -->
+        <h2 class="mt-6 text-base font-bold text-emerald-800">Battery Safety</h2>
+        <p class="mt-1 text-xs leading-5 text-slate-500">Use 2&times; AAA batteries. Do not mix old and new batteries, or different brands. Remove batteries if the device is stored for an extended period to prevent leakage.</p>
+
+        <!-- FCC Statement -->
         <h2 class="mt-6 text-base font-bold text-emerald-800">FCC Statement</h2>
-        <p class="mt-1 text-xs leading-5 text-slate-500">Complies with Part 15 of the FCC Rules. Operation is subject to two conditions: (1) it may not cause harmful interference, and (2) it must accept any interference received.</p>
-        <p class="mt-1 text-xs leading-5 text-slate-500">This equipment complies with the limits for a Class B digital device under Part 15. If it causes harmful interference, try one or more of the following:</p>
-        <ul class="pl-4 mt-1 space-y-1 text-xs leading-5 list-disc text-slate-500">
-          <li>Reorient or relocate the antenna.</li>
-          <li>Increase the separation from the receiver.</li>
-          <li>Plug into a different circuit.</li>
-          <li>Consult a technician.</li>
-        </ul>
+        <p class="mt-1 text-xs leading-5 text-slate-500"><b class="text-slate-700">Contains FCC ID:</b> 2AMM6-825X1BA</p>
+        <p class="mt-1 text-xs leading-5 text-slate-500">This device complies with Part 15 of the FCC Rules. Operation is subject to the following two conditions: (1) this device may not cause harmful interference, and (2) this device must accept any interference received, including interference that may cause undesired operation.</p>
+        <p class="mt-1 text-xs leading-5 text-slate-500"><b class="text-slate-700">Note:</b> This equipment has been tested and found to comply with the limits for a Class B digital device, pursuant to Part 15 of the FCC Rules. These limits are designed to provide reasonable protection against harmful interference in a residential installation.</p>
+        <p class="mt-1 text-xs leading-5 text-slate-500">Changes or modifications not expressly approved by the party responsible for compliance could void the user&rsquo;s authority to operate the equipment.</p>
+
       </div>
     </section>
 

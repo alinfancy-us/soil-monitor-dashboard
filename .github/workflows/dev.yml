@@ -250,6 +250,21 @@ jobs:
           echo "JS minify done:"
           wc -c page/js/config.js page/js/ble-protocol.js page/js/app.js
 
+      # 去除 index.html 的 HTML/CSS 开发注释，减小线上 HTML 体积。
+      # 本地保留注释源码便于维护，部署时统一去除；与 JS(CSS) 压缩保持同一"源码可读、CI 压缩"原则。
+      - name: Strip HTML comments
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "index.html";
+            let h = fs.readFileSync(p, "utf8");
+            const before = h.length;
+            h = h.replace(/<!--[\s\S]*?-->/g, "");
+            h = h.replace(/<style[^>]*>[\s\S]*?<\/style>/g, m => m.replace(/\/\*[\s\S]*?\*\//g, ""));
+            fs.writeFileSync(p, h);
+            console.log("strip html comments:", before, "->", h.length);
+          '
+
       - name: Assemble clean dist
         run: |
           mkdir -p dist
