@@ -242,6 +242,7 @@ jobs:
           cp index.html dist/
           cp -R page dist/page
           ls -la dist
+          ls -la dist/page/firmware/
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
