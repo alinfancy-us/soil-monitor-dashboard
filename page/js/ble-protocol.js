@@ -426,9 +426,10 @@ const BLEProtocol = (() => {
     SCHEDULE_GRANULARITY: 32,    // 固件 blc_ota_setOtaScheduleIndication_by_pduNum(32) 的上报粒度，收尾等待按整批对齐
     PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
     END_TIMEOUT_MS: 10000,     // END 后等待结果通知 / 设备重启断链的超时
-    WRITE_GAP_MS: 80,          // beacio 转发约 65ms/包(~15包/s)；JS 间隔必须 ≥ beacio 转发间隔才不会在 beacio 队列积压而触发限流。
-                               //   实测 WRITE_GAP_MS=1 与 =3 限流触发点均为 ~24 包，证明 JS sleep 无法压低 beacio 实际请求速率，只能匹配其转发节奏。
-                               //   80ms 匹配转发间隔，625 包(112B)≈50s 稳定传完，且持续发送不会触发设备监督超时。
+    WRITE_GAP_MS: 65,          // beacio 转发约 65ms/包(~15包/s)；JS 间隔需匹配其转发节奏（≤转发间隔会积压触发限流）。
+                               //   实测 WRITE_GAP_MS=1 与 =3 限流触发点均为 ~24 包；80ms 稳定但偏保守，65ms 贴转发间隔边界提速 ~19%，
+                               //   若触发限流，writeWithRetry 有 200ms 退避重试兜底（不会失败，只是变慢）。
+                               //   625 包(112B)@65ms ≈ 41s 理论传完（含限流重试实际略长）。
     FREERUN_BURST: 4,          // 无进度反馈时的定速发送：每发几包让出一次执行权
     FREERUN_GAP_MS: 6,         // 定速发送的间隔（约 4 包/6ms ≈ 10KB/s，贴近一个连接事件能吃下的量，避免压垮设备断链）
     WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
