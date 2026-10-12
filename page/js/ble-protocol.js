@@ -413,20 +413,20 @@ const BLEProtocol = (() => {
   // 固件 bin 头部 0x18 偏移存放固件长度（Telink bin 格式），发送字节数以此为准
   const OTA = {
     FW_SIZE_MAX: 124 * 1024,   // SDK 默认 ota_firmware_max_size（新固件存放在 flash 0x20000 起 124K 内）
-    // 数据块大小（每包固件字节数）= CMD_OTA_START_EXT 声明的 pdu_length，必须是 16 的倍数。
-    // 【约定】按 Telink 官方 Extend 协议：OTA_PDU = Adr_Index(2) + Data(n×16) + CRC(2)，整包 = pdu_length + 4。
-    //   pdu_length=80（16×5）为 B85 上限内合法值：Release Note 仅称 "B85 does not support the OTA PDU
-    //   which is bigger than 80"（112 实测报 OTA_MCU_NOT_SUPPORTED result 15），未限制 ≤80。
-    //   B85 固件对 >16 的 DATA 目前实测均报 0x09（data=80/78/76、整包 84/82/80 全拒），疑似固件 OTA 库
-    //   校验过严（只认 legacy 20B 或存在 length 校验差异），根因需固件端 SDK 层解决；客户端按官方格式发 80。
-    // 另受固件 ATT MTU=128 限制：整包 84 ≤ 125。
-    BLOCK_BYTES: 80,
+    // 数据块大小（每包固件字节数）= 16（legacy 固定值，16 的倍数）。
+    // 【结论】B85(825x) 固件 OTA 库（闭源 liblt_825x.a，SDK V3.4.3.0）实测只接受 legacy 20B DATA：
+    //   Extend 大包（data=80/78/76、整包 84/82/80）全部被报 0x09 PDU_LEN_ERR——START_EXT 的 pdu_length
+    //   声明被接受（enter ota mode）但 DATA 校验固定按 legacy 20B。官方手册 Extend 协议（整包=pdu+4）
+    //   与社区参考（pvvx ATC 825x Web OTA）在 B85 上实际均走 legacy。故回退 legacy：
+    //   START(0xFF01) + DATA 20B（idx2+data16+crc2，CRC16 覆盖 18B，尾包补 0xFF）。
+    // 另受固件 ATT MTU=128 限制：整包 20B ≤ 125。
+    BLOCK_BYTES: 16,
     WINDOW: 32,                // 滑动窗口：允许的最大在途未确认包数（保持 32，与固件 32 包上报粒度匹配；不可小于 32，
                                //   否则会在设备首次上报前触发 waitProgress 超时 → 误判"设备不上报"而降级定速，破坏背压）
     SCHEDULE_GRANULARITY: 32,    // 固件 blc_ota_setOtaScheduleIndication_by_pduNum(32) 的上报粒度，收尾等待按整批对齐
     PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
     END_TIMEOUT_MS: 10000,     // END 后等待结果通知 / 设备重启断链的超时
-    WRITE_GAP_MS: 80,          // 80B 包在 beacio 转发约 65ms/包(~15包/s)；JS 间隔必须 ≥ beacio 转发间隔才不会在 beacio 队列积压而触发限流。
+    WRITE_GAP_MS: 80,          // 20B 包在 beacio 转发约 65ms/包(~15包/s)；JS 间隔必须 ≥ beacio 转发间隔才不会在 beacio 队列积压而触发限流。
                                //   实测 WRITE_GAP_MS=1 与 =3 限流触发点均为 ~24 包，证明 JS sleep 无法压低 beacio 实际请求速率，只能匹配其转发节奏。
                                //   80ms 匹配转发间隔，617 包≈50s 稳定传完，且持续发送不会触发设备 6s 监督超时。
     FREERUN_BURST: 4,          // 无进度反馈时的定速发送：每发几包让出一次执行权
@@ -577,23 +577,21 @@ const BLEProtocol = (() => {
     try {
       onProgress?.({ phase: 'start', percent: 0, sent: 0, total: fwSize });
 
-      // 1. START：CMD_OTA_START_EXT(0xFF03)，声明 pdu_length=BLOCK_BYTES(80)。
-      //    官方 Extend 协议：后续 DATA 整包 = Adr_Index(2) + Data(pdu_length) + CRC(2) = pdu_length + 4。
-      //    结构 ota_startExt_t = cmd(2) + pdu_length(1) + version_compare(1) + rsvd(16)，共 20 字节。
-      //    version_compare=0（不做版本对比，避免 OTA_VERSION_COMPARE_ERR）。
-      const startExt = new Uint8Array(20);
-      startExt[0] = 0x03; startExt[1] = 0xFF;    // CMD_OTA_START_EXT 小端
-      startExt[2] = OTA.BLOCK_BYTES;             // pdu_length=80（16 的倍数，≤B85 上限 80）
-      startExt[3] = 0;                           // version_compare=0；rsvd[16] 默认 0
-      await writeWithRetry(otaChar, startExt, false);
-      console.debug(`[OTA] START_EXT sent: pdu_length=${OTA.BLOCK_BYTES} => ${OTA.BLOCK_BYTES + 4}B/pkt`);
+      // 1. START：CMD_OTA_START(0xFF01) 2 字节（legacy 协议）。
+      //    B85(825x) 固件 OTA 库实测只接受 legacy 20B DATA：Extend 大包（data=80/78/76）全部
+      //    被报 0x09 PDU_LEN_ERR，START_EXT 的 pdu_length 声明不生效（详见 BLOCK_BYTES 注释）。
+      //    官方手册 legacy 流程 + 社区参考（pvvx ATC 825x Web OTA）均为该格式。
+      const start = Uint8Array.of(0x01, 0xFF);   // CMD_OTA_START 小端
+      await writeWithRetry(otaChar, start, false);
+      console.debug(`[OTA] START sent (legacy 16B)`);
 
-      // 2. DATA：每包 84 字节 = adr_index(u16 LE) + 80 字节固件 + crc16(u16 LE，覆盖前 82 字节)。
-      //    尾块不足 80 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
+      // 2. DATA：每包 20 字节 = adr_index(u16 LE) + 16 字节固件 + crc16(u16 LE，覆盖前 18 字节)。
+      //    尾块不足 16 字节时补 0xFF（legacy 官方规则；补 0xFF 计入本包 CRC16，设备最终 CRC32
+      //    校验按 fwSize 计算，超出部分不写入有效固件）。
       //    滑动窗口：仅当在途未确认包数超过 OTA.WINDOW 时才等设备进度通知；
       //    若设备根本不上报进度（旧固件未开 blc_ota_setOtaScheduleIndication_by_pduNum），
       //    首次等待超时后降级为定速发送：没有背压时若全速盲发，设备来不及处理会直接监督超时断链。
-      const DATA_BYTES = OTA.BLOCK_BYTES;   // 每包固件字节数 = pdu_length = 80（官方 Extend 格式）
+      const DATA_BYTES = 16;   // legacy 每包固件字节数（固定）
       const totalBlocks = Math.ceil(fwSize / DATA_BYTES);
       let flowControl = true;
       let lastPercent = -1;
@@ -608,12 +606,13 @@ const BLEProtocol = (() => {
         }
 
         const off = i * DATA_BYTES;
-        const pkt = new Uint8Array(2 + OTA.BLOCK_BYTES + 2);   // 整包 84B = idx(2)+data(80)+crc(2)
+        const pkt = new Uint8Array(2 + DATA_BYTES + 2);   // 20B = idx(2)+data(16)+crc(2)
         pkt[0] = i & 0xff;
         pkt[1] = (i >> 8) & 0xff;
+        pkt.fill(0xFF, 2, 2 + DATA_BYTES);   // legacy 尾包规则：不足 16 字节补 0xFF（计入本包 CRC16）
         const n = Math.min(DATA_BYTES, fwSize - off);
-        pkt.set(bytes.subarray(off, off + n), 2);   // 尾块不足 80 时自动补 0（补 0 不在 fwSize 内，设备最终 CRC32 校验不计入）
-        const crc = telinkCrc16(pkt, 2 + DATA_BYTES);   // 覆盖 idx+data（2+80=82 字节）
+        pkt.set(bytes.subarray(off, off + n), 2);
+        const crc = telinkCrc16(pkt, 2 + DATA_BYTES);   // 覆盖 idx+data（18 字节）
         pkt[2 + DATA_BYTES] = crc & 0xff;
         pkt[3 + DATA_BYTES] = (crc >> 8) & 0xff;
         /* 中文：同一特征写操作必须串行，避免 WebKit 报 GATT busy */
