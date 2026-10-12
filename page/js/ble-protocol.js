@@ -643,13 +643,19 @@ const BLEProtocol = (() => {
         await waitProgress(lastBatch || totalBlocks, OTA.END_TIMEOUT_MS);
       }
       // 3. END：CMD_OTA_END(0xFF02) + adr_index_max + 其按位取反，共 6 字节
+      //    必须用无响应写：固件 END 回调校验通过后直接进入复位流程（soil_ota_reset 死循环等
+      //    watchdog），ATT Write Response 永远不会发——带响应写（writeValue）会在 iOS/Chrome
+      //    上一直挂起，1.5s 后设备复位断链时被 reject 为 "A network error occurred during the
+      //    Bluetooth operation"（升级其实已成功，UI 却误报）。无响应写立即完成，不依赖固件响应；
+      //    送达窗口 = 固件复位前的 1.5s，前序 600+ 包均达，风险可忽略。结果判定走 waitResult
+      //    （result 0 通知 / END 后断链=复位成功 双通道）。
       const maxIdx = totalBlocks - 1;
       onProgress?.({ phase: 'end', percent: 100, sent: fwSize, total: fwSize });
       await writeWithRetry(otaChar, Uint8Array.of(
         0x02, 0xFF,
         maxIdx & 0xff, (maxIdx >> 8) & 0xff,
         (~maxIdx) & 0xff, ((~maxIdx) >> 8) & 0xff,
-      ), false);
+      ), true);
 
       // 4. 等待设备结果通知（成功后设备自动重启断链）
       const result = await waitResult();
