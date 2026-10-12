@@ -426,10 +426,12 @@ const BLEProtocol = (() => {
     SCHEDULE_GRANULARITY: 32,    // 固件 blc_ota_setOtaScheduleIndication_by_pduNum(32) 的上报粒度，收尾等待按整批对齐
     PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
     END_TIMEOUT_MS: 10000,     // END 后等待结果通知 / 设备重启断链的超时
-    WRITE_GAP_MS: 50,          // beacio 转发约 65ms/包(~15包/s) 是早期保守估计；80/65/50ms 均实测成功。
-                               //   10ms 实测失败（固件端 seq err），怀疑 beacio 10ms 级突发触发重投/限流，暂回退 50ms；
-                               //   历史：1ms/3ms 在旧代码（无限流重试）下 ~24 包触发限流；限流有 200ms 退避兜底。
-                               //   625 包(112B)@50ms ≈ 31s 理论传完（含限流重试实际略长）。
+    WRITE_GAP_MS: 80,          // beacio 转发约 75ms/包、令牌桶约每秒补 12~13 包：50ms(20包/s) 每 ~12 包触发一次
+                               //   Rate limit exceeded 报错（200ms 退避重试后成功，不影响结果但刷 Warning）。
+                               //   调到 80ms(12.5包/s) 与转发节奏持平，理论不触发限流、日志干净；
+                               //   625 包(112B)@80ms ≈ 50s 传完（50ms 实测含重试约 45s，慢约 5s 换无报错）。
+                               //   历史：1ms/3ms 在旧代码（无限流重试）下 ~24 包触发限流断链；10ms 实测 beacio 丢包
+                               //   （固件端 seq err got=75 expect=74，跳包 abort 为固件正确行为），故不再低于 50ms。
     FREERUN_BURST: 4,          // 无进度反馈时的定速发送：每发几包让出一次执行权
     FREERUN_GAP_MS: 6,         // 定速发送的间隔（约 4 包/6ms ≈ 10KB/s，贴近一个连接事件能吃下的量，避免压垮设备断链）
     WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
