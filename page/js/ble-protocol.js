@@ -404,7 +404,7 @@ const BLEProtocol = (() => {
   ////////////////////////// Telink BLE OTA 升级（legacy 协议） //////////////////////////
   // 协议与 SDK 内参考实现 vendor/ble_master_kma_dongle/blm_ota.c 严格对齐：
   //   START : CMD_OTA_START_EXT(0xFF03) 20 字节 = cmd(2) + pdu_length(1)=BLOCK_BYTES + version_compare(1)=0 + rsvd(16)
-  //   DATA  : 116 字节 = adr_index(u16 LE，固件偏移>>4) + 112 字节固件 + crc16(u16 LE，覆盖前 114 字节)
+  //   DATA  : 84 字节 = adr_index(u16 LE，固件偏移>>4) + 80 字节固件 + crc16(u16 LE，覆盖前 82 字节)
   //   END   : 6 字节 = 0x02 0xFF + adr_index_max(u16) + 其按位取反(u16)
   //   PROG  : 设备通知 {0x08 0xFF + u16 已收包数}（CMD_OTA_SCHEDULE_PDU_NUM），
   //           仅当固件调用了 blc_ota_setOtaScheduleIndication_by_pduNum 才会上报；
@@ -414,16 +414,18 @@ const BLEProtocol = (() => {
   const OTA = {
     FW_SIZE_MAX: 124 * 1024,   // SDK 默认 ota_firmware_max_size（新固件存放在 flash 0x20000 起 124K 内）
     // 数据块大小（每包固件字节数）= CMD_OTA_START_EXT 的 pdu_length，必须是 16 的倍数。
-    // 受固件端 ATT MTU=128 限制：单包 payload = 2(idx) + pdu_length + 2(crc) ≤ 128-3=125 → pdu_length 最大取 112。
-    // 16→112 使包数从 ~4426 降到 ~617（69KB 固件），总耗时约 ÷7（beacio 每包转发延迟是耗时主项，包数决定总耗时）。
-    // 若设备固件太旧不支持 START_EXT（报 0x02 invalid packet / 0x09 PDU len err），需回退 16 + legacy START。
-    BLOCK_BYTES: 112,
+    // 【关键限制】Telink B85(825x) 芯片不支持 >80 的 OTA PDU：SDK Release Note 明言
+    //   "B85 does not support the OTA PDU which is bigger than 80"。取 112 会让固件报 OTA_MCU_NOT_SUPPORTED(result 15)
+    //   直接中止并断链（实测：连接建立正常、OTA 开始即 result 15）。故取合法最大 80（16×5）。
+    // 另受固件 ATT MTU=128 限制：单包 payload = 2(idx) + pdu_length + 2(crc) ≤ 125，80 满足。
+    // 80→包数 ~880（69KB 固件），比 16 快 5 倍；beacio 每包转发延迟是耗时主项，包数决定总耗时。
+    BLOCK_BYTES: 80,
     WINDOW: 32,                // 滑动窗口：允许的最大在途未确认包数（保持 32，与固件 32 包上报粒度匹配；不可小于 32，
                                //   否则会在设备首次上报前触发 waitProgress 超时 → 误判"设备不上报"而降级定速，破坏背压）
     SCHEDULE_GRANULARITY: 32,    // 固件 blc_ota_setOtaScheduleIndication_by_pduNum(32) 的上报粒度，收尾等待按整批对齐
     PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
     END_TIMEOUT_MS: 10000,     // END 后等待结果通知 / 设备重启断链的超时
-    WRITE_GAP_MS: 80,          // 116B 包在 beacio 转发约 65ms/包(~15包/s)；JS 间隔必须 ≥ beacio 转发间隔才不会在 beacio 队列积压而触发限流。
+    WRITE_GAP_MS: 80,          // 84B 包在 beacio 转发约 65ms/包(~15包/s)；JS 间隔必须 ≥ beacio 转发间隔才不会在 beacio 队列积压而触发限流。
                                //   实测 WRITE_GAP_MS=1 与 =3 限流触发点均为 ~24 包，证明 JS sleep 无法压低 beacio 实际请求速率，只能匹配其转发节奏。
                                //   80ms 匹配转发间隔，617 包≈50s 稳定传完，且持续发送不会触发设备 6s 监督超时。
     FREERUN_BURST: 4,          // 无进度反馈时的定速发送：每发几包让出一次执行权
@@ -574,18 +576,18 @@ const BLEProtocol = (() => {
     try {
       onProgress?.({ phase: 'start', percent: 0, sent: 0, total: fwSize });
 
-      // 1. START：CMD_OTA_START_EXT(0xFF03)，声明 pdu_length=BLOCK_BYTES(112)，设备端按 112B/包校验后续 DATA。
+      // 1. START：CMD_OTA_START_EXT(0xFF03)，声明 pdu_length=BLOCK_BYTES(80)，设备端按 80B/包校验后续 DATA。
       //    结构 ota_startExt_t = cmd(2) + pdu_length(1) + version_compare(1) + rsvd(16)，共 20 字节。
       //    version_compare=0（不做版本对比，避免 OTA_VERSION_COMPARE_ERR）。
       const startExt = new Uint8Array(20);
       startExt[0] = 0x03; startExt[1] = 0xFF;    // CMD_OTA_START_EXT 小端
-      startExt[2] = OTA.BLOCK_BYTES;             // pdu_length=112（16 的倍数）
+      startExt[2] = OTA.BLOCK_BYTES;             // pdu_length=80（16 的倍数，≤B85 上限 80）
       startExt[3] = 0;                           // version_compare=0；rsvd[16] 默认 0
       await writeWithRetry(otaChar, startExt, false);
       console.debug(`[OTA] START_EXT sent: pdu_length=${OTA.BLOCK_BYTES} => ${OTA.BLOCK_BYTES + 4}B/pkt`);
 
-      // 2. DATA：每包 20 字节 = adr_index(u16 LE) + 16 字节固件 + crc16(u16 LE，覆盖前 18 字节)。
-      //    尾块不足 16 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
+      // 2. DATA：每包 84 字节 = adr_index(u16 LE) + 80 字节固件 + crc16(u16 LE，覆盖前 82 字节)。
+      //    尾块不足 80 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
       //    滑动窗口：仅当在途未确认包数超过 OTA.WINDOW 时才等设备进度通知；
       //    若设备根本不上报进度（旧固件未开 blc_ota_setOtaScheduleIndication_by_pduNum），
       //    首次等待超时后降级为定速发送：没有背压时若全速盲发，设备来不及处理会直接监督超时断链。
@@ -607,7 +609,7 @@ const BLEProtocol = (() => {
         pkt[0] = i & 0xff;
         pkt[1] = (i >> 8) & 0xff;
         const n = Math.min(OTA.BLOCK_BYTES, fwSize - off);
-        pkt.set(bytes.subarray(off, off + n), 2);   // 尾块不足 112 时自动补 0（补 0 不在 fwSize 内，设备最终 CRC32 校验不计入）
+        pkt.set(bytes.subarray(off, off + n), 2);   // 尾块不足 80 时自动补 0（补 0 不在 fwSize 内，设备最终 CRC32 校验不计入）
         const crc = telinkCrc16(pkt, 2 + OTA.BLOCK_BYTES);   // 覆盖 idx+data
         pkt[2 + OTA.BLOCK_BYTES] = crc & 0xff;
         pkt[3 + OTA.BLOCK_BYTES] = (crc >> 8) & 0xff;
