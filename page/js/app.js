@@ -2673,8 +2673,11 @@ The device will measure the current probe state first, then apply the calibratio
         return;
       }
       const isForce = m.latest.isforce === true;
-      if (String(state.fwVersion || "") === String(m.latest.version)
-        || (!isForce && compareVersions(m.latest.version, state.fwVersion) <= 0)) {
+      // 中文：isforce=true 用于反复下发测试固件——即使设备已在该版本（字符串相等）也提示；
+      //      仅非强制清单在“设备版本不低于清单”时才静默跳过
+      if (!isForce
+        && (String(state.fwVersion || "") === String(m.latest.version)
+          || compareVersions(m.latest.version, state.fwVersion) <= 0)) {
         renderFirmwareCard();
         return;
       }
