@@ -423,7 +423,9 @@ const BLEProtocol = (() => {
     SCHEDULE_GRANULARITY: 32,    // 固件 blc_ota_setOtaScheduleIndication_by_pduNum(32) 的上报粒度，收尾等待按整批对齐
     PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
     END_TIMEOUT_MS: 10000,     // END 后等待结果通知 / 设备重启断链的超时
-    WRITE_GAP_MS: 3,           // 无响应写每包间最小间隔：1ms 在 beacio 上 23 个 116B 包即触发限流→连接断开；恢复 3ms（16B 包 3ms 已验证可稳定发送），配合 112B 大块（617 包）既避开 beacio 限流又保持总耗时短
+    WRITE_GAP_MS: 80,          // 116B 包在 beacio 转发约 65ms/包(~15包/s)；JS 间隔必须 ≥ beacio 转发间隔才不会在 beacio 队列积压而触发限流。
+                               //   实测 WRITE_GAP_MS=1 与 =3 限流触发点均为 ~24 包，证明 JS sleep 无法压低 beacio 实际请求速率，只能匹配其转发节奏。
+                               //   80ms 匹配转发间隔，617 包≈50s 稳定传完，且持续发送不会触发设备 6s 监督超时。
     FREERUN_BURST: 4,          // 无进度反馈时的定速发送：每发几包让出一次执行权
     FREERUN_GAP_MS: 6,         // 定速发送的间隔（约 4 包/6ms ≈ 10KB/s，贴近一个连接事件能吃下的量，避免压垮设备断链）
     WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
@@ -488,7 +490,7 @@ const BLEProtocol = (() => {
       } catch (e) {
         lastErr = e;
         const msg = String(e?.message || e || '').toLowerCase();
-        console.warn(`[OTA][write] #${i} attempt ${i + 1}/${OTA.WRITE_RETRY_MAX} failed: ${e?.message || e}`);
+        console.warn(`[OTA][write] #${i} attempt ${i + 1}/${OTA.WRITE_RETRY_MAX} failed t=${Date.now()}: ${e?.message || e}`);
         // 中文：链路已断开是终态错误，不可重试，直接抛出让上层走断链恢复流程
         const disconnected = msg.includes('disconnect') || msg.includes('gatt server is disconnected');
         // 限流类错误（beacio/系统对过密 BLE 请求的拒绝）同样可重试，但需用更长退避等待限流恢复
@@ -610,7 +612,7 @@ const BLEProtocol = (() => {
         pkt[2 + OTA.BLOCK_BYTES] = crc & 0xff;
         pkt[3 + OTA.BLOCK_BYTES] = (crc >> 8) & 0xff;
         /* 中文：同一特征写操作必须串行，避免 WebKit 报 GATT busy */
-        console.debug(`[OTA][DATA] write #${i}/${totalBlocks - 1} len=${pkt.length} idx=0x${i.toString(16).padStart(4, '0')}`);
+        console.debug(`[OTA][DATA] write #${i}/${totalBlocks - 1} len=${pkt.length} idx=0x${i.toString(16).padStart(4, '0')} t=${Date.now()}`);
         await writeWithRetry(otaChar, pkt, true);
 
         const sent = Math.min(off + OTA.BLOCK_BYTES, fwSize);
