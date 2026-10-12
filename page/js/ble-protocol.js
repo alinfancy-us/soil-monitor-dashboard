@@ -432,8 +432,6 @@ const BLEProtocol = (() => {
                                //   625 包(112B)@80ms ≈ 50s 传完（50ms 实测含重试约 45s，慢约 5s 换无报错）。
                                //   历史：1ms/3ms 在旧代码（无限流重试）下 ~24 包触发限流断链；10ms 实测 beacio 丢包
                                //   （固件端 seq err got=75 expect=74，跳包 abort 为固件正确行为），故不再低于 50ms。
-    FREERUN_BURST: 4,          // 无进度反馈时的定速发送：每发几包让出一次执行权
-    FREERUN_GAP_MS: 6,         // 定速发送的间隔（约 4 包/6ms ≈ 10KB/s，贴近一个连接事件能吃下的量，避免压垮设备断链）
     WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
     WRITE_RETRY_GAP_MS: 16,    // 重试基础退避时间
     RATE_LIMIT_RETRY_GAP_MS: 200, // 限流类错误（rate limit / too many）的专用退避：限流恢复需要时间，不能用 16ms 级退避
@@ -603,7 +601,7 @@ const BLEProtocol = (() => {
       //    尾块不足 80 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
       //    滑动窗口：仅当在途未确认包数超过 OTA.WINDOW 时才等设备进度通知；
       //    若设备根本不上报进度（旧固件未开 blc_ota_setOtaScheduleIndication_by_pduNum），
-      //    首次等待超时后降级为定速发送：没有背压时若全速盲发，设备来不及处理会直接监督超时断链。
+      //    首次等待超时后关闭进度等待——发送本身由带响应写逐包背压，无需额外定速（FREERUN 已移除）。
       const DATA_BYTES = OTA.BLOCK_BYTES;   // 每包固件字节数 = pdu_length = 80（官方 Extend 格式）
       const totalBlocks = Math.ceil(fwSize / DATA_BYTES);
       let flowControl = true;
@@ -614,9 +612,9 @@ const BLEProtocol = (() => {
             const ok = await waitProgress(i - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
             if (!ok && ackedPdu === 0) flowControl = false;
           }
-        } else if (i % OTA.FREERUN_BURST === 0) {
-          await sleep(OTA.FREERUN_GAP_MS);
         }
+        // 中文：flowControl=false（固件不上报进度）时不再做任何额外等待——
+        //       DATA 带响应写本身逐包等固件 ATT 响应，天然背压，无需 FREERUN 定速。
 
         const off = i * DATA_BYTES;
         const pkt = new Uint8Array(2 + OTA.BLOCK_BYTES + 2);   // 整包 84B = idx(2)+data(80)+crc(2)
