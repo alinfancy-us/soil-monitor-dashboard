@@ -1266,70 +1266,52 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      return m ? parseFloat(m[1].replace(/_/g, '.')) : null;
    }
 
-  // ===== 自研 beacio 检测（2026-09-28 替换原 decide(20) 轮询；beacio.js 已不再加载）=====
-  // 核心事实：扩展运行时才会注入标记/回握手；网页层无法区分"已装未开"与"未装"，
-  // 统一判 not-installed，"已装/未装"靠 window.open 探测 onboarding-start 分流：
-  // 已装被拉起（popup 不加载，load 不触发）→ app 引导开启；未装（popup load 触发：setup.html 加载）
-  // → 关探测标签 + 直接跳 App Store。
+  // ===== 自研 beacio 探测（2026-10-12 重构：移除一次性闩锁缓存，改为按需无状态探测）=====
+  // 核心事实：beacio 是 Safari Web Extension，navigator.bluetooth 由其 content script 注入。
+  // iOS 锁屏时 Safari 挂起页面进程，唤醒后从内存快照恢复页面（不重载、JS 闭包状态保留），
+  // 但扩展桥的注入需要重建——历史上"检测只跑一次、结果长期可信"的闩锁缓存（beacioL /
+  // beacioX / beacioFinalized / beacioDetectStarted）在唤醒后变成陈旧毒药：点 Connect 时
+  // 要么误判"未装 beacio"弹引导，要么调到未就绪的 polyfill 静默失败（蓝牙授权/设备选择器
+  // 弹窗偶现不出现）。现改为点击 Connect 时实时探测：快路径三种官方就绪信号任一命中即真；
+  // 否则 ping/pong + ready 事件等待至多 timeoutMs（覆盖唤醒后扩展桥恢复竞态）。
+  // 无状态：每次调用都是全新探测，settle 时自清理监听与定时器，可安全重复调用。
   const BEACIO_ONBOARDING_START = 'https://link.beacio.com/onboarding-start';
-  let beacioL = false;          // active：扩展注入真 API
-  let beacioX = false;          // installed：标记残留
-  let beacioFinalized = false;  // 检测是否已收尾（≤~1s 握手 + 兜底）
-  let beacioDetectStarted = false;
-
-  function beacioCheckInstalled() {
-    if (beacioX) return true;
+  function probeBeacioReady(timeoutMs = 500) {
     try {
-      if (document.documentElement.dataset.beacioInstalled === 'true') {
-        beacioX = true;
-        return true;
-      }
+      if (document.documentElement.dataset.beacioExtension === 'true') return Promise.resolve(true);
     } catch (e) {}
-    return false;
-  }
-  function beacioMarkActive() {
-    if (beacioL) return;
-    beacioL = true;
-    beacioX = true;
-    try { localStorage.setItem('beacio_seen', JSON.stringify({ ts: Date.now(), v: 1 })); } catch (e) {}
-    beacioFinalize();
-  }
-  function beacioFinalize() {
-    if (beacioFinalized) return;
-    beacioFinalized = true;
-    beacioCheckInstalled();
-  }
-  function startBeacioDetect() {
-    if (beacioDetectStarted) return;   // 幂等：初始化与延迟重查均可安全调用
-    beacioDetectStarted = true;
-    const ua = navigator.userAgent;
-    if (!/iPad|iPhone|iPod/.test(ua) || window.MSStream) return;
-    beacioCheckInstalled();
-    try {
-      if (document.documentElement.dataset.beacioExtension === 'true') { beacioMarkActive(); return; }
-    } catch (e) {}
-    if (navigator.beacio !== undefined) { beacioMarkActive(); return; }
-    window.addEventListener('beacio:extension:ready', beacioMarkActive, { once: true });
-    // ping/pong 握手：nonce 匹配，最多 5 次 ×100ms（对齐官方握手协议）
-    const nonce = 'beacio-ping-' + Date.now() + '-' + Math.random().toString(16).slice(2);
-    const onPong = (e) => {
-      const d = e.detail;
-      if (d && d.nonce === nonce) {
+    if (navigator.beacio !== undefined || navigator.bluetooth) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const nonce = 'beacio-ping-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('beacio:extension:ready', onReady);
         window.removeEventListener('beacio:extension:pong', onPong);
-        beacioMarkActive();
-      }
-    };
-    window.addEventListener('beacio:extension:pong', onPong);
-    let n = 0;
-    const sendPing = () => {
-      n += 1;
-      try { window.dispatchEvent(new CustomEvent('beacio:extension:ping', { detail: { nonce } })); } catch (e) {}
-      if (n >= 5) window.removeEventListener('beacio:extension:pong', onPong);
-      else setTimeout(sendPing, 100);
-    };
-    sendPing();
-    setTimeout(beacioFinalize, 1000);  // 收尾判定
-    setTimeout(beacioFinalize, 3000);  // 绝对兜底
+        clearTimeout(pingTimer);
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const onReady = () => finish(true);
+      const onPong = (e) => {
+        const d = e.detail;
+        if (d && d.nonce === nonce) finish(true);
+      };
+      window.addEventListener('beacio:extension:ready', onReady);
+      window.addEventListener('beacio:extension:pong', onPong);
+      // ping/pong 握手：nonce 匹配，最多 5 次 ×100ms（对齐官方握手协议）
+      let n = 0;
+      let pingTimer = 0;
+      const sendPing = () => {
+        if (settled) return;
+        n += 1;
+        try { window.dispatchEvent(new CustomEvent('beacio:extension:ping', { detail: { nonce } })); } catch (e) {}
+        if (n < 5) pingTimer = setTimeout(sendPing, 100);
+      };
+      pingTimer = setTimeout(sendPing, 0);
+      const timer = setTimeout(() => finish(false), timeoutMs);
+    });
   }
   function beacioGotoOnboarding() {
     // 双按钮知情分流（替代探测法）：iOS Safari 不允许脚本关闭探测标签（popup.close 被忽略），
@@ -1537,7 +1519,6 @@ function clearConnectError() {
    // 页面层无法区分"已装未开"与"未装"；且能进入本引导时 beacio 必然未注入（active 时
    // navigator.bluetooth 已存在、不会走到这里），无需再做握手等待（原 waitFinal 死逻辑已删）。
    function guideBeacio() {
-     startBeacioDetect();   // beacio 握手检测移到点击时触发（不在页面加载时跑，幂等可重复调用）
      showGuideModal({
        iconHtml: GUIDE_LOGO_ICON,
        title: 'Bluetooth needs beacio',
@@ -1632,10 +1613,16 @@ function clearConnectError() {
    // Bluefy 三条路。
    // iOS 点击 Connect 时的全量判定（②～⑤ 级联；④⑤ 依赖 beacio 注入 / standalone 等
    // 运行时状态，统一延迟到点击时执行，不在页面加载时判定）
-   function ensureIosEnv() {
+   // async：④' 的 beacio 注入等待（probeBeacioReady）需要 await；调用方须 await 本函数
+   async function ensureIosEnv() {
      if (isBluefy() && navigator.bluetooth) { log('[gate] ios: Bluefy + API → direct'); return true; }   // ② Bluefy 直连
      if (!isNativeSafari()) { log('[gate] ios: non-native-Safari shell → x-safari guide'); guideIosNonSafari(); return false; }   // ③ Safari 优先
      if (navigator.bluetooth) { log('[gate] ios: Safari + API (beacio active) → direct'); return true; }   // ④ beacio active 注入 → 直连
+     // ④' 唤醒恢复竞态兜底：锁屏唤醒后 Safari 从内存快照恢复页面，beacio 扩展桥可能尚未
+     // 重新注入 navigator.bluetooth——立即判负会把已装用户误导向 beacio 引导。此处等待至多
+     // 500ms 再判；WebKit transient activation 窗口约 5s，等待不消耗点击手势，
+     // 探测通过后同一次点击链路里的 requestDevice 仍然有效
+     if (await probeBeacioReady(500)) { log('[gate] ios: beacio ready after wait → direct'); return true; }
      if (isStandalone()) { log('[gate] ios: standalone PWA → copy link guide'); guideIosStandalone(); return false; }
      const iosVer = parseIOSVersion(navigator.userAgent);
      if (iosVer !== null && iosVer >= 26.2) { log(`[gate] ios: v${iosVer} ≥ 26.2 → beacio guide`); guideBeacio(); return false; }
@@ -1654,7 +1641,9 @@ function clearConnectError() {
      return false;
    }
 
-   function ensureBluetoothEnv() {
+   // async：iOS 分支（ensureIosEnv）含 beacio 注入等待，调用方必须 await（点击路径）；
+   // 页面加载体检只走 android/desktop 分支（无实际 await 点），也统一包 async IIFE 处理
+   async function ensureBluetoothEnv() {
      const platform = detectPlatform();
      log(`[gate] check: platform=${platform} bluetooth=${!!navigator.bluetooth} secure=${window.isSecureContext}`);
      if (platform === 'ios') return ensureIosEnv();
@@ -1675,7 +1664,8 @@ function clearConnectError() {
 
    async function handleConnect() {
      // 环境闸门（与页面加载共用）：不满足时已弹出对应平台引导，直接返回不进入连接流程
-     if (!ensureBluetoothEnv()) return;
+     // iOS 分支含 beacio 注入等待（最多 500ms），必须 await
+     if (!(await ensureBluetoothEnv())) return;
      // 通过闸门即代表环境可直连（beacio active 注入 / Android Chrome/Edge / 桌面 Chromium
      // 等真实 API），无需再按浏览器/UA 额外拦截；未通过时 ensureBluetoothEnv 已弹对应引导。
      const token = ++connectToken;
@@ -1822,7 +1812,13 @@ function clearConnectError() {
          // requestDevice 阶段失败（还没选到设备）：统一提示蓝牙权限，不再分平台弹窗/换文案。
          // 不依赖 err.name 枚举（小米等会抛 NotAllowedError 等未枚举名，会被旧 else 静默成
          // “闪一下没反应”），统一走可见红字引导。
-         showConnectError('Bluetooth failed to start. Make sure Bluetooth is on and allow Bluetooth permission for this browser, then retry.');
+         // iOS Safari（beacio）附加唤醒提示：锁屏唤醒后快速首点可能吞掉瞬时用户手势
+         // （页面尚在恢复渲染，WebKit 未注册 activation），requestDevice 被静默拒绝；
+         // 再点一次 Connect 手势重新注册即可正常弹出授权/设备选择器
+         const wakeHint = (detectPlatform() === 'ios' && isNativeSafari())
+           ? ' If you just unlocked your iPhone, tap Connect once more.'
+           : '';
+         showConnectError('Bluetooth failed to start. Make sure Bluetooth is on and allow Bluetooth permission for this browser, then retry.' + wakeHint);
          log(`Bluetooth could not start (requestDevice): ${(err && err.name) || '?'}: ${(err && err.message) || err}`);
        } else {
          // 已选到设备，后续连接/初始化失败 → 设备/信号问题，不引导 Chrome
@@ -2859,11 +2855,15 @@ The device will measure the current probe state first, then apply the calibratio
        els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
      }
    } else {
-     const ok = ensureBluetoothEnv();
-     log(`[gate] load check (${loadGatePlatform}): ${ok ? 'pass' : 'fail → disable Connect until environment fixed'}`);
-     if (!ok) {
-       els.connectBtn.disabled = true;
-       els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
-     }
+     // ensureBluetoothEnv 现为 async（iOS 点击路径含 beacio 注入等待）：加载体检只走
+     // android/desktop 分支（无实际 await 点），用 IIFE await 拿到真实布尔值再禁用 Connect
+     (async () => {
+       const ok = await ensureBluetoothEnv();
+       log(`[gate] load check (${loadGatePlatform}): ${ok ? 'pass' : 'fail → disable Connect until environment fixed'}`);
+       if (!ok) {
+         els.connectBtn.disabled = true;
+         els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
+       }
+     })();
    }
  })();
