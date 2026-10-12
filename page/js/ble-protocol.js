@@ -414,14 +414,17 @@ const BLEProtocol = (() => {
   const OTA = {
     FW_SIZE_MAX: 124 * 1024,   // SDK 默认 ota_firmware_max_size（新固件存放在 flash 0x20000 起 124K 内）
     BLOCK_BYTES: 16,           // legacy 协议固定 16 字节/包
-    WINDOW: 32,                // 滑动窗口：允许的最大在途未确认包数（= 固件侧 32 包上报粒度；过大如 256 会压爆设备 RX 缓冲导致丢包序列错误）
+    WINDOW: 32,                // 滑动窗口：允许的最大在途未确认包数（保持 32，与固件 32 包上报粒度匹配；不可小于 32，
+                               //   否则会在设备首次上报前触发 waitProgress 超时 → 误判"设备不上报"而降级定速，破坏背压）
     SCHEDULE_GRANULARITY: 32,    // 固件 blc_ota_setOtaScheduleIndication_by_pduNum(32) 的上报粒度，收尾等待按整批对齐
     PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
     END_TIMEOUT_MS: 10000,     // END 后等待结果通知 / 设备重启断链的超时
+    WRITE_GAP_MS: 3,           // 无响应写每包间最小间隔：iOS/beacio 每连接事件仅约 4-6 包，防止瞬间涌入过多 BLE 请求被限流
     FREERUN_BURST: 4,          // 无进度反馈时的定速发送：每发几包让出一次执行权
     FREERUN_GAP_MS: 6,         // 定速发送的间隔（约 4 包/6ms ≈ 10KB/s，贴近一个连接事件能吃下的量，避免压垮设备断链）
-    WRITE_RETRY_MAX: 6,        // GATT busy 等瞬时错误的重试次数
+    WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
     WRITE_RETRY_GAP_MS: 16,    // 重试基础退避时间
+    RATE_LIMIT_RETRY_GAP_MS: 200, // 限流类错误（rate limit / too many）的专用退避：限流恢复需要时间，不能用 16ms 级退避
   };
   const OTA_CMD = { START: 0xFF01, END: 0xFF02, RESULT: 0xFF06 };
   const OTA_RESULT_NAMES = {
@@ -469,6 +472,9 @@ const BLEProtocol = (() => {
     for (let i = 0; i < OTA.WRITE_RETRY_MAX; i++) {
       try {
         if (withoutResponse) {
+          // 无响应写限速：每包间留出最小间隔，避免在极短时间内向 BLE 栈涌入大量写请求
+          //（iOS/beacio 转发层会以 "Rate limit exceeded — too many BLE requests" 拒绝过密请求）
+          await sleep(OTA.WRITE_GAP_MS);
           await otaChar.writeValueWithoutResponse(data);
         } else {
           await otaChar.writeValue(data);
@@ -479,11 +485,14 @@ const BLEProtocol = (() => {
         const msg = String(e?.message || e || '').toLowerCase();
         // 中文：链路已断开是终态错误，不可重试，直接抛出让上层走断链恢复流程
         const disconnected = msg.includes('disconnect') || msg.includes('gatt server is disconnected');
-        const retryable = !disconnected && (msg.includes('already in progress') || msg.includes('busy') || msg.includes('operation failed'));
+        // 限流类错误（beacio/系统对过密 BLE 请求的拒绝）同样可重试，但需用更长退避等待限流恢复
+        const rateLimited = msg.includes('rate limit') || msg.includes('too many') || msg.includes('quota');
+        const retryable = !disconnected && (rateLimited || msg.includes('already in progress') || msg.includes('busy') || msg.includes('operation failed'));
         if (!retryable || i === OTA.WRITE_RETRY_MAX - 1) {
           throw e;
         }
-        await sleep(OTA.WRITE_RETRY_GAP_MS * (i + 1));
+        const gap = rateLimited ? OTA.RATE_LIMIT_RETRY_GAP_MS : OTA.WRITE_RETRY_GAP_MS;
+        await sleep(gap * (i + 1));
       }
     }
     throw lastErr || new Error('GATT write failed');
