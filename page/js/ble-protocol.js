@@ -403,8 +403,8 @@ const BLEProtocol = (() => {
 
   ////////////////////////// Telink BLE OTA 升级（legacy 协议） //////////////////////////
   // 协议与 SDK 内参考实现 vendor/ble_master_kma_dongle/blm_ota.c 严格对齐：
-  //   START : 2 字节 0x01 0xFF（CMD_OTA_START=0xFF01 小端）
-  //   DATA  : 20 字节 = adr_index(u16 LE，固件偏移>>4) + 16 字节固件 + crc16(u16 LE，覆盖前 18 字节)
+  //   START : CMD_OTA_START_EXT(0xFF03) 20 字节 = cmd(2) + pdu_length(1)=BLOCK_BYTES + version_compare(1)=0 + rsvd(16)
+  //   DATA  : 116 字节 = adr_index(u16 LE，固件偏移>>4) + 112 字节固件 + crc16(u16 LE，覆盖前 114 字节)
   //   END   : 6 字节 = 0x02 0xFF + adr_index_max(u16) + 其按位取反(u16)
   //   PROG  : 设备通知 {0x08 0xFF + u16 已收包数}（CMD_OTA_SCHEDULE_PDU_NUM），
   //           仅当固件调用了 blc_ota_setOtaScheduleIndication_by_pduNum 才会上报；
@@ -413,7 +413,11 @@ const BLEProtocol = (() => {
   // 固件 bin 头部 0x18 偏移存放固件长度（Telink bin 格式），发送字节数以此为准
   const OTA = {
     FW_SIZE_MAX: 124 * 1024,   // SDK 默认 ota_firmware_max_size（新固件存放在 flash 0x20000 起 124K 内）
-    BLOCK_BYTES: 16,           // legacy 协议固定 16 字节/包
+    // 数据块大小（每包固件字节数）= CMD_OTA_START_EXT 的 pdu_length，必须是 16 的倍数。
+    // 受固件端 ATT MTU=128 限制：单包 payload = 2(idx) + pdu_length + 2(crc) ≤ 128-3=125 → pdu_length 最大取 112。
+    // 16→112 使包数从 ~4426 降到 ~617（69KB 固件），总耗时约 ÷7（beacio 每包转发延迟是耗时主项，包数决定总耗时）。
+    // 若设备固件太旧不支持 START_EXT（报 0x02 invalid packet / 0x09 PDU len err），需回退 16 + legacy START。
+    BLOCK_BYTES: 112,
     WINDOW: 32,                // 滑动窗口：允许的最大在途未确认包数（保持 32，与固件 32 包上报粒度匹配；不可小于 32，
                                //   否则会在设备首次上报前触发 waitProgress 超时 → 误判"设备不上报"而降级定速，破坏背压）
     SCHEDULE_GRANULARITY: 32,    // 固件 blc_ota_setOtaScheduleIndication_by_pduNum(32) 的上报粒度，收尾等待按整批对齐
@@ -426,7 +430,7 @@ const BLEProtocol = (() => {
     WRITE_RETRY_GAP_MS: 16,    // 重试基础退避时间
     RATE_LIMIT_RETRY_GAP_MS: 200, // 限流类错误（rate limit / too many）的专用退避：限流恢复需要时间，不能用 16ms 级退避
   };
-  const OTA_CMD = { START: 0xFF01, END: 0xFF02, RESULT: 0xFF06 };
+  const OTA_CMD = { START: 0xFF01, START_EXT: 0xFF03, END: 0xFF02, RESULT: 0xFF06 };
   const OTA_RESULT_NAMES = {
     0x00: 'success',
     0x01: 'packet sequence error',
@@ -436,6 +440,7 @@ const BLEProtocol = (() => {
     0x05: 'data incomplete',
     0x06: 'flow error',
     0x07: 'firmware CRC error',
+    0x09: 'PDU length error (device may not support large-block OTA)',
     0x0C: 'data packet timeout',
     0x0D: 'OTA process timeout',
     0x0F: 'connection terminated',
@@ -566,8 +571,14 @@ const BLEProtocol = (() => {
     try {
       onProgress?.({ phase: 'start', percent: 0, sent: 0, total: fwSize });
 
-      // 1. START：CMD_OTA_START(0xFF01) 小端 2 字节
-      await writeWithRetry(otaChar, Uint8Array.of(0x01, 0xFF), false);
+      // 1. START：CMD_OTA_START_EXT(0xFF03)，声明 pdu_length=BLOCK_BYTES(112)，设备端按 112B/包校验后续 DATA。
+      //    结构 ota_startExt_t = cmd(2) + pdu_length(1) + version_compare(1) + rsvd(16)，共 20 字节。
+      //    version_compare=0（不做版本对比，避免 OTA_VERSION_COMPARE_ERR）。
+      const startExt = new Uint8Array(20);
+      startExt[0] = 0x03; startExt[1] = 0xFF;    // CMD_OTA_START_EXT 小端
+      startExt[2] = OTA.BLOCK_BYTES;             // pdu_length=112（16 的倍数）
+      startExt[3] = 0;                           // version_compare=0；rsvd[16] 默认 0
+      await writeWithRetry(otaChar, startExt, false);
 
       // 2. DATA：每包 20 字节 = adr_index(u16 LE) + 16 字节固件 + crc16(u16 LE，覆盖前 18 字节)。
       //    尾块不足 16 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
@@ -588,14 +599,14 @@ const BLEProtocol = (() => {
         }
 
         const off = i * OTA.BLOCK_BYTES;
-        const pkt = new Uint8Array(20);
+        const pkt = new Uint8Array(2 + OTA.BLOCK_BYTES + 2);   // idx(2)+data(BLOCK)+crc(2)
         pkt[0] = i & 0xff;
         pkt[1] = (i >> 8) & 0xff;
         const n = Math.min(OTA.BLOCK_BYTES, fwSize - off);
-        pkt.set(bytes.subarray(off, off + n), 2);
-        const crc = telinkCrc16(pkt, 18);
-        pkt[18] = crc & 0xff;
-        pkt[19] = (crc >> 8) & 0xff;
+        pkt.set(bytes.subarray(off, off + n), 2);   // 尾块不足 112 时自动补 0（补 0 不在 fwSize 内，设备最终 CRC32 校验不计入）
+        const crc = telinkCrc16(pkt, 2 + OTA.BLOCK_BYTES);   // 覆盖 idx+data
+        pkt[2 + OTA.BLOCK_BYTES] = crc & 0xff;
+        pkt[3 + OTA.BLOCK_BYTES] = (crc >> 8) & 0xff;
         /* 中文：同一特征写操作必须串行，避免 WebKit 报 GATT busy */
         await writeWithRetry(otaChar, pkt, true);
 
