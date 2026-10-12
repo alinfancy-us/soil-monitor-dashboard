@@ -572,8 +572,14 @@ const BLEProtocol = (() => {
         progressWaiter = waiter;
       });
     };
+    // 等结果通知或设备断链：waitResult 只在 END 之后调用，此时断链 = 固件校验通过已进入复位流程。
+    // （固件失败走 abort 不会 switch boot/reset，因此 END 后的 gattserverdisconnected 就是成功信号；
+    //   返回 'disconnected' 供上层判定成功，返回 null 表示 10s 内既无通知也未断链的真超时。）
     const waitResult = () => new Promise((resolve) => {
       resultResolve = resolve;
+      const dev = otaChar.service.device;
+      const onDisco = () => { if (resultResolve) { resultResolve = null; resolve('disconnected'); } };
+      dev.addEventListener('gattserverdisconnected', onDisco, { once: true });
       setTimeout(() => { if (resultResolve) { resultResolve = null; resolve(null); } }, OTA.END_TIMEOUT_MS);
     });
 
@@ -647,8 +653,11 @@ const BLEProtocol = (() => {
 
       // 4. 等待设备结果通知（成功后设备自动重启断链）
       const result = await waitResult();
+      if (result === 'disconnected') {
+        return { ok: true, result: 0x00, message: 'OTA succeeded, device is rebooting (confirmed by disconnect)' };
+      }
       if (result === null) {
-        return { ok: false, result, message: 'OTA timeout waiting for device result (device may have rebooted)' };
+        return { ok: false, result, message: 'OTA timeout waiting for device result (connection still alive)' };
       }
       if (result === 0x00) {
         return { ok: true, result, message: 'OTA succeeded, device is rebooting' };
