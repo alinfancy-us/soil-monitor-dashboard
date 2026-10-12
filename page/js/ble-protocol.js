@@ -556,8 +556,10 @@ const BLEProtocol = (() => {
     try {
       await otaChar.startNotifications();
     } catch (e) {
-      otaChar.removeEventListener('characteristicvaluechanged', onChanged);
-      throw new Error(`Failed to enable OTA notifications: ${e.message || e}`);
+      // 中文：Bluefy 等浏览器可能拒绝通知订阅（日志报 rejected，Promise 可能 resolve 也可能 reject）。
+      //      通知仅用于进度流控与结果判定，缺失时降级：无背压 → 首次 waitProgress 超时自动转
+      //      freerun 定速发送；END 后靠"固件校验通过才复位断链"判定成功。不阻塞 OTA。
+      console.warn(`[OTA] notifications rejected, degrade to freerun: ${e?.message || e}`);
     }
 
     // 等待 ackedPdu 达到 target；返回 false 表示超时（设备卡顿，或该固件根本不上报进度）
@@ -643,19 +645,17 @@ const BLEProtocol = (() => {
         await waitProgress(lastBatch || totalBlocks, OTA.END_TIMEOUT_MS);
       }
       // 3. END：CMD_OTA_END(0xFF02) + adr_index_max + 其按位取反，共 6 字节
-      //    必须用无响应写：固件 END 回调校验通过后直接进入复位流程（soil_ota_reset 死循环等
-      //    watchdog），ATT Write Response 永远不会发——带响应写（writeValue）会在 iOS/Chrome
-      //    上一直挂起，1.5s 后设备复位断链时被 reject 为 "A network error occurred during the
-      //    Bluetooth operation"（升级其实已成功，UI 却误报）。无响应写立即完成，不依赖固件响应；
-      //    送达窗口 = 固件复位前的 1.5s，前序 600+ 包均达，风险可忽略。结果判定走 waitResult
-      //    （result 0 通知 / END 后断链=复位成功 双通道）。
+      //    用带响应写（writeValue）：固件 END 校验通过后先返回（协议栈发 ATT Write Response +
+      //    result 通知），再由 main_loop 延时 ~1.5s 复位——响应正常发出、写不挂起、送达有保证
+      //    （无响应写在 Bluefy 上可能丢包导致固件收不到 END、不复位、web 端超时）。
+      //    结果判定走 waitResult（result 0 通知 / END 后断链=复位成功 双通道）。
       const maxIdx = totalBlocks - 1;
       onProgress?.({ phase: 'end', percent: 100, sent: fwSize, total: fwSize });
       await writeWithRetry(otaChar, Uint8Array.of(
         0x02, 0xFF,
         maxIdx & 0xff, (maxIdx >> 8) & 0xff,
         (~maxIdx) & 0xff, ((~maxIdx) >> 8) & 0xff,
-      ), true);
+      ), false);
 
       // 4. 等待设备结果通知（成功后设备自动重启断链）
       const result = await waitResult();
