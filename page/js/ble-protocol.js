@@ -413,15 +413,13 @@ const BLEProtocol = (() => {
   // 固件 bin 头部 0x18 偏移存放固件长度（Telink bin 格式），发送字节数以此为准
   const OTA = {
     FW_SIZE_MAX: 124 * 1024,   // SDK 默认 ota_firmware_max_size（新固件存放在 flash 0x20000 起 124K 内）
-    // 每包固件字节数（= pdu_length − 2）。pdu_length = START_EXT 声明值，必须是 16 的倍数。
-    // 【根因实锤】B85(825x) 对 Extend DATA 的校验 = "整包长度 − 2（adr_index）== 声明的 pdu_length"：
-    //   ① 官方协议格式（整包 = pdu+4，data = pdu）：data=80 整包84、data=64 整包68 均报 0x09（82≠80、66≠64）；
-    //   ② 整包 = pdu（data = pdu−4）：整包80/data76 也报 0x09（78≠80）；
-    //   唯一自洽解释：B85 认为 DATA 包 = adr_index(2) + payload(pdu_length)，payload 尾部 2 字节为 CRC16，
-    //   即整包 = pdu_length + 2、每包固件字节 = pdu_length − 2（=78，含 CRC 共 80 = 声明值）。
-    // 【上限】B85 不支持 >80 的 OTA PDU（Release Note；112 实测报 OTA_MCU_NOT_SUPPORTED result 15）。
-    //   故取 pdu_length = 80（16×5，B85 上限内）、整包 82B、每包固件 78B。
-    // 另受固件 ATT MTU=128 限制：整包 ≤ 125。
+    // 数据块大小（每包固件字节数）= CMD_OTA_START_EXT 声明的 pdu_length，必须是 16 的倍数。
+    // 【约定】按 Telink 官方 Extend 协议：OTA_PDU = Adr_Index(2) + Data(n×16) + CRC(2)，整包 = pdu_length + 4。
+    //   pdu_length=80（16×5）为 B85 上限内合法值：Release Note 仅称 "B85 does not support the OTA PDU
+    //   which is bigger than 80"（112 实测报 OTA_MCU_NOT_SUPPORTED result 15），未限制 ≤80。
+    //   B85 固件对 >16 的 DATA 目前实测均报 0x09（data=80/78/76、整包 84/82/80 全拒），疑似固件 OTA 库
+    //   校验过严（只认 legacy 20B 或存在 length 校验差异），根因需固件端 SDK 层解决；客户端按官方格式发 80。
+    // 另受固件 ATT MTU=128 限制：整包 84 ≤ 125。
     BLOCK_BYTES: 80,
     WINDOW: 32,                // 滑动窗口：允许的最大在途未确认包数（保持 32，与固件 32 包上报粒度匹配；不可小于 32，
                                //   否则会在设备首次上报前触发 waitProgress 超时 → 误判"设备不上报"而降级定速，破坏背压）
@@ -580,7 +578,7 @@ const BLEProtocol = (() => {
       onProgress?.({ phase: 'start', percent: 0, sent: 0, total: fwSize });
 
       // 1. START：CMD_OTA_START_EXT(0xFF03)，声明 pdu_length=BLOCK_BYTES(80)。
-      //    B85 校验"DATA 整包长度 − 2（adr_index）== pdu_length"，即整包须为 pdu_length + 2（82B）。
+      //    官方 Extend 协议：后续 DATA 整包 = Adr_Index(2) + Data(pdu_length) + CRC(2) = pdu_length + 4。
       //    结构 ota_startExt_t = cmd(2) + pdu_length(1) + version_compare(1) + rsvd(16)，共 20 字节。
       //    version_compare=0（不做版本对比，避免 OTA_VERSION_COMPARE_ERR）。
       const startExt = new Uint8Array(20);
@@ -588,14 +586,14 @@ const BLEProtocol = (() => {
       startExt[2] = OTA.BLOCK_BYTES;             // pdu_length=80（16 的倍数，≤B85 上限 80）
       startExt[3] = 0;                           // version_compare=0；rsvd[16] 默认 0
       await writeWithRetry(otaChar, startExt, false);
-      console.debug(`[OTA] START_EXT sent: pdu_length=${OTA.BLOCK_BYTES} => ${OTA.BLOCK_BYTES + 2}B/pkt`);
+      console.debug(`[OTA] START_EXT sent: pdu_length=${OTA.BLOCK_BYTES} => ${OTA.BLOCK_BYTES + 4}B/pkt`);
 
-      // 2. DATA：每包 82 字节 = adr_index(u16 LE) + 78 字节固件 + crc16(u16 LE，覆盖前 80 字节)。
-      //    尾块不足 78 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
+      // 2. DATA：每包 84 字节 = adr_index(u16 LE) + 80 字节固件 + crc16(u16 LE，覆盖前 82 字节)。
+      //    尾块不足 80 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
       //    滑动窗口：仅当在途未确认包数超过 OTA.WINDOW 时才等设备进度通知；
       //    若设备根本不上报进度（旧固件未开 blc_ota_setOtaScheduleIndication_by_pduNum），
       //    首次等待超时后降级为定速发送：没有背压时若全速盲发，设备来不及处理会直接监督超时断链。
-      const DATA_BYTES = OTA.BLOCK_BYTES - 2;   // 每包固件字节数 = pdu_length − 2（payload 尾部 2 字节为 CRC16）
+      const DATA_BYTES = OTA.BLOCK_BYTES;   // 每包固件字节数 = pdu_length = 80（官方 Extend 格式）
       const totalBlocks = Math.ceil(fwSize / DATA_BYTES);
       let flowControl = true;
       let lastPercent = -1;
@@ -610,12 +608,12 @@ const BLEProtocol = (() => {
         }
 
         const off = i * DATA_BYTES;
-        const pkt = new Uint8Array(OTA.BLOCK_BYTES + 2);   // 整包 = pdu_length + 2：idx(2)+data+crc(2)
+        const pkt = new Uint8Array(2 + OTA.BLOCK_BYTES + 2);   // 整包 84B = idx(2)+data(80)+crc(2)
         pkt[0] = i & 0xff;
         pkt[1] = (i >> 8) & 0xff;
         const n = Math.min(DATA_BYTES, fwSize - off);
-        pkt.set(bytes.subarray(off, off + n), 2);   // 尾块不足 78 时自动补 0（补 0 不在 fwSize 内，设备最终 CRC32 校验不计入）
-        const crc = telinkCrc16(pkt, 2 + DATA_BYTES);   // 覆盖 idx+data（2+78=80 字节）
+        pkt.set(bytes.subarray(off, off + n), 2);   // 尾块不足 80 时自动补 0（补 0 不在 fwSize 内，设备最终 CRC32 校验不计入）
+        const crc = telinkCrc16(pkt, 2 + DATA_BYTES);   // 覆盖 idx+data（2+80=82 字节）
         pkt[2 + DATA_BYTES] = crc & 0xff;
         pkt[3 + DATA_BYTES] = (crc >> 8) & 0xff;
         /* 中文：同一特征写操作必须串行，避免 WebKit 报 GATT busy */
