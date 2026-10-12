@@ -488,6 +488,7 @@ const BLEProtocol = (() => {
       } catch (e) {
         lastErr = e;
         const msg = String(e?.message || e || '').toLowerCase();
+        console.warn(`[OTA][write] #${i} attempt ${i + 1}/${OTA.WRITE_RETRY_MAX} failed: ${e?.message || e}`);
         // 中文：链路已断开是终态错误，不可重试，直接抛出让上层走断链恢复流程
         const disconnected = msg.includes('disconnect') || msg.includes('gatt server is disconnected');
         // 限流类错误（beacio/系统对过密 BLE 请求的拒绝）同样可重试，但需用更长退避等待限流恢复
@@ -579,6 +580,7 @@ const BLEProtocol = (() => {
       startExt[2] = OTA.BLOCK_BYTES;             // pdu_length=112（16 的倍数）
       startExt[3] = 0;                           // version_compare=0；rsvd[16] 默认 0
       await writeWithRetry(otaChar, startExt, false);
+      console.debug(`[OTA] START_EXT sent: pdu_length=${OTA.BLOCK_BYTES} => ${OTA.BLOCK_BYTES + 4}B/pkt`);
 
       // 2. DATA：每包 20 字节 = adr_index(u16 LE) + 16 字节固件 + crc16(u16 LE，覆盖前 18 字节)。
       //    尾块不足 16 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
@@ -608,6 +610,7 @@ const BLEProtocol = (() => {
         pkt[2 + OTA.BLOCK_BYTES] = crc & 0xff;
         pkt[3 + OTA.BLOCK_BYTES] = (crc >> 8) & 0xff;
         /* 中文：同一特征写操作必须串行，避免 WebKit 报 GATT busy */
+        console.debug(`[OTA][DATA] write #${i}/${totalBlocks - 1} len=${pkt.length} idx=0x${i.toString(16).padStart(4, '0')}`);
         await writeWithRetry(otaChar, pkt, true);
 
         const sent = Math.min(off + OTA.BLOCK_BYTES, fwSize);
