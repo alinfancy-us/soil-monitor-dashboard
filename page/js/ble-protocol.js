@@ -627,9 +627,16 @@ const BLEProtocol = (() => {
         const crc = telinkCrc16(pkt, 2 + DATA_BYTES);   // 覆盖 idx+data（2+80=82 字节）
         pkt[2 + DATA_BYTES] = crc & 0xff;
         pkt[3 + DATA_BYTES] = (crc >> 8) & 0xff;
-        /* 中文：同一特征写操作必须串行，避免 WebKit 报 GATT busy */
+        /* 中文：DATA 用带响应写（writeValue）。无响应写（writeValueWithoutResponse）"成功返回"
+         *       不保证固件真正收到——beacio/WebKit 限流时可能静默丢弃，固件端表现为跳号
+         *       （seq err: got=148 expect=147）导致 OTA 失败。带响应写由固件写完 flash 后才回
+         *       ATT Write Response，天然形成逐包确认 + 流控：
+         *         · 每包送达有保证，杜绝跳号；
+         *         · 包间间隔 = 固件处理时间（20~60ms），远低于 WebBluetooth 限流阈值，
+         *           不再触发 "Rate limit exceeded" 重试告警；
+         *         · 固件响应延迟即背压，无需依赖设备进度通知即可稳速发送。 */
         console.debug(`[OTA][DATA] write #${i}/${totalBlocks - 1} len=${pkt.length} idx=0x${i.toString(16).padStart(4, '0')} t=${Date.now()}`);
-        await writeWithRetry(otaChar, pkt, true);
+        await writeWithRetry(otaChar, pkt, false);
 
         const sent = Math.min(off + DATA_BYTES, fwSize);
         const percent = Math.round(sent * 100 / fwSize);
