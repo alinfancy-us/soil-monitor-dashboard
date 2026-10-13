@@ -562,12 +562,18 @@ const BLEProtocol = (() => {
 
     otaChar.addEventListener('characteristicvaluechanged', onChanged);
     try {
-      await otaChar.startNotifications();
+      // 中文：部分浏览器（Bluefy 等）的 startNotifications 可能挂起（既不 resolve 也不 reject），
+      //      导致 OTA 永远卡在启动、固件端收不到 START_EXT。加超时兜底：
+      //      通知只是流控/结果判定的加速通道，缺失时走 readAck 确认，不阻塞 OTA。
+      await Promise.race([
+        otaChar.startNotifications(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('startNotifications timeout')), 3000)),
+      ]);
     } catch (e) {
       // 中文：Bluefy 等浏览器可能拒绝通知订阅（日志报 rejected，Promise 可能 resolve 也可能 reject）。
       //      通知仅用于进度流控与结果判定，缺失时降级：无背压 → 首次 waitProgress 超时自动转
       //      freerun 定速发送；END 后靠"固件校验通过才复位断链"判定成功。不阻塞 OTA。
-      console.warn(`[OTA] notifications rejected, degrade to freerun: ${e?.message || e}`);
+      console.warn(`[OTA] notifications rejected/timeout, degrade: ${e?.message || e}`);
     }
 
     // 等待 ackedPdu 达到 target；返回 false 表示超时（设备卡顿，或该固件根本不上报进度）
