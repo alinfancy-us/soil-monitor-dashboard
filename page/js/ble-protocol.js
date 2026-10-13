@@ -418,9 +418,11 @@ const BLEProtocol = (() => {
     //   pdu_length=80 曾是妥协值：闭源库（liblt_825x.a）对 >16 的 DATA 实测全报 0x09（80/78/76 全拒），
     //   Release Note 称 "B85 does not support the OTA PDU bigger than 80"（112 在库上报 result 15）。
     //   固件已改 app 层自实现 OTA server（app_ota.c，支持 pdu 16~240 任意 16 倍数），
-    //   故这里用 B85 在 ATT MTU=128 下能单包发送的最大 16 倍数：pdu_length=112，整包 116 ≤ 125(MTU-3)。
-    //   提速效果：包数 874(80B) → 625(112B)，beacio 按包限流下总时长约 -28%。
-    BLOCK_BYTES: 112,
+    //   固件 MTU_SIZE_SETTING=185（与 iOS/Safari 协商值对齐）：载荷 182B(MTU-3)，
+    //   故这里取 B85 在 185 下能单包发送的最大 16 倍数：pdu_length=176，整包 180 ≤ 182(MTU-3)，
+    //   Chrome/Safari/iOS 均协商到 185，全平台通用。
+    //   提速效果：包数 874(80B) → 393(176B)，beacio 按包限流下总时长约 -55%。
+    BLOCK_BYTES: 176,
     WINDOW: 32,                // 滑动窗口：允许的最大在途未确认包数（保持 32，与固件 32 包上报粒度匹配；不可小于 32，
                                //   否则会在设备首次上报前触发 waitProgress 超时 → 误判"设备不上报"而降级定速，破坏背压）
     SCHEDULE_GRANULARITY: 32,    // 固件 blc_ota_setOtaScheduleIndication_by_pduNum(32) 的上报粒度，收尾等待按整批对齐
@@ -429,7 +431,7 @@ const BLEProtocol = (() => {
     WRITE_GAP_MS: 80,          // beacio 转发约 75ms/包、令牌桶约每秒补 12~13 包：50ms(20包/s) 每 ~12 包触发一次
                                //   Rate limit exceeded 报错（200ms 退避重试后成功，不影响结果但刷 Warning）。
                                //   调到 80ms(12.5包/s) 与转发节奏持平，理论不触发限流、日志干净；
-                               //   625 包(112B)@80ms ≈ 50s 传完（50ms 实测含重试约 45s，慢约 5s 换无报错）。
+                               //   393 包(176B)@80ms ≈ 31s 传完（50ms 实测含重试约 45s，慢约 5s 换无报错）。
                                //   历史：1ms/3ms 在旧代码（无限流重试）下 ~24 包触发限流断链；10ms 实测 beacio 丢包
                                //   （固件端 seq err got=75 expect=74，跳包 abort 为固件正确行为），故不再低于 50ms。
     WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
