@@ -70,6 +70,7 @@ jobs:
 
       # 固件来源优先级：fw_url 输入 > vars.FW_TAG（固件仓库 Release，与 deploy.yml 规则一致）。
       # 两者都为空时跳过固件更新（仅发页面）。
+      # firmware.json 的 isforce 从仓库变量 vars.ISFORCE 读取（true/false，默认 true=强制升级提醒）。
       # fw_url 支持 Actions Artifact zip 链接、Release Asset 链接以及常规 HTTP 链接
       - name: Download firmware & Sync firmware.json
         if: ${{ github.event.inputs.fw_url != '' || vars.FW_TAG != '' }}
@@ -77,6 +78,7 @@ jobs:
           FW_URL: ${{ github.event.inputs.fw_url }}
           FW_RAW_NOTES: ${{ github.event.inputs.fw_notes }}
           FW_RAW_TAG: ${{ vars.FW_TAG }}
+          FW_RAW_ISFORCE: ${{ vars.ISFORCE }}
           GH_TOKEN: ${{ secrets.FW_REPO_TOKEN }}
           REPO_PATH: "alinfancy-us/bth_soil_sensor"
         run: |
@@ -215,21 +217,26 @@ jobs:
 
           FW_NOTES=${FW_RAW_NOTES:-test firmware}
 
-          echo "Syncing firmware.json -> version=${FW_VERSION}, bin=${FW_BIN}, size=$(stat -c%s page/firmware/${FW_BIN}), isforce=true..."
+          # isforce 从仓库变量 vars.ISFORCE 读取（true/false，不区分大小写），未配置默认 true
+          # dev 预览渠道历史行为即强制升级（true），故兜底为 true；非法取值同样回退 true
+          FW_ISFORCE=$(echo "${FW_RAW_ISFORCE:-true}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+          if [ "$FW_ISFORCE" != "false" ]; then FW_ISFORCE=true; fi
+
+          echo "Syncing firmware.json -> version=${FW_VERSION}, bin=${FW_BIN}, size=$(stat -c%s page/firmware/${FW_BIN}), isforce=${FW_ISFORCE}..."
 
           node -e '
             const fs = require("fs");
             const manifestPath = "page/firmware/firmware.json";
             let manifest = {};
             try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); } catch (_) {}
-            const [, version, bin, notes] = process.argv;
+            const [, version, bin, notes, isforce] = process.argv;
             manifest.version = version;
             manifest.bin = bin;
             manifest.size = fs.statSync("page/firmware/" + bin).size;
-            manifest.isforce = true;
+            manifest.isforce = isforce === "true";
             manifest.notes = notes;
             fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
-          ' "$FW_VERSION" "$FW_BIN" "$FW_NOTES"
+          ' "$FW_VERSION" "$FW_BIN" "$FW_NOTES" "$FW_ISFORCE"
 
           cat page/firmware/firmware.json
           ls -la page/firmware
