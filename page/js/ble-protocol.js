@@ -443,6 +443,12 @@ const BLEProtocol = (() => {
     WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
     WRITE_RETRY_GAP_MS: 16,    // 重试基础退避时间
     RATE_LIMIT_RETRY_GAP_MS: 200, // 限流类错误（rate limit / too many）的专用退避：限流恢复需要时间，不能用 16ms 级退避
+    SESSION_QUIET_MS: 250,     // START 后静默观察窗：Retry/重试时上一轮 OTA 的 DATA 写可能仍滞留在 Android
+                               //   蓝牙栈队列，新 START 清零设备会话后这些迟到包（大 idx）会让设备立即
+                               //   stale-session 中止（result 1，实测 got=281 expect=0）。START 后先静默
+                               //   观察一小窗，若尚未发 DATA 就收到设备中止通知，则排空后重建会话
+    STALE_RESTART_MAX: 3,      // 残留包污染新会话时自动重发 START 的次数上限（固件把重新 START 视为会话重置）
+    STALE_RESTART_GAP_MS: 300, // 重建会话前的排空等待：给栈内残留写入留出送达时间（设备 active=0 时静默丢弃）
   };
   const OTA_CMD = { START: 0xFF01, START_EXT: 0xFF03, END: 0xFF02, RESULT: 0xFF06 };
   const OTA_RESULT_NAMES = {
@@ -545,11 +551,13 @@ const BLEProtocol = (() => {
     let progressWaiter = null;  // { target, resolve } 当前等待进度的任务
     let resultResolve = null;   // 结果通知等待
     let progressSeen = false;   // 是否收到过固件进度通知（区分"真停滞"与"通知不可用"）
+    let earlyAbortResult = null; // START 后静默窗内收到的设备中止结果（非 null = 新会话被残留包污染）
     const onChanged = (e) => {
       const v = e.target.value;
       const raw = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
       if (raw.byteLength < 4 || raw[1] !== 0xFF) return;
       if (raw[0] === 0x06) {
+        earlyAbortResult = raw[2];
         if (resultResolve) { resultResolve(raw[2]); resultResolve = null; }
       } else if (raw[0] === 0x08) {
         ackedPdu = raw[2] | (raw[3] << 8);
@@ -616,6 +624,27 @@ const BLEProtocol = (() => {
       startExt[3] = 0;                           // version_compare=0；rsvd[16] 默认 0
       await writeWithRetry(otaChar, startExt, false);
       console.debug(`[OTA] START_EXT sent: pdu_length=${OTA.BLOCK_BYTES} => ${OTA.BLOCK_BYTES + 4}B/pkt`);
+
+      // 会话排空保护（Retry 隐患修复）：上一轮 OTA 失败后，Android 蓝牙栈队列里可能仍残留旧
+      // 会话的 DATA 写。新 START 已把设备会话清零（idx_next=0），这些迟到的大 idx 包会让设备
+      // 立即 stale-session 中止（实测 got=281 expect=0 → result 1）。因此 START 后先静默观察
+      // 一小窗：若尚未发 DATA 就收到设备中止通知，说明有残留包污染新会话——排空后重发 START
+      // 重建会话（固件把重新 START 视为会话重置），直到观察窗干净或超过重试上限。
+      await sleep(OTA.SESSION_QUIET_MS);
+      let staleRestarts = 0;
+      while (earlyAbortResult !== null) {
+        if (staleRestarts >= OTA.STALE_RESTART_MAX) {
+          return { ok: false, result: earlyAbortResult,
+                   message: `OTA failed: stale packets from previous session (${OTA_RESULT_NAMES[earlyAbortResult] || 'unknown'})` };
+        }
+        staleRestarts++;
+        console.warn(`[OTA] fresh session aborted by stale packets (result ${earlyAbortResult}), ` +
+                     `draining and restarting session #${staleRestarts}/${OTA.STALE_RESTART_MAX}`);
+        earlyAbortResult = null;
+        await sleep(OTA.STALE_RESTART_GAP_MS);
+        await writeWithRetry(otaChar, startExt, false);
+        await sleep(OTA.SESSION_QUIET_MS);
+      }
 
       // 2. DATA：每包 84 字节 = adr_index(u16 LE) + 80 字节固件 + crc16(u16 LE，覆盖前 82 字节)。
       //    尾块不足 80 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
