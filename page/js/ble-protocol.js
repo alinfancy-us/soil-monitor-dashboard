@@ -431,6 +431,11 @@ const BLEProtocol = (() => {
     WRITE_GAP_MS: 80,          // beacio 转发约 75ms/包、令牌桶约每秒补 12~13 包：50ms(20包/s) 每 ~12 包触发一次
                                //   Rate limit exceeded 报错（200ms 退避重试后成功，不影响结果但刷 Warning）。
                                //   调到 80ms(12.5包/s) 与转发节奏持平，理论不触发限流、日志干净；
+    ANDROID_WRITE_GAP_MS: 20,  // Android WebBluetooth 的 writeValue 不等固件 ATT 响应就连发（实测 3~4ms/包），
+                               //   而固件端每包要写 flash（含扇区擦除，>4ms）→ 队列积压产生错包（固件端
+                               //   result 3/跳号）。Android 上每包写后额外等待，给固件处理时间：
+                               //   20ms/包 × 401 包 ≈ 8s，与 iOS/PC（等响应 20~60ms）节奏一致，换稳定。
+                               //   其余平台带响应写天然背压，不加间隔。
                                //   393 包(176B)@80ms ≈ 31s 传完（50ms 实测含重试约 45s，慢约 5s 换无报错）。
                                //   历史：1ms/3ms 在旧代码（无限流重试）下 ~24 包触发限流断链；10ms 实测 beacio 丢包
                                //   （固件端 seq err got=75 expect=74，跳包 abort 为固件正确行为），故不再低于 50ms。
@@ -523,6 +528,12 @@ const BLEProtocol = (() => {
    */
   async function performOta(otaChar, firmware, onProgress) {
     if (!otaChar) throw new Error('OTA characteristic unavailable');
+
+    // Android WebBluetooth 的 writeValue 不等 ATT 响应（promise 在写入系统栈时即 resolve，
+    // 实测 3~4ms/包连发），固件 flash 写入跟不上 → 队列积压错包。检测平台，Android 走限速路径。
+    const IS_ANDROID = typeof navigator !== 'undefined' &&
+      (/Android/i.test(navigator.userAgent) ||
+       (typeof navigator.userAgentData !== 'undefined' && (navigator.userAgentData.platform || '').includes('Android')));
 
     const bytes = new Uint8Array(firmware);
     if (bytes.byteLength < 0x18 + 4) {
@@ -637,6 +648,9 @@ const BLEProtocol = (() => {
          *         · 固件响应延迟即背压，无需依赖设备进度通知即可稳速发送。 */
         console.debug(`[OTA][DATA] write #${i}/${totalBlocks - 1} len=${pkt.length} idx=0x${i.toString(16).padStart(4, '0')} t=${Date.now()}`);
         await writeWithRetry(otaChar, pkt, false);
+        // Android 限速：写后给固件留 flash 写入时间（见 ANDROID_WRITE_GAP_MS 注释），
+        // 避免 writeValue 不等响应连发导致固件队列积压错包
+        if (IS_ANDROID) await sleep(OTA.ANDROID_WRITE_GAP_MS);
 
         const sent = Math.min(off + DATA_BYTES, fwSize);
         const percent = Math.round(sent * 100 / fwSize);
