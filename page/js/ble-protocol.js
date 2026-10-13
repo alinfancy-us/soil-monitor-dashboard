@@ -621,17 +621,26 @@ const BLEProtocol = (() => {
           const idx = pkt[0] | (pkt[1] << 8);
           if (idx >= startIdx) {
             n++;
-            console.debug(`[OTA][RTX] resend idx=${idx} (acked=${ackedPdu})`);
             await writeWithRetry(otaChar, pkt, true);   // 无响应写重传
           }
         }
         if (n) console.warn(`[OTA][RTX] resent ${n} pkt(s) from idx=${startIdx}, acked=${ackedPdu}`);
       };
+      let windowEnabled = true;   // 固件不上报进度时降级：放弃窗口，无响应写连续发送
+      let rtxCount = 0;           // 连续重传无进展计数（防死循环）
+      const MAX_RTX = 3;          // 固件从不报进度（旧固件无进度通知 / 通知订阅被拒）→ 放弃窗口的阈值
       for (let next = 0; next < totalBlocks; ) {
         // 窗口满：等固件进度追上（ackedPdu ≥ sent - WINDOW + 1）
-        while (sent - ackedPdu >= OTA.WINDOW) {
+        while (windowEnabled && sent - ackedPdu >= OTA.WINDOW) {
           const ok = await waitProgress(sent - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
           if (ok) break;
+          if (ackedPdu === 0 && ++rtxCount > MAX_RTX) {
+            // 设备从不报进度（旧固件未实现进度通知 / 通知订阅被拒）→ 放弃窗口控制：
+            // 无响应写连续发送剩余包，靠 END/result 判定；间隔自适应仍能避开限流。
+            windowEnabled = false;
+            console.warn(`[OTA][RTX] device never reports progress (acked=0, ${rtxCount} rtx), dropping window control`);
+            break;
+          }
           // 进度停滞：固件卡在 ackedPdu（无响应写静默丢包 / 固件处理慢）→ 从 ackedPdu 按序重传
           console.warn(`[OTA][RTX] progress stalled at ${ackedPdu} (sent=${sent}), resending window`);
           await retransmitFrom(ackedPdu);
