@@ -429,14 +429,13 @@ const BLEProtocol = (() => {
     MAX_STALL_RESENDS: 3,      // 进度停滞（固件端 expect 卡住、缺失包未补齐）时连续重传轮数上限，超限中止
     PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
     END_TIMEOUT_MS: 10000,     // END 后等待结果通知 / 设备重启断链的超时
-    PER_PACKET_GAP_MS: 20,     // 每包写后统一等待，所有平台生效：Android WebBluetooth 的 writeValue
-                               //   不等固件 ATT 响应就连发（实测 3~4ms/包），固件每包要写 flash
-                               //   （含扇区擦除，>4ms）→ 队列积压错包；iOS/PC 虽等响应（20~60ms），
-                               //   统一加间隔让节奏一致、行为可预期。20ms/包 × 401 包 ≈ 8s（加响应时间
-                               //   iOS/PC 约 16~32s），换取稳定。带响应写逐包确认逻辑不受影响。
-                               //   393 包(176B)@80ms ≈ 31s 传完（50ms 实测含重试约 45s，慢约 5s 换无报错）。
-                               //   历史：1ms/3ms 在旧代码（无限流重试）下 ~24 包触发限流断链；10ms 实测 beacio 丢包
-                               //   （固件端 seq err got=75 expect=74，跳包 abort 为固件正确行为），故不再低于 50ms。
+    PER_PACKET_GAP_MS: 40,     // 每包写后统一等待，所有平台生效：Android WebBluetooth 的 writeValue
+                               //   不等固件 ATT 响应就连发（promise 提前 resolve），固件每包要写 flash
+                               //   （含 4K 扇区擦除，处理时间 >20ms）→ 队列积压错包（实测 jump 33+ 丢包
+                               //   率 ~16% 最终写失败断链）；20ms 对 Android 不够。40ms 覆盖固件处理
+                               //   时间，丢包消失；iOS/PC 等响应本身 20~60ms，40ms 兜底无感。
+                               //   401 包 × 40ms ≈ 16s（加响应时间 iOS/PC 约 24~40s），换取全平台稳定。
+                               //   带响应写逐包确认 + readAck 停滞重传逻辑不受影响（偶发丢包兜底）。
     WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
     WRITE_RETRY_GAP_MS: 16,    // 重试基础退避时间
     RATE_LIMIT_RETRY_GAP_MS: 200, // 限流类错误（rate limit / too many）的专用退避：限流恢复需要时间，不能用 16ms 级退避
