@@ -423,9 +423,10 @@ const BLEProtocol = (() => {
     //   Chrome/Safari/iOS 均协商到 185，全平台通用。
     //   提速效果：包数 874(80B) → 393(176B)，beacio 按包限流下总时长约 -55%。
     BLOCK_BYTES: 176,
-    WINDOW: 32,                // 滑动窗口：允许的最大在途未确认包数（保持 32，与固件 32 包上报粒度匹配；不可小于 32，
-                               //   否则会在设备首次上报前触发 waitProgress 超时 → 误判"设备不上报"而降级定速，破坏背压）
-    SCHEDULE_GRANULARITY: 32,    // 固件 blc_ota_setOtaScheduleIndication_by_pduNum(32) 的上报粒度，收尾等待按整批对齐
+    WINDOW: 32,                // 滑动窗口：允许的最大在途未确认包数（保持 32；固件 8 包上报粒度远小于窗口，
+                               //   停滞可被及时感知并触发重传，不会误判"设备不上报"而降级定速）
+    SCHEDULE_GRANULARITY: 8,     // 固件进度上报粒度（SOIL_OTA_SCHEDULE_EVERY=8），收尾等待按整批对齐
+    MAX_STALL_RESENDS: 3,      // 进度停滞（固件端 expect 卡住、缺失包未补齐）时连续重传轮数上限，超限中止
     PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
     END_TIMEOUT_MS: 10000,     // END 后等待结果通知 / 设备重启断链的超时
     WRITE_GAP_MS: 80,          // beacio 转发约 75ms/包、令牌桶约每秒补 12~13 包：50ms(20包/s) 每 ~12 包触发一次
@@ -607,40 +608,25 @@ const BLEProtocol = (() => {
       // 2. DATA：每包 84 字节 = adr_index(u16 LE) + 80 字节固件 + crc16(u16 LE，覆盖前 82 字节)。
       //    尾块不足 80 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
       //    滑动窗口：仅当在途未确认包数超过 OTA.WINDOW 时才等设备进度通知；
-      //    若设备根本不上报进度（旧固件未开 blc_ota_setOtaScheduleIndication_by_pduNum），
-      //    首次等待超时后关闭进度等待——发送本身由带响应写逐包背压，无需额外定速（FREERUN 已移除）。
-      const DATA_BYTES = OTA.BLOCK_BYTES;   // 每包固件字节数 = pdu_length = 80（官方 Extend 格式）
+      //    Android WebBluetooth 偶发静默丢包（writeValue resolve 但固件端实际没收，
+      //    固件端表现为 expect 卡住、jump 递增）——进度停滞时重传缺失段 [ackedPdu, i)：
+      //    固件端对已收包（idx<next）dup 忽略、缺失包被补齐，自愈丢包。
+      const DATA_BYTES = OTA.BLOCK_BYTES;   // 每包固件字节数 = pdu_length = 176
       const totalBlocks = Math.ceil(fwSize / DATA_BYTES);
       let flowControl = true;
       let lastPercent = -1;
-      for (let i = 0; i < totalBlocks; i++) {
-        if (flowControl) {
-          if (i - ackedPdu >= OTA.WINDOW) {
-            const ok = await waitProgress(i - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
-            if (!ok && ackedPdu === 0) flowControl = false;
-          }
-        }
-        // 中文：flowControl=false（固件不上报进度）时不再做任何额外等待——
-        //       DATA 带响应写本身逐包等固件 ATT 响应，天然背压，无需 FREERUN 定速。
-
-        const off = i * DATA_BYTES;
-        const pkt = new Uint8Array(2 + OTA.BLOCK_BYTES + 2);   // 整包 84B = idx(2)+data(80)+crc(2)
-        pkt[0] = i & 0xff;
-        pkt[1] = (i >> 8) & 0xff;
+      let stallResends = 0;
+      const sendPkt = async (idx, isResend) => {
+        const off = idx * DATA_BYTES;
+        const pkt = new Uint8Array(2 + OTA.BLOCK_BYTES + 2);   // 整包 = idx(2)+data(176)+crc(2)
+        pkt[0] = idx & 0xff;
+        pkt[1] = (idx >> 8) & 0xff;
         const n = Math.min(DATA_BYTES, fwSize - off);
-        pkt.set(bytes.subarray(off, off + n), 2);   // 尾块不足 80 时自动补 0（补 0 不在 fwSize 内，设备最终 CRC32 校验不计入）
-        const crc = telinkCrc16(pkt, 2 + DATA_BYTES);   // 覆盖 idx+data（2+80=82 字节）
+        pkt.set(bytes.subarray(off, off + n), 2);   // 尾块不足 176 时自动补 0（补 0 不在 fwSize 内，设备最终 CRC32 校验不计入）
+        const crc = telinkCrc16(pkt, 2 + DATA_BYTES);   // 覆盖 idx+data
         pkt[2 + DATA_BYTES] = crc & 0xff;
         pkt[3 + DATA_BYTES] = (crc >> 8) & 0xff;
-        /* 中文：DATA 用带响应写（writeValue）。无响应写（writeValueWithoutResponse）"成功返回"
-         *       不保证固件真正收到——beacio/WebKit 限流时可能静默丢弃，固件端表现为跳号
-         *       （seq err: got=148 expect=147）导致 OTA 失败。带响应写由固件写完 flash 后才回
-         *       ATT Write Response，天然形成逐包确认 + 流控：
-         *         · 每包送达有保证，杜绝跳号；
-         *         · 包间间隔 = 固件处理时间（20~60ms），远低于 WebBluetooth 限流阈值，
-         *           不再触发 "Rate limit exceeded" 重试告警；
-         *         · 固件响应延迟即背压，无需依赖设备进度通知即可稳速发送。 */
-        console.debug(`[OTA][DATA] write #${i}/${totalBlocks - 1} len=${pkt.length} idx=0x${i.toString(16).padStart(4, '0')} t=${Date.now()}`);
+        console.debug(`[OTA][DATA] ${isResend ? 'RESEND' : 'write'} #${idx}/${totalBlocks - 1} len=${pkt.length} idx=0x${idx.toString(16).padStart(4, '0')} t=${Date.now()}`);
         await writeWithRetry(otaChar, pkt, false);
         // 每包写后统一等待：给固件留 flash 写入时间（见 PER_PACKET_GAP_MS 注释），
         // 所有平台一致；带响应写逐包确认（writeWithRetry）保持不变
@@ -652,12 +638,36 @@ const BLEProtocol = (() => {
           lastPercent = percent;
           onProgress?.({ phase: 'data', percent, sent, total: fwSize });
         }
+      };
+
+      for (let i = 0; i < totalBlocks; i++) {
+        if (flowControl && i - ackedPdu >= OTA.WINDOW) {
+          const ok = await waitProgress(i - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
+          if (!ok) {
+            // 进度停滞：固件端 expect 卡住（Android 静默丢包）→ 重传缺失段 [ackedPdu, i)。
+            // 连续多轮不推进说明非瞬时丢包（连接/队列异常），中止避免无限重传。
+            const from = Math.max(ackedPdu, 0);
+            console.warn(`[OTA][RTX] progress stalled at ${ackedPdu} (sent=${i}), resending [${from}, ${i}) ${i - from} pkt(s)`);
+            for (let j = from; j < i; j++) await sendPkt(j, true);
+            stallResends++;
+            if (stallResends >= OTA.MAX_STALL_RESENDS) {
+              throw new Error(`OTA stalled: firmware not confirming packets (acked=${ackedPdu}, sent=${i})`);
+            }
+          }
+        }
+        await sendPkt(i, false);
       }
       // 收尾前等一下设备把在途包写完：进度按 SCHEDULE_GRANULARITY 整批上报，末尾不足一批不会单独上报，
-      // 因此只等到最后一个整批即可（否则等 totalBlocks 永远等不到，白白拖满超时）
+      // 因此只等到最后一个整批即可（否则等 totalBlocks 永远等不到，白白拖满超时）；
+      // 超时则补发尾部未确认段（Android 静默丢包的最后几包靠这里兜底）
       if (flowControl) {
         const lastBatch = Math.floor(totalBlocks / OTA.SCHEDULE_GRANULARITY) * OTA.SCHEDULE_GRANULARITY;
-        await waitProgress(lastBatch || totalBlocks, OTA.END_TIMEOUT_MS);
+        const tailOk = await waitProgress(lastBatch || totalBlocks, OTA.END_TIMEOUT_MS);
+        if (!tailOk && ackedPdu < totalBlocks) {
+          console.warn(`[OTA][RTX] tail wait stalled (acked=${ackedPdu}/${totalBlocks}), resending tail`);
+          for (let j = ackedPdu; j < totalBlocks; j++) await sendPkt(j, true);
+          await waitProgress(lastBatch || totalBlocks, OTA.END_TIMEOUT_MS);
+        }
       }
       // 3. END：CMD_OTA_END(0xFF02) + adr_index_max + 其按位取反，共 6 字节
       //    用带响应写（writeValue）：固件 END 校验通过后先返回（协议栈发 ATT Write Response +
