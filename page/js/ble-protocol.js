@@ -667,7 +667,7 @@ const BLEProtocol = (() => {
       // 4. 等待设备结果通知（成功后设备自动重启断链）
       const result = await waitResult();
       if (result === 'disconnected') {
-        return { ok: true, result: 0x00, message: 'OTA succeeded, device is rebooting (confirmed by disconnect)' };
+        return { ok: true, result: 0x00, message: 'OTA succeeded' };
       }
       if (result === null) {
         return { ok: false, result, message: 'OTA timeout waiting for device result (connection still alive)' };
