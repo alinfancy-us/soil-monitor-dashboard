@@ -426,12 +426,12 @@ const BLEProtocol = (() => {
     SCHEDULE_GRANULARITY: 32,    // 固件 blc_ota_setOtaScheduleIndication_by_pduNum(32) 的上报粒度，收尾等待按整批对齐
     PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
     END_TIMEOUT_MS: 10000,     // END 后等待结果通知 / 设备重启断链的超时
-    WRITE_GAP_MS: 80,          // 无响应写间隔上限：beacio 转发约 75ms/包、令牌桶约每秒补 12~13 包：
-                               //   50ms(20包/s) 每 ~12 包触发一次 Rate limit exceeded 报错；80ms(12.5/s) 与
-                               //   转发节奏持平，理论不触发限流。作为自适应间隔的上限（限流时翻倍逼近它）。
-    WRITE_GAP_MIN: 15,         // 无响应写间隔下限（Bluefy 等无限流环境：15ms×617包 ≈ 9s 传完）；
-                               //   初始即为此值，触发限流才逐级翻倍（15→30→60→80），永不自动降速，
-                               //   避免 Safari 在 80ms 附近振荡反复报错。每次 OTA 开始时重置。
+    WRITE_GAP_MS: 80,          // beacio 转发约 75ms/包、令牌桶约每秒补 12~13 包：50ms(20包/s) 每 ~12 包触发一次
+                               //   Rate limit exceeded 报错（200ms 退避重试后成功，不影响结果但刷 Warning）。
+                               //   调到 80ms(12.5包/s) 与转发节奏持平，理论不触发限流、日志干净；
+                               //   625 包(112B)@80ms ≈ 50s 传完（50ms 实测含重试约 45s，慢约 5s 换无报错）。
+                               //   历史：1ms/3ms 在旧代码（无限流重试）下 ~24 包触发限流断链；10ms 实测 beacio 丢包
+                               //   （固件端 seq err got=75 expect=74，跳包 abort 为固件正确行为），故不再低于 50ms。
     WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
     WRITE_RETRY_GAP_MS: 16,    // 重试基础退避时间
     RATE_LIMIT_RETRY_GAP_MS: 200, // 限流类错误（rate limit / too many）的专用退避：限流恢复需要时间，不能用 16ms 级退避
@@ -483,9 +483,9 @@ const BLEProtocol = (() => {
     for (let i = 0; i < OTA.WRITE_RETRY_MAX; i++) {
       try {
         if (withoutResponse) {
-          // 无响应写限速：自适应间隔。初始 WRITE_GAP_MIN（Bluefy 全速）；触发限流逐级翻倍
-          //（Safari/beacio 令牌桶 12.5/s），上限 WRITE_GAP_MS（80ms），不自动降速避免振荡。
-          await sleep(OTA.writeGapMs);
+          // 无响应写限速：每包间留出最小间隔，避免在极短时间内向 BLE 栈涌入大量写请求
+          //（iOS/beacio 转发层会以 "Rate limit exceeded — too many BLE requests" 拒绝过密请求）
+          await sleep(OTA.WRITE_GAP_MS);
           await otaChar.writeValueWithoutResponse(data);
         } else {
           await otaChar.writeValue(data);
@@ -499,10 +499,6 @@ const BLEProtocol = (() => {
         const disconnected = msg.includes('disconnect') || msg.includes('gatt server is disconnected');
         // 限流类错误（beacio/系统对过密 BLE 请求的拒绝）同样可重试，但需用更长退避等待限流恢复
         const rateLimited = msg.includes('rate limit') || msg.includes('too many') || msg.includes('quota');
-        if (rateLimited) {
-          // 自适应节流：翻倍无响应写间隔，让请求速率向令牌桶收敛（Bluefy 从不触发，保持全速）
-          OTA.writeGapMs = Math.min(OTA.WRITE_GAP_MS, OTA.writeGapMs * 2);
-        }
         const retryable = !disconnected && (rateLimited || msg.includes('already in progress') || msg.includes('busy') || msg.includes('operation failed'));
         if (!retryable || i === OTA.WRITE_RETRY_MAX - 1) {
           throw e;
@@ -530,8 +526,6 @@ const BLEProtocol = (() => {
     if (bytes.byteLength < 0x18 + 4) {
       throw new Error('Invalid firmware: missing Telink bin header');
     }
-    // 每次 OTA 会话重置自适应无响应写间隔（上次会话可能因限流翻倍到 80）
-    OTA.writeGapMs = OTA.WRITE_GAP_MIN;
     // Telink bin 头部 0x18 偏移存放固件长度（小端 u32），发送字节数以此为准
     const fwSize = new DataView(firmware).getUint32(0x18, true);
     if (!fwSize || fwSize > OTA.FW_SIZE_MAX || fwSize > bytes.byteLength) {
@@ -603,80 +597,57 @@ const BLEProtocol = (() => {
       await writeWithRetry(otaChar, startExt, false);
       console.debug(`[OTA] START_EXT sent: pdu_length=${OTA.BLOCK_BYTES} => ${OTA.BLOCK_BYTES + 4}B/pkt`);
 
-      // 2. DATA：滑动窗口批量发送 + 进度确认 + 自动重传。
-      //    每包 = adr_index(u16 LE) + 112B 固件 + crc16(u16 LE)。
-      //    · 发送：无响应写（writeValueWithoutResponse）批量快发，间隔自适应（WRITE_GAP_MIN 起，限流翻倍）；
-      //    · 确认：固件每收 32 包回报进度通知（ackedPdu），在途未确认包数 ≤ WINDOW 才继续发新包；
-      //    · 重传：进度停滞（waitProgress 超时）时，从 ackedPdu 起按序重发窗口内未确认包——
-      //      固件端对 idx==next 的包才落盘（重复/跳号包忽略等待，不 abort，见 app_ota.c），
-      //      重发补齐后进度继续推进；END 校验 idx_max 兜底最终完整性。
-      const DATA_BYTES = OTA.BLOCK_BYTES;   // 每包固件字节数 = pdu_length = 112
+      // 2. DATA：每包 84 字节 = adr_index(u16 LE) + 80 字节固件 + crc16(u16 LE，覆盖前 82 字节)。
+      //    尾块不足 80 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
+      //    滑动窗口：仅当在途未确认包数超过 OTA.WINDOW 时才等设备进度通知；
+      //    若设备根本不上报进度（旧固件未开 blc_ota_setOtaScheduleIndication_by_pduNum），
+      //    首次等待超时后关闭进度等待——发送本身由带响应写逐包背压，无需额外定速（FREERUN 已移除）。
+      const DATA_BYTES = OTA.BLOCK_BYTES;   // 每包固件字节数 = pdu_length = 80（官方 Extend 格式）
       const totalBlocks = Math.ceil(fwSize / DATA_BYTES);
+      let flowControl = true;
       let lastPercent = -1;
-      let sent = 0;                       // 已发出新包的最高序号 + 1
-      const windowBuf = [];               // 已发未确认的包缓冲（供重传），长度 ≤ WINDOW
-      const retransmitFrom = async (startIdx) => {
-        let n = 0;
-        for (const pkt of windowBuf) {
-          const idx = pkt[0] | (pkt[1] << 8);
-          if (idx >= startIdx) {
-            n++;
-            await writeWithRetry(otaChar, pkt, true);   // 无响应写重传
+      for (let i = 0; i < totalBlocks; i++) {
+        if (flowControl) {
+          if (i - ackedPdu >= OTA.WINDOW) {
+            const ok = await waitProgress(i - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
+            if (!ok && ackedPdu === 0) flowControl = false;
           }
         }
-        if (n) console.warn(`[OTA][RTX] resent ${n} pkt(s) from idx=${startIdx}, acked=${ackedPdu}`);
-      };
-      let windowEnabled = true;   // 固件不上报进度时降级：放弃窗口，无响应写连续发送
-      let rtxCount = 0;           // 连续重传无进展计数（防死循环）
-      const MAX_RTX = 3;          // 固件从不报进度（旧固件无进度通知 / 通知订阅被拒）→ 放弃窗口的阈值
-      for (let next = 0; next < totalBlocks; ) {
-        // 窗口满：等固件进度追上（ackedPdu ≥ sent - WINDOW + 1）
-        while (windowEnabled && sent - ackedPdu >= OTA.WINDOW) {
-          const ok = await waitProgress(sent - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
-          if (ok) break;
-          if (ackedPdu === 0 && ++rtxCount > MAX_RTX) {
-            // 设备从不报进度（旧固件未实现进度通知 / 通知订阅被拒）→ 放弃窗口控制：
-            // 无响应写连续发送剩余包，靠 END/result 判定；间隔自适应仍能避开限流。
-            windowEnabled = false;
-            console.warn(`[OTA][RTX] device never reports progress (acked=0, ${rtxCount} rtx), dropping window control`);
-            break;
-          }
-          // 进度停滞：固件卡在 ackedPdu（无响应写静默丢包 / 固件处理慢）→ 从 ackedPdu 按序重传
-          console.warn(`[OTA][RTX] progress stalled at ${ackedPdu} (sent=${sent}), resending window`);
-          await retransmitFrom(ackedPdu);
-        }
-        // 发送新包 next（无响应写）
-        const off = next * DATA_BYTES;
-        const pkt = new Uint8Array(2 + OTA.BLOCK_BYTES + 2);   // 整包 116B = idx(2)+data(112)+crc(2)
-        pkt[0] = next & 0xff;
-        pkt[1] = (next >> 8) & 0xff;
+        // 中文：flowControl=false（固件不上报进度）时不再做任何额外等待——
+        //       DATA 带响应写本身逐包等固件 ATT 响应，天然背压，无需 FREERUN 定速。
+
+        const off = i * DATA_BYTES;
+        const pkt = new Uint8Array(2 + OTA.BLOCK_BYTES + 2);   // 整包 84B = idx(2)+data(80)+crc(2)
+        pkt[0] = i & 0xff;
+        pkt[1] = (i >> 8) & 0xff;
         const n = Math.min(DATA_BYTES, fwSize - off);
-        pkt.set(bytes.subarray(off, off + n), 2);   // 尾块不足 112 时自动补 0（补 0 不在 fwSize 内，固件最终 CRC32 校验不计入）
-        const crc = telinkCrc16(pkt, 2 + DATA_BYTES);   // 覆盖 idx+data（2+112=114 字节）
+        pkt.set(bytes.subarray(off, off + n), 2);   // 尾块不足 80 时自动补 0（补 0 不在 fwSize 内，设备最终 CRC32 校验不计入）
+        const crc = telinkCrc16(pkt, 2 + DATA_BYTES);   // 覆盖 idx+data（2+80=82 字节）
         pkt[2 + DATA_BYTES] = crc & 0xff;
         pkt[3 + DATA_BYTES] = (crc >> 8) & 0xff;
-        console.debug(`[OTA][DATA] write #${next}/${totalBlocks - 1} len=${pkt.length} idx=0x${next.toString(16).padStart(4, '0')} t=${Date.now()}`);
-        await writeWithRetry(otaChar, pkt, true);   // 无响应写（窗口模式）
-        windowBuf.push(pkt);
-        if (windowBuf.length > OTA.WINDOW) windowBuf.shift();
-        sent = next + 1;
+        /* 中文：DATA 用带响应写（writeValue）。无响应写（writeValueWithoutResponse）"成功返回"
+         *       不保证固件真正收到——beacio/WebKit 限流时可能静默丢弃，固件端表现为跳号
+         *       （seq err: got=148 expect=147）导致 OTA 失败。带响应写由固件写完 flash 后才回
+         *       ATT Write Response，天然形成逐包确认 + 流控：
+         *         · 每包送达有保证，杜绝跳号；
+         *         · 包间间隔 = 固件处理时间（20~60ms），远低于 WebBluetooth 限流阈值，
+         *           不再触发 "Rate limit exceeded" 重试告警；
+         *         · 固件响应延迟即背压，无需依赖设备进度通知即可稳速发送。 */
+        console.debug(`[OTA][DATA] write #${i}/${totalBlocks - 1} len=${pkt.length} idx=0x${i.toString(16).padStart(4, '0')} t=${Date.now()}`);
+        await writeWithRetry(otaChar, pkt, false);
 
-        const sentBytes = Math.min(off + DATA_BYTES, fwSize);
-        const percent = Math.round(sentBytes * 100 / fwSize);
+        const sent = Math.min(off + DATA_BYTES, fwSize);
+        const percent = Math.round(sent * 100 / fwSize);
         if (percent !== lastPercent) {
           lastPercent = percent;
-          onProgress?.({ phase: 'data', percent, sent: sentBytes, total: fwSize });
+          onProgress?.({ phase: 'data', percent, sent, total: fwSize });
         }
-        next++;
       }
-      // 收尾：等最后一个整批确认（末尾不足一批不会单独上报，只等到最后一个整批即可）
-      const lastBatch = Math.floor(totalBlocks / OTA.SCHEDULE_GRANULARITY) * OTA.SCHEDULE_GRANULARITY;
-      let tailOk = await waitProgress(lastBatch || totalBlocks, OTA.END_TIMEOUT_MS);
-      if (!tailOk) {
-        // 收尾时进度仍落后：重传窗口内未确认段，再等一次
-        console.warn(`[OTA][RTX] tail progress stalled at ${ackedPdu}, resending window`);
-        await retransmitFrom(ackedPdu);
-        tailOk = await waitProgress(lastBatch || totalBlocks, OTA.PROGRESS_TIMEOUT_MS);
+      // 收尾前等一下设备把在途包写完：进度按 SCHEDULE_GRANULARITY 整批上报，末尾不足一批不会单独上报，
+      // 因此只等到最后一个整批即可（否则等 totalBlocks 永远等不到，白白拖满超时）
+      if (flowControl) {
+        const lastBatch = Math.floor(totalBlocks / OTA.SCHEDULE_GRANULARITY) * OTA.SCHEDULE_GRANULARITY;
+        await waitProgress(lastBatch || totalBlocks, OTA.END_TIMEOUT_MS);
       }
       // 3. END：CMD_OTA_END(0xFF02) + adr_index_max + 其按位取反，共 6 字节
       //    用带响应写（writeValue）：固件 END 校验通过后先返回（协议栈发 ATT Write Response +
