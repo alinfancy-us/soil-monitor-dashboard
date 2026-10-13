@@ -131,6 +131,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     otaChar: null,
     otaRunning: false,
     otaLastFirmware: null,
+    otaJustSucceeded: false,   // 中文：OTA 刚成功（设备重启断链）——断链清理时保留 Setting 页展示成功提示
     fwVersion: null,
     fwUpdate: null,
      pollTimer: null,
@@ -229,12 +230,15 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     }
    }
 
-   // Setting 面板仅连接后可操作；未连接时锁定 Tab 并切回 Data（若正停留在 Setting）
+   // Setting 面板仅连接后可操作；未连接时锁定 Tab 并切回 Data（若正停留在 Setting）。
+   // 例外：OTA 刚成功（设备重启断链）时保留 Setting 页与固件卡片可见，让用户看到成功提示，
+   //       直到用户主动切走或下次连接才恢复默认行为
    function updateSettingsAccess(connected) {
+     if (connected) state.otaJustSucceeded = false;   // 重新连接：成功提示展示期结束
      els.mainTabSettingBtn.disabled = !connected;
-     els.settingLockedHint.classList.toggle('hidden', connected);
-     els.settingContent.classList.toggle('hidden', !connected);
-     if (!connected && !els.mainTabSettingPanel.classList.contains('hidden')) {
+     els.settingLockedHint.classList.toggle('hidden', connected || state.otaJustSucceeded);
+     els.settingContent.classList.toggle('hidden', !connected && !state.otaJustSucceeded);
+     if (!connected && !state.otaJustSucceeded && !els.mainTabSettingPanel.classList.contains('hidden')) {
        switchMainTab('data');
      }
      els.tempOffsetInput.disabled = !connected || !state.tempOffsetChar;
@@ -267,6 +271,14 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     els.tempOffsetApplyBtn.disabled = lock || !connected || !state.tempOffsetChar;
     els.factoryResetBtn.disabled = lock || !connected || !state.resetChar;
     els.mainTabSettingBtn.disabled = lock || !connected;
+    // 中文：OTA 升级进行中锁定全部主 Tab（Data/Guide 置灰 + switchMainTab 守卫双保险），
+    //       防止升级链路被页面切换后的 UI 更新（图表重绘等）干扰，用户保持在 Setting 升级页
+    els.mainTabDataBtn.disabled = lock;
+    els.mainTabGuideBtn.disabled = lock;
+    els.mainTabDataBtn.classList.toggle('opacity-40', lock);
+    els.mainTabDataBtn.classList.toggle('cursor-not-allowed', lock);
+    els.mainTabGuideBtn.classList.toggle('opacity-40', lock);
+    els.mainTabGuideBtn.classList.toggle('cursor-not-allowed', lock);
 
     if (lock) {
       els.statusDot.className = 'w-3 h-3 rounded-full bg-violet-500';
@@ -1082,7 +1094,11 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      const isData = tab === 'data';
      const isGuide = tab === 'guide';
      const isSetting = tab === 'setting';
-     if (isSetting && els.mainTabSettingBtn.disabled) return;  // setting 仅连接后可点
+     if (isSetting && els.mainTabSettingBtn.disabled && !state.otaJustSucceeded) return;  // setting 仅连接后可点（OTA 成功展示期允许程序化切回）
+     // 中文：OTA 升级进行中禁止切离 Setting 页（按钮置灰之外的逻辑兜底，拦截程序化切换）
+     if (state.otaRunning && !isSetting) return;
+     // 中文：用户主动切离 Setting 后，OTA 成功提示使命完成，恢复断链后“切回 Data”的默认行为
+     if (!isSetting) state.otaJustSucceeded = false;
      els.mainTabDataPanel.classList.toggle('hidden', !isData);
      els.mainTabGuidePanel.classList.toggle('hidden', !isGuide);
      els.mainTabSettingPanel.classList.toggle('hidden', !isSetting);
@@ -2640,6 +2656,7 @@ The device will measure the current probe state first, then apply the calibratio
       log(`[OTA] ${message}`);
       if (ok) {
         state.fwUpdate = null;
+        state.otaJustSucceeded = true;   // 中文：成功提示展示期——设备重启断链后保留 Setting 页展示本条成功文案
         // 升级成功：徽章立即切换为新版本，并写入按设备缓存——设备重启重连后
         // 即使 DIS 读取再失败，也不会因“版本未知”再次提示升级
         if (version) {
@@ -2661,6 +2678,11 @@ The device will measure the current probe state first, then apply the calibratio
         setOtaUiLock(false);
         setStatus("connected");
         startPolling();
+      } else if (state.otaJustSucceeded) {
+        // 中文：断链确认成功路径——onDisconnected 监听先于本 continuation 执行，
+        //       可能已把页面强制切回 Data；这里恢复到 Setting 页并重套“保留成功提示”的可见性
+        switchMainTab('setting');
+        updateSettingsAccess(false);
       }
     }
   }
@@ -2705,9 +2727,9 @@ The device will measure the current probe state first, then apply the calibratio
       const isForce = m.latest.isforce === true;
       // 中文：isforce=true 用于反复下发测试固件——即使设备已在该版本（字符串相等）也提示；
       //      仅非强制清单在“设备版本不低于清单”时才静默跳过
-      if (!isForce
-        && (String(state.fwVersion || "") === String(m.latest.version)
-          || compareVersions(m.latest.version, state.fwVersion) <= 0)) {
+
+      if (String(state.fwVersion || "") === String(m.latest.version)
+        || (!isForce && compareVersions(m.latest.version, state.fwVersion) <= 0)){
         renderFirmwareCard();
         return;
       }
