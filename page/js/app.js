@@ -2671,6 +2671,11 @@ The device will measure the current probe state first, then apply the calibratio
       els.otaStatus.className = "text-xs font-medium text-rose-600";
       setOtaRetryVisible(true);
       log(`[OTA] error: ${err.message || err}`);
+      // 中文：失败后主动断开设备——Android WebBluetooth 的 writeValue 不等固件 ATT 响应连发
+      //       （实测 3~4ms/包），上一轮 OTA 的写请求队列会残留；不重连直接重试时，残留包
+      //       继续投递到已重置的固件端（expect=0 收到 141+）导致 jump 错位直到超时。
+      //       断开强制下次重试走全新连接，pending 写队列随连接取消清空。
+      try { state.device?.gatt?.disconnect?.(); } catch (_) { /* 断开失败不影响错误展示 */ }
     } finally {
       state.otaRunning = false;
       // 成功后设备自动重启断链；失败但仍连接则恢复轮询与按钮态
