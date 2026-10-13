@@ -423,22 +423,25 @@ const BLEProtocol = (() => {
     //   Chrome/Safari/iOS 均协商到 185，全平台通用。
     //   提速效果：包数 874(80B) → 393(176B)，beacio 按包限流下总时长约 -55%。
     BLOCK_BYTES: 176,
-    WINDOW: 32,                // 滑动窗口：允许的最大在途未确认包数（保持 32；固件 8 包上报粒度远小于窗口，
-                               //   停滞可被及时感知并触发重传，不会误判"设备不上报"而降级定速）
-    SCHEDULE_GRANULARITY: 8,     // 固件进度上报粒度（SOIL_OTA_SCHEDULE_EVERY=8），收尾等待按整批对齐
-    MAX_STALL_RESENDS: 3,      // 进度停滞（固件端 expect 卡住、缺失包未补齐）时连续重传轮数上限，超限中止
-    PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
+    WINDOW: 32,                // readAck 窗口确认粒度：每发满 32 包做一次 GATT Read 确认（request-response，
+                               //   全平台可靠），缺包重传缺失段。32 包 = 5632B ≈ 8% 进度，一次 read ~50ms 往返，
+                               //   401 包共 13 次 ≈ 650ms 总开销，可接受。
+    MAX_STALL_RESENDS: 3,      // readAck 显示固件进度连续无推进（重传后仍卡住）的轮数上限，超限中止
     END_TIMEOUT_MS: 10000,     // END 后等待结果通知 / 设备重启断链的超时
-    PER_PACKET_GAP_MS: 40,     // 每包写后统一等待，所有平台生效：Android WebBluetooth 的 writeValue
-                               //   不等固件 ATT 响应就连发（promise 提前 resolve），固件每包要写 flash
-                               //   （含 4K 扇区擦除，处理时间 >20ms）→ 队列积压错包（实测 jump 33+ 丢包
-                               //   率 ~16% 最终写失败断链）；20ms 对 Android 不够。40ms 覆盖固件处理
-                               //   时间，丢包消失；iOS/PC 等响应本身 20~60ms，40ms 兜底无感。
-                               //   401 包 × 40ms ≈ 16s（加响应时间 iOS/PC 约 24~40s），换取全平台稳定。
-                               //   带响应写逐包确认 + readAck 停滞重传逻辑不受影响（偶发丢包兜底）。
+    PER_PACKET_GAP_MS: 20,      // 每包写后统一等待。实测结论（2026-10-13，用户设备）：置 0 不加间隔时，
+                               //   Android 的 writeValue 不等 ATT 响应（再次实证）→ 连发积压，固件在
+                               //   4K 扇区擦除窗口（~20-100ms）内收包偶发 CRC 错包（实测 idx=94 坏包
+                               //   重传 3 轮仍坏 → OTA stalled 直接退出）。间隔是 Android 上唯一背压
+                               //   （iOS/Chrome 的 writeValue 等 ATT 响应，响应本身即背压，20ms 为附加）。
+                               //   20ms = 50 包/秒，403 包 ≈ 8-9s（无响应写时代 50ms ≈ 20s）。
+                               //   若仍偶发坏包，上调 30~50ms；窗口确认 + 落后重传兜底不变。
     WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
     WRITE_RETRY_GAP_MS: 16,    // 重试基础退避时间
     RATE_LIMIT_RETRY_GAP_MS: 200, // 限流类错误（rate limit / too many）的专用退避：限流恢复需要时间，不能用 16ms 级退避
+    CONFIRM_DIGEST_MS: 80,     // 窗口确认前的小停 / 落后确认的重读间隔：给固件消化在途窗口
+                               // （flash 页写 + 偶发 4K 扇区擦除）留时间。窗口 read 落后时不再按固定
+                               // 时长判断"够不够"，而是再停一轮重读一次：追上=在途滞后（Android
+                               // writeValue 不等响应，web 已发≠固件已收），不重传；仍落后=真缺包才重传。
   };
   const OTA_RESULT_NAMES = {
     0x00: 'success',
@@ -481,12 +484,48 @@ const BLEProtocol = (() => {
    * 中文：Bluefy / iOS WebKit 常见 "GATT operation already in progress"，
    *       对同一特征的写入必须串行并做短退避重试，避免 OTA 中途直接失败。
    */
+  /**
+   * 无响应写 + 重试（DATA 整包用）：全平台 fire-and-forget（不等 ATT 响应），
+   * 每包后由 PER_PACKET_GAP_MS 固定间隔提供背压（固件 flash 消化时间），丢包由 readAck
+   * 窗口确认兜底重传。重试时包可能已发出（fire-and-forget 无法确知），固件对 idx<next
+   * 的 dup 包忽略，无害。
+   */
+  async function writeNoResponseWithRetry(otaChar, data) {
+    let lastErr = null;
+    for (let i = 0; i < OTA.WRITE_RETRY_MAX; i++) {
+      try {
+        await otaChar.writeValueWithoutResponse(data);
+        return;
+      } catch (e) {
+        lastErr = e;
+        const msg = String(e?.message || e || '').toLowerCase();
+        console.warn(`[OTA][write-nr] #${i} attempt ${i + 1}/${OTA.WRITE_RETRY_MAX} failed t=${Date.now()}: ${e?.message || e}`);
+        // 链路已断开是终态错误，不可重试，直接抛出让上层走断链恢复流程
+        const disconnected = msg.includes('disconnect') || msg.includes('gatt server is disconnected');
+        // 限流类错误（Chrome/系统对无响应写有速率限制）需用更长退避等待限流恢复
+        const rateLimited = msg.includes('rate limit') || msg.includes('too many') || msg.includes('quota');
+        const retryable = !disconnected && (rateLimited || msg.includes('already in progress') || msg.includes('busy') || msg.includes('operation failed'));
+        if (!retryable || i === OTA.WRITE_RETRY_MAX - 1) {
+          throw e;
+        }
+        const gap = rateLimited ? OTA.RATE_LIMIT_RETRY_GAP_MS : OTA.WRITE_RETRY_GAP_MS;
+        await sleep(gap * (i + 1));
+      }
+    }
+    throw lastErr || new Error('GATT write failed');
+  }
+
+  /**
+   * 带响应写 + 重试（全部包用：START_EXT / DATA / END）：固件处理完回 ATT 响应，
+   * 逐包确认送达——END 尤其不能丢（Bluefy 上无响应写可能丢 END、固件不复位、web 端超时）。
+   * DATA 曾短暂改用无响应写（writeNoResponseWithRetry）提速度，因丢包率高致 OTA 中途
+   * 失败频繁、目标区反复半写，结合固件 boot mark 半写污染风险致设备变砖，已回退。
+   */
   async function writeWithRetry(otaChar, data) {
     let lastErr = null;
     for (let i = 0; i < OTA.WRITE_RETRY_MAX; i++) {
       try {
-        // 带响应写：固件处理完回 ATT 响应，逐包确认送达（全平台一致，Android 静默丢包由
-        // 停滞重传自愈，无需无响应写加速）
+        // 带响应写：固件处理完回 ATT 响应，送达有保证（全部包——START_EXT/DATA/END 通用）
         await otaChar.writeValue(data);
         return;
       } catch (e) {
@@ -509,9 +548,10 @@ const BLEProtocol = (() => {
   }
 
   /**
-   * Telink legacy OTA 升级流程（与 SDK 参考实现 vendor/ble_master_kma_dongle/blm_ota.c 对齐）：
-   *   START → 逐包 DATA(20B，含 16B 固件) → END → 等待设备 CMD_OTA_RESULT 结果通知。
-   *   设备每收到一包 DATA 写 flash 后回 1 字节通知做流控；成功校验通过后自动重启断链。
+   * OTA 升级流程（固件 app 层自实现 GATT OTA server，readAck 统一确认）：
+   *   START_EXT → 逐包 DATA(整包 180B，176B 固件) → 每 32 包 readAck 窗口确认（缺包重传）
+   *   → 收尾 readAck 补尾 → END → 等待设备结果（result 通知 / 校验通过后复位断链 双通道）。
+   *   确认通道只用 GATT Read（request-response，全平台语义一致），不依赖进度通知流控。
    * @param {BluetoothRemoteGATTCharacteristic} otaChar
    * @param {ArrayBuffer} firmware 固件 .bin 内容
    * @param {(info:{phase:string,percent:number,sent:number,total:number}) => void} onProgress
@@ -530,50 +570,30 @@ const BLEProtocol = (() => {
       throw new Error(`Invalid firmware size: ${fwSize} (max ${OTA.FW_SIZE_MAX})`);
     }
 
-    // 订阅设备通知：传输进度(CMD_OTA_SCHEDULE_PDU_NUM) + 升级结果(CMD_OTA_RESULT)
-    let ackedPdu = 0;           // 设备上报的已成功收包数（滑动窗口的背压信号）
-    let progressWaiter = null;  // { target, resolve } 当前等待进度的任务
+    // 通知订阅仅用于 END 后收 result 通知（0xFF06）；进度通知不再用于流控——
+    // 确认通道统一用 readAck（GATT Read 是 request-response，全平台语义一致可靠）。
     let resultResolve = null;   // 结果通知等待
-    let progressSeen = false;   // 是否收到过固件进度通知（区分"真停滞"与"通知不可用"）
     const onChanged = (e) => {
       const v = e.target.value;
       const raw = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
       if (raw.byteLength < 4 || raw[1] !== 0xFF) return;
       if (raw[0] === 0x06) {
         if (resultResolve) { resultResolve(raw[2]); resultResolve = null; }
-      } else if (raw[0] === 0x08) {
-        ackedPdu = raw[2] | (raw[3] << 8);
-        progressSeen = true;
-        if (progressWaiter && ackedPdu >= progressWaiter.target) {
-          const w = progressWaiter; progressWaiter = null; w.resolve(true);
-        }
       }
     };
 
     otaChar.addEventListener('characteristicvaluechanged', onChanged);
+    // 通知订阅可能挂起或拒绝（Bluefy/Android 等），加 3s 超时兜底：只影响 result 通知通道，
+    // END 后靠"固件校验通过才复位断链"判定成功（双通道），不阻塞 OTA。
     try {
-      // 通知订阅可能挂起或拒绝（Bluefy 等），加 3s 超时兜底：通知只是流控加速通道，
-      // 缺失时降级——停滞走 readAck 确认、END 后靠断链判定成功，不阻塞 OTA。
       await Promise.race([
         otaChar.startNotifications(),
         new Promise((_, reject) => setTimeout(() => reject(new Error('startNotifications timeout')), 3000)),
       ]);
     } catch (e) {
-      console.warn(`[OTA] notifications rejected/timeout, degrade: ${e?.message || e}`);
+      console.warn(`[OTA] notifications rejected/timeout, result via disconnect only: ${e?.message || e}`);
     }
 
-    // 等待 ackedPdu 达到 target；返回 false 表示超时（设备卡顿，或该固件根本不上报进度）
-    const waitProgress = (target, timeoutMs) => {
-      if (ackedPdu >= target) return Promise.resolve(true);
-      return new Promise((resolve) => {
-        const timer = setTimeout(() => {
-          if (progressWaiter === waiter) progressWaiter = null;
-          resolve(false);
-        }, timeoutMs);
-        const waiter = { target, resolve: (ok) => { clearTimeout(timer); resolve(ok); } };
-        progressWaiter = waiter;
-      });
-    };
     // 等结果通知或设备断链：waitResult 只在 END 之后调用，此时断链 = 固件校验通过已进入复位流程。
     // （固件失败走 abort 不会 switch boot/reset，因此 END 后的 gattserverdisconnected 就是成功信号；
     //   返回 'disconnected' 供上层判定成功，返回 null 表示 10s 内既无通知也未断链的真超时。）
@@ -584,6 +604,21 @@ const BLEProtocol = (() => {
       dev.addEventListener('gattserverdisconnected', onDisco, { once: true });
       setTimeout(() => { if (resultResolve) { resultResolve = null; resolve(null); } }, OTA.END_TIMEOUT_MS);
     });
+    // 超时兜底探测：固件是否还响应 read。Android 链路监控超时较长（固件 watchdog 复位是断电重启，
+    // 不发 BLE disconnect 包，Android 可能 20s+ 才检测到断链，超过 END_TIMEOUT_MS）——
+    // readValue 连续无响应（3s 超时/异常 × 2）= 固件已复位 = 升级成功；正常返回 = 固件还活着 = 真失败。
+    const probeFirmwareAlive = async () => {
+      for (let i = 0; i < 2; i++) {
+        try {
+          await Promise.race([
+            otaChar.readValue(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
+          ]);
+          return true;
+        } catch (e) { /* 无响应，再试一次 */ }
+      }
+      return false;
+    };
     // 读固件端进度 ACK（OTA 特征 readValue）：GATT Read 是 request-response，所有平台语义一致可靠，
     // 是平台无关的确认通道。返回固件端已成功收包数（s_ota_progress）；读取失败/老固件返回 null。
     const readAck = async () => {
@@ -598,28 +633,28 @@ const BLEProtocol = (() => {
     try {
       onProgress?.({ phase: 'start', percent: 0, sent: 0, total: fwSize });
 
-      // 1. START：CMD_OTA_START_EXT(0xFF03)，声明 pdu_length=BLOCK_BYTES(80)。
+      // 1. START：CMD_OTA_START_EXT(0xFF03)，声明 pdu_length=BLOCK_BYTES(176)。
       //    官方 Extend 协议：后续 DATA 整包 = Adr_Index(2) + Data(pdu_length) + CRC(2) = pdu_length + 4。
       //    结构 ota_startExt_t = cmd(2) + pdu_length(1) + version_compare(1) + rsvd(16)，共 20 字节。
       //    version_compare=0（不做版本对比，避免 OTA_VERSION_COMPARE_ERR）。
       const startExt = new Uint8Array(20);
       startExt[0] = 0x03; startExt[1] = 0xFF;    // CMD_OTA_START_EXT 小端
-      startExt[2] = OTA.BLOCK_BYTES;             // pdu_length=80（16 的倍数，≤B85 上限 80）
+      startExt[2] = OTA.BLOCK_BYTES;             // pdu_length=176（整包 180 ≤ MTU-3 182，可容纳 Extend DATA）
       startExt[3] = 0;                           // version_compare=0；rsvd[16] 默认 0
       await writeWithRetry(otaChar, startExt);
       console.debug(`[OTA] START_EXT sent: pdu_length=${OTA.BLOCK_BYTES} => ${OTA.BLOCK_BYTES + 4}B/pkt`);
 
-      // 2. DATA：每包 84 字节 = adr_index(u16 LE) + 80 字节固件 + crc16(u16 LE，覆盖前 82 字节)。
-      //    尾块不足 80 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
-      //    滑动窗口：仅当在途未确认包数超过 OTA.WINDOW 时才等设备进度通知；
-      //    Android WebBluetooth 偶发静默丢包（writeValue resolve 但固件端实际没收，
-      //    固件端表现为 expect 卡住、jump 递增）——进度停滞时重传缺失段 [ackedPdu, i)：
-      //    固件端对已收包（idx<next）dup 忽略、缺失包被补齐，自愈丢包。
+      // 2. DATA：整包 = adr_index(u16 LE) + 176 字节固件 + crc16(u16 LE，覆盖前 178 字节)。
+      //    尾块不足 176 字节时补 0（补 0 部分不在 fwSize 内，设备最终 CRC32 校验不会计入）。
+      //    确认通道统一用 readAck（GATT Read 是 request-response，全平台语义一致可靠），
+      //    不再依赖进度通知流控：每发满 WINDOW(32) 包 → 小停让固件消化在途（flash 写+偶发擦除）
+      //    → readAck 读固件真实进度 → 缺包重传 [realNext, i+1)。固件端对 idx<next 重复包忽略、
+      //    idx==next 落盘，天然自愈。readAck 不可用（老固件）时跳过确认，由 END 固件校验兜底。
       const DATA_BYTES = OTA.BLOCK_BYTES;   // 每包固件字节数 = pdu_length = 176
       const totalBlocks = Math.ceil(fwSize / DATA_BYTES);
-      let flowControl = true;
       let lastPercent = -1;
       let stallResends = 0;
+      let lastRealNext = 0;   // 上一个窗口固件确认进度，用于判断"固件是否在推进"（连续无推进才判停滞）
       const sendPkt = async (idx, isResend) => {
         const off = idx * DATA_BYTES;
         const pkt = new Uint8Array(2 + OTA.BLOCK_BYTES + 2);   // 整包 = idx(2)+data(176)+crc(2)
@@ -631,9 +666,14 @@ const BLEProtocol = (() => {
         pkt[2 + DATA_BYTES] = crc & 0xff;
         pkt[3 + DATA_BYTES] = (crc >> 8) & 0xff;
         console.debug(`[OTA][DATA] ${isResend ? 'RESEND' : 'write'} #${idx}/${totalBlocks - 1} len=${pkt.length} idx=0x${idx.toString(16).padStart(4, '0')} t=${Date.now()}`);
+        // DATA 用带响应写（逐包 ATT 确认）：无响应写丢包率高导致 OTA 中途失败频繁、
+        // 目标区反复半写——结合固件 boot mark 半写污染（bin +0x08 自带 0x4B）曾致设备
+        // 变砖只能线刷。回退到带响应写降低失败概率（固件侧已屏蔽 mark 半写污染作根治）；
+        // readAck 窗口确认与落后重传仍保留，作为停滞兜底
         await writeWithRetry(otaChar, pkt);
-        // 每包写后统一等待：给固件留 flash 写入时间（见 PER_PACKET_GAP_MS 注释），
-        // 所有平台一致；带响应写逐包确认（writeWithRetry）保持不变
+        // 每包后统一等待（PER_PACKET_GAP_MS=20）：Android 的 writeValue 不等 ATT 响应，
+        // 固定间隔是它唯一背压——无间隔连发实测在固件扇区擦除窗口产生 CRC 坏包（stall 中止）；
+        // iOS/Chrome 的 writeValue 等响应，20ms 只是附加保险
         await sleep(OTA.PER_PACKET_GAP_MS);
 
         const sent = Math.min(off + DATA_BYTES, fwSize);
@@ -645,61 +685,53 @@ const BLEProtocol = (() => {
       };
 
       for (let i = 0; i < totalBlocks; i++) {
-        if (flowControl && i - ackedPdu >= OTA.WINDOW) {
-          const ok = await waitProgress(i - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
-          if (!ok) {
-            // 停滞：以固件端真实进度为准（read ACK，平台无关）——不猜通知粒度、不猜平台行为，
-            // 精确重传缺失段 [realNext, i)。固件端对 idx<next 重复包忽略、idx==next 落盘，天然自愈。
-            const realNext = await readAck();
-            if (realNext !== null) {
-              if (realNext < i) {
-                console.warn(`[OTA][RTX] device acked=${realNext} (sent=${i}), resending [${realNext}, ${i}) ${i - realNext} pkt(s)`);
-                for (let j = realNext; j < i; j++) await sendPkt(j, true);
-                stallResends++;
-                if (stallResends >= OTA.MAX_STALL_RESENDS) {
-                  throw new Error(`OTA stalled: firmware not confirming packets (acked=${realNext}, sent=${i})`);
-                }
-              }
-              // realNext >= i：固件进度正常（只是通知滞后），继续
-            } else {
-              // 老固件/特征无 read：降级到通知判断
-              const from = Math.max(ackedPdu, 0);
-              if (!progressSeen) {
-                // 无 read 且从未收到过进度通知 → 探测重传一次，仍无反馈则 freerun（兼容旧固件路径）
-                console.warn(`[OTA][RTX] no read ack & no progress seen (acked=${ackedPdu}, sent=${i}), probing resend [${from}, ${i}) ${i - from} pkt(s)`);
-                for (let j = from; j < i; j++) await sendPkt(j, true);
-                const ok2 = await waitProgress(i - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
-                if (!ok2 && !progressSeen) {
-                  console.warn('[OTA][RTX] device not reporting progress, degrade to freerun (write-response backpressure)');
-                  flowControl = false;
-                } else {
-                  stallResends++;
-                  if (stallResends >= OTA.MAX_STALL_RESENDS) {
-                    throw new Error(`OTA stalled: firmware not confirming packets (acked=${ackedPdu}, sent=${i})`);
-                  }
-                }
-              }
-              // 有进度通知但 waitProgress 超时（通知滞后）→ 继续，下轮再检查
+        await sendPkt(i, false);
+        // 窗口边界确认：每发满 32 包停一次，readAck 拿固件真实进度，缺包则重传。
+        // 首个窗口跳过确认：Android 链路刚建立、写队列积压（writeValue 不等 ATT 响应，web 已发≠
+        // 固件已收，实测首窗口 read 常读到 0——整个窗口还在 BLE 队列里）。等第二窗口边界再确认
+        // （此时距 START 已 ~2.6s、队列已清、链路稳定），首窗口真丢的包由 [acked, 64) 重传兜底。
+        if ((i + 1) % OTA.WINDOW === 0 && i + 1 < totalBlocks && i + 1 >= OTA.WINDOW * 2) {
+          await sleep(OTA.CONFIRM_DIGEST_MS);   // 让固件消化在途窗口（flash 页写 + 偶发擦除）
+          const realNext = await readAck();
+          if (realNext === null) continue;      // read 不可用（老固件/瞬时失败）→ 跳过本窗口确认，END 校验兜底
+          let confirmed = realNext;
+          if (confirmed < i + 1) {
+            // 落后：可能是写队列在途滞后（固件随后会收到），重读最多 3 次等追上；仍落后才判真缺。
+            for (let r = 0; r < 3 && confirmed < i + 1; r++) {
+              await sleep(OTA.CONFIRM_DIGEST_MS);
+              const again = await readAck();
+              if (again === null) break;
+              confirmed = again;
             }
           }
-        }
-        await sendPkt(i, false);
-      }
-      // 收尾前等一下设备把在途包写完：进度按 SCHEDULE_GRANULARITY 整批上报，末尾不足一批不会单独上报，
-      // 因此只等到最后一个整批即可（否则等 totalBlocks 永远等不到，白白拖满超时）；
-      // 超时则以 read ACK 为准补发未确认段（平台无关，最后几包兜底）
-      if (flowControl) {
-        const lastBatch = Math.floor(totalBlocks / OTA.SCHEDULE_GRANULARITY) * OTA.SCHEDULE_GRANULARITY;
-        const tailOk = await waitProgress(lastBatch || totalBlocks, OTA.END_TIMEOUT_MS);
-        if (!tailOk) {
-          const realNext = await readAck();
-          const from = realNext !== null ? realNext : ackedPdu;
-          if (from < totalBlocks) {
-            console.warn(`[OTA][RTX] tail wait stalled (device acked=${from}/${totalBlocks}), resending tail`);
-            for (let j = from; j < totalBlocks; j++) await sendPkt(j, true);
-            await waitProgress(lastBatch || totalBlocks, OTA.END_TIMEOUT_MS);
+          if (confirmed < i + 1) {
+            console.warn(`[OTA][RTX] window: device acked=${confirmed} (sent=${i + 1}), resending [${confirmed}, ${i + 1}) ${i + 1 - confirmed} pkt(s)`);
+            for (let j = confirmed; j <= i; j++) await sendPkt(j, true);
+            if (confirmed <= lastRealNext) {
+              stallResends++;
+              if (stallResends >= OTA.MAX_STALL_RESENDS) {
+                throw new Error(`OTA stalled: firmware not confirming packets (acked=${confirmed}, sent=${i + 1})`);
+              }
+            } else {
+              stallResends = 0;   // 固件在推进（只是 Android 继续丢），重置停滞计数
+            }
+          } else {
+            stallResends = 0;     // 在途滞后最终追上，无缺包，直接继续
           }
+          lastRealNext = confirmed;
         }
+      }
+
+      // 3. 收尾：readAck 确认全部收到，缺则补尾（最多 3 轮），然后 END。
+      //    readAck 不可用（老固件）时跳过补尾，由 END 固件校验兜底。
+      await sleep(OTA.CONFIRM_DIGEST_MS);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const realNext = await readAck();
+        if (realNext === null) break;
+        if (realNext >= totalBlocks) break;   // 全部收到
+        console.warn(`[OTA][RTX] tail: device acked=${realNext}/${totalBlocks}, resending tail`);
+        for (let j = realNext; j < totalBlocks; j++) await sendPkt(j, true);
+        await sleep(OTA.CONFIRM_DIGEST_MS);
       }
       // 3. END：CMD_OTA_END(0xFF02) + adr_index_max + 其按位取反，共 6 字节
       //    用带响应写（writeValue）：固件 END 校验通过后先返回（协议栈发 ATT Write Response +
@@ -717,13 +749,20 @@ const BLEProtocol = (() => {
       // 4. 等待设备结果通知（成功后设备自动重启断链）
       const result = await waitResult();
       if (result === 'disconnected') {
-        return { ok: true, result: 0x00, message: 'OTA succeeded' };
+        return { ok: true, result: 0x00, message: 'OTA succeeded (firmware rebooted)' };
       }
       if (result === null) {
-        return { ok: false, result, message: 'OTA timeout waiting for device result (connection still alive)' };
+        // 超时且连接还活着：Android 链路监控慢，固件可能已复位但断链事件未触发（10s < Android
+        // 检测周期）——探测固件是否还响应：无响应 = 已复位 = 成功；正常返回 = 固件还在 = 真失败。
+        const alive = await probeFirmwareAlive();
+        if (!alive) {
+          console.warn('[OTA] result timeout but firmware not responding (rebooted), treat as success');
+          return { ok: true, result: 0x00, message: 'OTA succeeded (firmware rebooted)' };
+        }
+        return { ok: false, result, message: 'OTA timeout waiting for device result (firmware still alive)' };
       }
       if (result === 0x00) {
-        return { ok: true, result, message: 'OTA succeeded, device is rebooting' };
+        return { ok: true, result, message: 'OTA succeeded (firmware rebooted)' };
       }
       const name = OTA_RESULT_NAMES[result] || 'unknown error';
       return { ok: false, result, message: `OTA failed: ${name} (0x${result.toString(16).padStart(2, '0')})` };

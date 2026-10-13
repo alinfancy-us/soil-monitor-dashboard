@@ -2664,6 +2664,12 @@ The device will measure the current probe state first, then apply the calibratio
           setCachedFwVersion(state.activeDeviceId, version);
         }
         renderFirmwareCard();
+        // 统一成功交互（所有成功路径一致）：成功文案在 Setting 页展示数秒后，自动切到
+        // Data 选项卡看数据。用户若在这几秒内主动操作（重连/切页），otaJustSucceeded
+        // 会被清除，定时器不再切换，避免误切。
+        setTimeout(() => {
+          if (state.otaJustSucceeded) switchMainTab('data');
+        }, 3000);
       }
     } catch (err) {
       // 中文：真实中途断链会走到这里（并非“已在进行中”类忙碌错误），需展示安抚性提示而非原始报错文案
