@@ -429,9 +429,6 @@ const BLEProtocol = (() => {
     MAX_STALL_RESENDS: 3,      // 进度停滞（固件端 expect 卡住、缺失包未补齐）时连续重传轮数上限，超限中止
     PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
     END_TIMEOUT_MS: 10000,     // END 后等待结果通知 / 设备重启断链的超时
-    WRITE_GAP_MS: 80,          // beacio 转发约 75ms/包、令牌桶约每秒补 12~13 包：50ms(20包/s) 每 ~12 包触发一次
-                               //   Rate limit exceeded 报错（200ms 退避重试后成功，不影响结果但刷 Warning）。
-                               //   调到 80ms(12.5包/s) 与转发节奏持平，理论不触发限流、日志干净；
     PER_PACKET_GAP_MS: 20,     // 每包写后统一等待，所有平台生效：Android WebBluetooth 的 writeValue
                                //   不等固件 ATT 响应就连发（实测 3~4ms/包），固件每包要写 flash
                                //   （含扇区擦除，>4ms）→ 队列积压错包；iOS/PC 虽等响应（20~60ms），
@@ -444,7 +441,6 @@ const BLEProtocol = (() => {
     WRITE_RETRY_GAP_MS: 16,    // 重试基础退避时间
     RATE_LIMIT_RETRY_GAP_MS: 200, // 限流类错误（rate limit / too many）的专用退避：限流恢复需要时间，不能用 16ms 级退避
   };
-  const OTA_CMD = { START: 0xFF01, START_EXT: 0xFF03, END: 0xFF02, RESULT: 0xFF06 };
   const OTA_RESULT_NAMES = {
     0x00: 'success',
     0x01: 'packet sequence error',
@@ -486,18 +482,13 @@ const BLEProtocol = (() => {
    * 中文：Bluefy / iOS WebKit 常见 "GATT operation already in progress"，
    *       对同一特征的写入必须串行并做短退避重试，避免 OTA 中途直接失败。
    */
-  async function writeWithRetry(otaChar, data, withoutResponse) {
+  async function writeWithRetry(otaChar, data) {
     let lastErr = null;
     for (let i = 0; i < OTA.WRITE_RETRY_MAX; i++) {
       try {
-        if (withoutResponse) {
-          // 无响应写限速：每包间留出最小间隔，避免在极短时间内向 BLE 栈涌入大量写请求
-          //（iOS/beacio 转发层会以 "Rate limit exceeded — too many BLE requests" 拒绝过密请求）
-          await sleep(OTA.WRITE_GAP_MS);
-          await otaChar.writeValueWithoutResponse(data);
-        } else {
-          await otaChar.writeValue(data);
-        }
+        // 带响应写：固件处理完回 ATT 响应，逐包确认送达（全平台一致，Android 静默丢包由
+        // 停滞重传自愈，无需无响应写加速）
+        await otaChar.writeValue(data);
         return;
       } catch (e) {
         lastErr = e;
@@ -562,17 +553,13 @@ const BLEProtocol = (() => {
 
     otaChar.addEventListener('characteristicvaluechanged', onChanged);
     try {
-      // 中文：部分浏览器（Bluefy 等）的 startNotifications 可能挂起（既不 resolve 也不 reject），
-      //      导致 OTA 永远卡在启动、固件端收不到 START_EXT。加超时兜底：
-      //      通知只是流控/结果判定的加速通道，缺失时走 readAck 确认，不阻塞 OTA。
+      // 通知订阅可能挂起或拒绝（Bluefy 等），加 3s 超时兜底：通知只是流控加速通道，
+      // 缺失时降级——停滞走 readAck 确认、END 后靠断链判定成功，不阻塞 OTA。
       await Promise.race([
         otaChar.startNotifications(),
         new Promise((_, reject) => setTimeout(() => reject(new Error('startNotifications timeout')), 3000)),
       ]);
     } catch (e) {
-      // 中文：Bluefy 等浏览器可能拒绝通知订阅（日志报 rejected，Promise 可能 resolve 也可能 reject）。
-      //      通知仅用于进度流控与结果判定，缺失时降级：无背压 → 首次 waitProgress 超时自动转
-      //      freerun 定速发送；END 后靠"固件校验通过才复位断链"判定成功。不阻塞 OTA。
       console.warn(`[OTA] notifications rejected/timeout, degrade: ${e?.message || e}`);
     }
 
@@ -620,7 +607,7 @@ const BLEProtocol = (() => {
       startExt[0] = 0x03; startExt[1] = 0xFF;    // CMD_OTA_START_EXT 小端
       startExt[2] = OTA.BLOCK_BYTES;             // pdu_length=80（16 的倍数，≤B85 上限 80）
       startExt[3] = 0;                           // version_compare=0；rsvd[16] 默认 0
-      await writeWithRetry(otaChar, startExt, false);
+      await writeWithRetry(otaChar, startExt);
       console.debug(`[OTA] START_EXT sent: pdu_length=${OTA.BLOCK_BYTES} => ${OTA.BLOCK_BYTES + 4}B/pkt`);
 
       // 2. DATA：每包 84 字节 = adr_index(u16 LE) + 80 字节固件 + crc16(u16 LE，覆盖前 82 字节)。
@@ -645,7 +632,7 @@ const BLEProtocol = (() => {
         pkt[2 + DATA_BYTES] = crc & 0xff;
         pkt[3 + DATA_BYTES] = (crc >> 8) & 0xff;
         console.debug(`[OTA][DATA] ${isResend ? 'RESEND' : 'write'} #${idx}/${totalBlocks - 1} len=${pkt.length} idx=0x${idx.toString(16).padStart(4, '0')} t=${Date.now()}`);
-        await writeWithRetry(otaChar, pkt, false);
+        await writeWithRetry(otaChar, pkt);
         // 每包写后统一等待：给固件留 flash 写入时间（见 PER_PACKET_GAP_MS 注释），
         // 所有平台一致；带响应写逐包确认（writeWithRetry）保持不变
         await sleep(OTA.PER_PACKET_GAP_MS);
@@ -726,7 +713,7 @@ const BLEProtocol = (() => {
         0x02, 0xFF,
         maxIdx & 0xff, (maxIdx >> 8) & 0xff,
         (~maxIdx) & 0xff, ((~maxIdx) >> 8) & 0xff,
-      ), false);
+      ));
 
       // 4. 等待设备结果通知（成功后设备自动重启断链）
       const result = await waitResult();
