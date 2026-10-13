@@ -673,7 +673,7 @@ const BLEProtocol = (() => {
         return { ok: false, result, message: 'OTA timeout waiting for device result (connection still alive)' };
       }
       if (result === 0x00) {
-        return { ok: true, result, message: 'OTA succeeded' };
+        return { ok: true, result, message: 'OTA succeeded, device is rebooting' };
       }
       const name = OTA_RESULT_NAMES[result] || 'unknown error';
       return { ok: false, result, message: `OTA failed: ${name} (0x${result.toString(16).padStart(2, '0')})` };
