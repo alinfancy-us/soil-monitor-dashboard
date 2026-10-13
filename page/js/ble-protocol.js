@@ -544,6 +544,7 @@ const BLEProtocol = (() => {
     let ackedPdu = 0;           // 设备上报的已成功收包数（滑动窗口的背压信号）
     let progressWaiter = null;  // { target, resolve } 当前等待进度的任务
     let resultResolve = null;   // 结果通知等待
+    let progressSeen = false;   // 是否收到过固件进度通知（区分"真停滞"与"通知不可用"）
     const onChanged = (e) => {
       const v = e.target.value;
       const raw = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
@@ -552,6 +553,7 @@ const BLEProtocol = (() => {
         if (resultResolve) { resultResolve(raw[2]); resultResolve = null; }
       } else if (raw[0] === 0x08) {
         ackedPdu = raw[2] | (raw[3] << 8);
+        progressSeen = true;
         if (progressWaiter && ackedPdu >= progressWaiter.target) {
           const w = progressWaiter; progressWaiter = null; w.resolve(true);
         }
@@ -644,14 +646,32 @@ const BLEProtocol = (() => {
         if (flowControl && i - ackedPdu >= OTA.WINDOW) {
           const ok = await waitProgress(i - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
           if (!ok) {
-            // 进度停滞：固件端 expect 卡住（Android 静默丢包）→ 重传缺失段 [ackedPdu, i)。
-            // 连续多轮不推进说明非瞬时丢包（连接/队列异常），中止避免无限重传。
             const from = Math.max(ackedPdu, 0);
-            console.warn(`[OTA][RTX] progress stalled at ${ackedPdu} (sent=${i}), resending [${from}, ${i}) ${i - from} pkt(s)`);
-            for (let j = from; j < i; j++) await sendPkt(j, true);
-            stallResends++;
-            if (stallResends >= OTA.MAX_STALL_RESENDS) {
-              throw new Error(`OTA stalled: firmware not confirming packets (acked=${ackedPdu}, sent=${i})`);
+            if (!progressSeen) {
+              // 从未收到过进度通知：可能是"固件不上报/通知不可用"（iOS Safari/beacio/订阅失败），
+              // 旧逻辑在此降级 freerun 靠带响应写背压成功。新逻辑先重传一次窗口试探：
+              // 若仍无反馈，判定通知不可用 → 恢复 freerun；若反馈出现，进入停滞重传（Android 丢包路径）。
+              console.warn(`[OTA][RTX] no progress seen (acked=${ackedPdu}, sent=${i}), probing resend [${from}, ${i}) ${i - from} pkt(s)`);
+              for (let j = from; j < i; j++) await sendPkt(j, true);
+              const ok2 = await waitProgress(i - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
+              if (!ok2 && !progressSeen) {
+                console.warn('[OTA][RTX] device not reporting progress, degrade to freerun (write-response backpressure)');
+                flowControl = false;
+              } else {
+                stallResends++;
+                if (stallResends >= OTA.MAX_STALL_RESENDS) {
+                  throw new Error(`OTA stalled: firmware not confirming packets (acked=${ackedPdu}, sent=${i})`);
+                }
+              }
+            } else {
+              // 见过进度通知但现在停滞（Android 静默丢包）→ 重传缺失段 [ackedPdu, i)。
+              // 连续多轮不推进说明非瞬时丢包（连接/队列异常），中止避免无限重传。
+              console.warn(`[OTA][RTX] progress stalled at ${ackedPdu} (sent=${i}), resending [${from}, ${i}) ${i - from} pkt(s)`);
+              for (let j = from; j < i; j++) await sendPkt(j, true);
+              stallResends++;
+              if (stallResends >= OTA.MAX_STALL_RESENDS) {
+                throw new Error(`OTA stalled: firmware not confirming packets (acked=${ackedPdu}, sent=${i})`);
+              }
             }
           }
         }
