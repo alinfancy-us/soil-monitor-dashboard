@@ -1775,6 +1775,13 @@ function clearConnectError() {
 
        // 设备已连上 GATT 即置 connected：按钮立即可用；notify 订阅移后台，不再阻塞按钮 ready
        setStatus('connected');
+       // 清除上一轮 OTA 结果残留（设备重启断链后重连，成功/失败文案都不应继续展示；
+       // otaJustSucceeded 复位，避免旧 3s 自动切页定时器在新会话误触发）
+       state.otaJustSucceeded = false;
+       els.otaStatus.textContent = '';
+       els.otaStatus.className = 'text-xs font-medium text-slate-600';
+       els.otaProgressWrap.classList.add("hidden");
+       setOtaRetryVisible(false);
        clearConnectError();
        setConnectBusy(false);   // 连接成功：解锁 Connect 按钮（此时才允许点击 Disconnect）
        log('Connected & Listening for updates.');
