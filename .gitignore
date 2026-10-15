@@ -10,3 +10,4 @@ page/firmware/
 
 # 日志
 *.log
+.fw_token
