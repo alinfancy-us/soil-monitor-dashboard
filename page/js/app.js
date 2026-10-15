@@ -2591,7 +2591,7 @@ The device will measure the current probe state first, then apply the calibratio
     try {
       const res = await fetch(upd.url, { cache: "no-store" });
       if (!res.ok) throw new Error(`firmware download failed: HTTP ${res.status}`);
-      await runOtaUpdate(await res.arrayBuffer(), upd.bin, upd.version);
+      await runOtaUpdate(await res.arrayBuffer(), `firmware v${upd.version}`, upd.version);
     } catch (err) {
       els.otaStatus.textContent = formatOtaError(err);
       els.otaStatus.className = "text-xs font-medium text-rose-600";
@@ -2634,7 +2634,11 @@ The device will measure the current probe state first, then apply the calibratio
       }
       return BLEProtocol.performOta(state.otaChar, firmware, (info) => {
         els.otaProgressBar.style.width = `${info.percent}%`;
-        if (info.phase === "data") {
+        if (info.phase === "preparing") {
+          // 固件整区预擦 ~3.1s（+web 盲等窗口）：显示 preparing 文案，避免 "Sending… 0%"
+          // 静止近 4s 误以为卡死；DATA 第一包开始时 data 分支自然切回 "Sending firmware…"
+          els.otaStatus.textContent = "Preparing device (erasing flash)…";
+        } else if (info.phase === "data") {
           els.otaStatus.textContent = `Sending firmware… ${info.percent}% (${(info.sent / 1024).toFixed(1)} / ${(info.total / 1024).toFixed(1)} KB)`;
         } else if (info.phase === "end") {
           els.otaStatus.textContent = "Firmware sent, verifying…";

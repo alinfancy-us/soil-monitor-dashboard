@@ -429,15 +429,20 @@ const BLEProtocol = (() => {
     MAX_STALL_RESENDS: 3,      // readAck 显示固件进度连续无推进（重传后仍卡住）的轮数上限，超限中止
     END_TIMEOUT_MS: 10000,     // END 后等待固件终态（readAck 轮询）的总超时
     STATUS_IDLE: 0x00,         // readAck 会话状态（固件 my_OtaData[4]，GATT Read 全平台可靠）：
-    STATUS_ACTIVE: 0x01,       //   DATA 传输中（START 已激活）
+    STATUS_ACTIVE: 0x01,       //   DATA 传输中（目标区预擦完成，就绪）
     STATUS_SUCCESS: 0x02,      //   END 校验通过 + boot mark 已切，待复位（=成功终态）
     STATUS_ABORTED: 0x03,      //   会话失败（原因码在 my_OtaData[5]，即 SOIL_OTA_RES）
-    PER_PACKET_GAP_MS: 20,      // 每包写后统一等待。实测结论（2026-10-13，用户设备）：置 0 不加间隔时，
+    STATUS_PREPARING: 0x04,    //   目标区预擦中（官方预擦策略：进 OTA 整区预擦 ~3s，web 轮询等待就绪再发 DATA）
+    PER_PACKET_GAP_MS: 10,      // 每包写后统一等待。历史实测（2026-10-13，用户设备）：置 0 不加间隔时
                                //   Android 的 writeValue 不等 ATT 响应（再次实证）→ 连发积压，固件在
                                //   4K 扇区擦除窗口（~20-100ms）内收包偶发 CRC 错包（实测 idx=94 坏包
                                //   重传 3 轮仍坏 → OTA stalled 直接退出）。间隔是 Android 上唯一背压
-                               //   （iOS/Chrome 的 writeValue 等 ATT 响应，响应本身即背压，20ms 为附加）。
-                               //   20ms = 50 包/秒，403 包 ≈ 8-9s（无响应写时代 50ms ≈ 20s）。
+                               //   （iOS/Chrome 的 writeValue 等 ATT 响应，响应本身即背压）。
+                               //   2026-10-15 优化：固件已改全区预擦，传输中无扇区擦除窗口（flush_sector
+                               //   仅纯页写 ~16ms/4K），坏包根因消除 → 20 下调 10ms（省 ~4s）。保留间隔
+                               //   用于覆盖 Android writeValue 提前 resolve（实测 ~7ms），防 GATT 操作
+                               //   重叠（already in progress，与栈锁死同源）——故不归 0。若实测偶发
+                               //   CRC 坏包或 already in progress 频繁，回退 15-20ms。
                                //   若仍偶发坏包，上调 30~50ms；窗口确认 + 落后重传兜底不变。
     WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
     WRITE_RETRY_GAP_MS: 16,    // 重试基础退避时间
@@ -599,9 +604,15 @@ const BLEProtocol = (() => {
     // 一致可靠，是唯一确认通道（不依赖通知订阅/平台 write 语义）。
     // 返回 { progress: 已收包数, status: 0=idle/1=active/2=success/3=aborted, result: 失败原因码 }；
     // 读取失败/格式不符返回 null（调用方按"不可确认"处理，由 END 固件校验兜底）。
+    // 超时保护：Android 实测 GATT Read 偶发挂起（fix3 实证可挂 30s，读挂起会把整个 OTA 拖死）。
+    // 3s 未返回视为不可确认 → 跳过该次确认继续盲发，由 END 固件校验兜底。
+    const withTimeout = (p, ms) => Promise.race([
+      p,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('read timeout')), ms)),
+    ]);
     const readAck = async () => {
       try {
-        const v = await otaChar.readValue();
+        const v = await withTimeout(otaChar.readValue(), 3000);
         const raw = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
         if (raw.byteLength < 6 || raw[0] !== 0x08 || raw[1] !== 0xFF) return null;
         return {
@@ -625,18 +636,52 @@ const BLEProtocol = (() => {
       startExt[3] = 0;                           // version_compare=0；rsvd[16] 默认 0
       await writeWithRetry(otaChar, startExt);
       console.debug(`[OTA] START_EXT sent: pdu_length=${OTA.BLOCK_BYTES} => ${OTA.BLOCK_BYTES + 4}B/pkt`);
+      // 预擦状态上报（UX）：START 后固件整区预擦（~3.1s）+ web 盲等窗口合计 ~3.5s+，
+      // 期间 UI 若仍显示 "Sending… 0%" 会误以为卡死。此处先切到 preparing 文案，
+      // 覆盖盲等 + 擦除全程；DATA 第一包开始时 data 分支自然覆盖回 "Sending firmware…"。
+      onProgress?.({ phase: 'preparing', percent: 0, sent: 0, total: fwSize });
       // START 激活确认（平台无关）：Android 的 writeValue 不等 ATT 响应，START 可能静默未达
       // （固件不激活 → DATA 全部被忽略，读轮询才能发现）。等队列消化后读会话状态：
       // 明确 idle(0x00) 才重发 START（≤2 次）；active(0x01) 即继续。DATA 尚未开始，
       // 重发 START 重置会话无代价。读不可用/异常终态不折腾，由窗口确认兜底。
       await sleep(250);
+      // 预擦窗口盲等（Android GATT 栈锁死根因修复）：固件收到 START 后整区预擦 ~3.1s，
+      // flash 驱动全程关中断（40~80ms/扇区）。此窗口内发起 GATT Read 在 Android 上可能挂起：
+      // promise 3s 超时只放弃等待、不取消底层 ATT 事务，未完成的读会锁死整个特征，之后所有
+      // writeValue/readValue 全部报 "already in progress"（实测连续 1.7s+ 全灭、仅断链能释放）。
+      // 故 START 后盲等覆盖预擦窗口（栈完全空闲），窗口外再发起首次确认读。
+      const PRE_ERASE_BLIND_MS = 4000;              // 覆盖预擦 3.1s + 0.9s 余量（用户拍板：加 0.5s 保险）
+      console.debug(`[OTA] blind-wait ${(PRE_ERASE_BLIND_MS / 1000).toFixed(1)}s for target pre-erase (no GATT I/O)...`);
+      await sleep(PRE_ERASE_BLIND_MS);
+      // START 激活确认：idle → 重发 START（≤2 次）；preparing(0x04) = 目标区预擦中（官方预擦策略，
+      // ~3.1s）→ 轮询等待就绪；active → 继续发 DATA。预擦完成前发 DATA 会被固件丢弃（不推进序号），
+      // 必须等 ACTIVE 再发。
+      let prepDeadline = Date.now() + 8000;         // 每次 START 发出后重置：预擦 124K ≈ 3.1s，8s 宽裕
       for (let attempt = 0; attempt < 2; attempt++) {
         const ack = await readAck();
-        if (ack === null || ack.status === OTA.STATUS_ACTIVE) break;   // 已激活 / 不可确认 → 继续
+        if (ack !== null && ack.status === OTA.STATUS_ACTIVE) break;   // 明确已激活 → 发 DATA
+        if (ack === null) {                                            // 读失败/超时：预擦窗口已被盲等覆盖，多为栈瞬时问题
+          console.warn('[OTA] START confirm read failed, retry after 1s');
+          await sleep(1000);
+          continue;                                                    // 重读；连续失败 2 次后固件必已就绪，安全进入 DATA
+        }
         if (ack.status === OTA.STATUS_IDLE) {                          // 明确 idle：START 未达 → 重发
           console.warn(`[OTA] START not confirmed (idle), resend #${attempt + 1}`);
           await writeWithRetry(otaChar, startExt);
           await sleep(250);
+          prepDeadline = Date.now() + 8000;                            // 重发后固件重新预擦：重置就绪 deadline
+          await sleep(PRE_ERASE_BLIND_MS);                             // 重发后同样盲等预擦窗口，避免再撞关中断
+        } else if (ack.status === OTA.STATUS_PREPARING) {              // 预擦中 → 轮询等就绪
+          onProgress?.({ phase: 'preparing', percent: 0, sent: 0, total: fwSize });   // 兜底幂等：保持 preparing 文案
+          console.debug('[OTA] firmware erasing target, waiting ready...');
+          while (Date.now() < prepDeadline) {
+            await sleep(OTA.CONFIRM_DIGEST_MS);
+            const again = await readAck();
+            if (again !== null && again.status === OTA.STATUS_ACTIVE) break;      // 就绪 → 发 DATA
+            if (again !== null && again.status !== OTA.STATUS_PREPARING) break;   // 异常终态 → 不折腾
+            if (again === null) await sleep(1000);                                // 读失败/超时：不退出，稍候重试
+          }
+          break;   // 无论超时/异常都继续（预擦 ≤3.1s < 8s deadline，固件必已就绪）
         } else break;   // 异常终态（success/aborted）→ 不折腾，后续流程会暴露
       }
 
@@ -667,9 +712,9 @@ const BLEProtocol = (() => {
         // 变砖只能线刷。回退到带响应写降低失败概率（固件侧已屏蔽 mark 半写污染作根治）；
         // readAck 窗口确认与落后重传仍保留，作为停滞兜底
         await writeWithRetry(otaChar, pkt);
-        // 每包后统一等待（PER_PACKET_GAP_MS=20）：Android 的 writeValue 不等 ATT 响应，
-        // 固定间隔是它唯一背压——无间隔连发实测在固件扇区擦除窗口产生 CRC 坏包（stall 中止）；
-        // iOS/Chrome 的 writeValue 等响应，20ms 只是附加保险
+        // 每包后统一等待（PER_PACKET_GAP_MS=10）：Android 的 writeValue 不等 ATT 响应，
+        // 固定间隔是它唯一背压——预擦后无扇区擦除窗口，10ms 覆盖 Android resolve 滞后
+        // 防 GATT 重叠；iOS/Chrome 的 writeValue 等响应，10ms 只是附加保险
         await sleep(OTA.PER_PACKET_GAP_MS);
 
         const sent = Math.min(off + DATA_BYTES, fwSize);

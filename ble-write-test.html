@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SoilPulse BLE writeValue 耗时测试</title>
+<style>
+body{font-family:Menlo,Consolas,monospace;margin:0;padding:16px;background:#111;color:#eee;}
+h1{font-size:18px;margin:0 0 8px;}
+#status{font-size:22px;margin:8px 0;}
+.big{font-size:44px;font-weight:bold;color:#4caf50;}
+.err{color:#f44336;}
+#log{white-space:pre-wrap;font-size:13px;line-height:1.5;color:#9e9e9e;margin-top:8px;}
+button{font-size:22px;padding:16px 24px;margin-top:16px;background:#2196f3;color:#fff;border:none;border-radius:8px;}
+button:disabled{opacity:.5;}
+</style>
+</head>
+<body>
+<h1>SoilPulse BLE writeValue 耗时测试（Android Chrome）</h1>
+<div id="status">准备中…</div>
+<button id="btn">开始测试（连接 SoilPulse）</button>
+<div id="log"></div>
+<script>
+const OTA_SERVICE='00010203-0405-0607-0809-0a0b0c0d1912';
+const OTA_CHAR='00010203-0405-0607-0809-0a0b0c0d2b12';
+const $s=document.getElementById('status');
+const $log=document.getElementById('log');
+const $btn=document.getElementById('btn');
+function log(msg){ $log.textContent += msg+'\n'; console.log('BTEST', msg); }
+function setStatus(t, cls){ $s.textContent=t; $s.className=cls||''; }
+
+async function runTest(device){
+  try{
+    log('设备: '+(device.name||'?')+' '+device.id);
+    setStatus('连接中…');
+    const server = await device.gatt.connect();
+    log('GATT connected');
+    const svc = await server.getPrimaryService(OTA_SERVICE);
+    const c = await svc.getCharacteristic(OTA_CHAR);
+    log('OTA char: '+c.uuid);
+
+    const pkt = new Uint8Array(180);
+    const times = [];
+    for(let i=0;i<10;i++){
+      const t0 = performance.now();
+      await c.writeValue(pkt);
+      const dt = performance.now()-t0;
+      times.push(dt);
+      log('write#'+i+' = '+dt.toFixed(2)+'ms');
+    }
+    const avg = times.reduce((a,b)=>a+b,0)/times.length;
+    const min = Math.min.apply(null,times), max = Math.max.apply(null,times);
+    log('---');
+    log('avg='+avg.toFixed(2)+'ms  min='+min.toFixed(2)+'ms  max='+max.toFixed(2)+'ms');
+    setStatus('writeValue 平均 '+avg.toFixed(2)+' ms', 'big');
+
+    const r0 = performance.now();
+    await c.readValue();
+    const rd = performance.now()-r0;
+    log('readValue = '+rd.toFixed(2)+'ms');
+    log('=== 判断 ===');
+    if(avg < 8){ log('avg<8ms → promise 不等 ATT 响应（底层积压，需串行控制）'); }
+    else if(avg < 25){ log('avg≈ATT 往返 → 可能等响应（真串行）'); }
+    else { log('avg 明显慢 → 可能等响应或底层拥塞'); }
+    try{ device.gatt.disconnect(); }catch(e){}
+  }catch(e){
+    setStatus('错误: '+e.message, 'err');
+    log('ERR: '+e.message);
+    console.error('BTEST ERR', e);
+  }
+}
+
+$btn.addEventListener('click', async ()=>{
+  $btn.disabled = true;
+  log('=== 开始（用户手势） ===');
+  try{
+    // 1. 先尝试已授权设备
+    let device = null;
+    if(typeof navigator.bluetooth.getDevices === 'function'){
+      try{
+        const ds = await navigator.bluetooth.getDevices();
+        log('getDevices(): '+ds.length+' 台已授权');
+        device = ds.find(d => (d.name && d.name.indexOf('SoilPulse')>=0));
+      }catch(e){ log('getDevices 失败: '+e.message); }
+    } else {
+      log('getDevices 不可用（浏览器内核裁剪）→ requestDevice');
+    }
+    if(!device){
+      log('requestDevice…（请在弹窗中点选 SoilPulse 设备）');
+      device = await navigator.bluetooth.requestDevice({
+        filters:[{namePrefix:'SoilPulse'},{services:[OTA_SERVICE]}],
+        optionalServices:[OTA_SERVICE]
+      });
+    }
+    await runTest(device);
+  }catch(e){
+    setStatus('错误: '+e.message, 'err');
+    log('ERR: '+e.message);
+    $btn.disabled = false;
+  }
+});
+
+// 页面加载时报告蓝牙支持情况
+setStatus('就绪。点击按钮开始');
+try{
+  log('userAgent: '+(navigator.userAgent||'').slice(0,120));
+  log('bluetooth: '+(navigator.bluetooth?'可用':'不可用'));
+  log('getDevices: '+(typeof navigator.bluetooth.getDevices==='function'?'支持':'不支持'));
+}catch(e){}
+</script>
+</body>
+</html>
