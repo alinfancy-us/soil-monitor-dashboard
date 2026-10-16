@@ -2628,6 +2628,7 @@ The device will measure the current probe state first, then apply the calibratio
     els.otaProgressBar.style.width = "0%";
     els.otaStatus.className = "text-xs font-medium text-slate-600";
     els.otaUpdateNowBtn.disabled = true;
+    els.otaUpdateNowBtn.textContent = 'Updating firmware…';   // 中文：点击即切进行中文案，覆盖下载+传输全程
     setOtaRetryVisible(false);
     els.otaStatus.textContent = `Downloading v${upd.version}…`;
     try {
@@ -2641,6 +2642,7 @@ The device will measure the current probe state first, then apply the calibratio
       log(`[OTA] error: ${err.message || err}`);
     } finally {
       els.otaUpdateNowBtn.disabled = state.otaRunning || !state.device?.gatt.connected || !state.fwUpdate;
+      els.otaUpdateNowBtn.textContent = 'Update now';          // 中文：会话结束恢复原文案（含下载阶段失败兜底）
     }
   });
 
@@ -2665,6 +2667,7 @@ The device will measure the current probe state first, then apply the calibratio
     setOtaUiLock(true);
     els.otaProgressWrap.classList.remove("hidden");
     els.otaUpdateNowBtn.disabled = true;
+    els.otaUpdateNowBtn.textContent = 'Updating firmware…';   // 中文：重试/直调路径统一进行中文案（幂等）
     els.otaProgressBar.style.width = "0%";
     els.otaStatus.className = "text-xs font-medium text-slate-600";
     setOtaRetryVisible(false);
@@ -2737,6 +2740,7 @@ The device will measure the current probe state first, then apply the calibratio
       try { state.device?.gatt?.disconnect?.(); } catch (_) { /* 断开失败不影响错误展示 */ }
     } finally {
       state.otaRunning = false;
+      els.otaUpdateNowBtn.textContent = 'Update now';          // 中文：会话结束（成功/失败/重试）统一恢复原文案
       // 成功后设备自动重启断链；失败但仍连接则恢复轮询与按钮态
       if (state.device?.gatt.connected) {
         setOtaUiLock(false);

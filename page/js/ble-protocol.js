@@ -874,15 +874,18 @@ const BLEProtocol = (() => {
         await sleep(200);
         const ack = await readAck();
         if (ack === null) {
-          // 【fix24/N1】读到过 VERIFYING（END 已受理、校验中）→ 读失败 = 固件已复位断链 = 成功。
-          // 语义安全：VERIFYING 只可能在 END 受理后出现；校验失败固件走 abort（不复位断链、仍可读到
-          // ABORTED 原因码），反假阳性能力保留。未读到过 VERIFYING 才走 probe 双保险。
-          if (sawVerifying) {
+          // 【fix24/N1 修订】不单凭"读失败"判成功：GATT Read 瞬时异常（栈抖动/超时）在
+          // VERIFYING 窗口内一次失败即误判成功，而固件随后校验失败会 abort（不断链、仍可读
+          // ABORTED 原因码）→ 假阳性回归。收窄为最强凭据：见过 VERIFYING **且连接已断**
+          // （固件成功路径的终点 = watchdog 复位断链；abort 路径不断链）才判成功；
+          // 连接还在 → 视为瞬时读失败，继续轮询重读。未见过 VERIFYING 仍走 probe 双保险。
+          if (sawVerifying && !otaChar.service.device.gatt.connected) {
             endState = 'success';
-          } else {
+          } else if (!sawVerifying) {
             const alive = await probeFirmwareAlive();
             if (!alive) endState = 'success';
           }
+          // sawVerifying && 连接还在：瞬时读失败 → 不判，循环 200ms 后重读
         } else if (ack.status === OTA.STATUS_SUCCESS) {
           endState = 'success';                        // 固件明确确认：校验通过 + boot mark 已切
         } else if (ack.status === OTA.STATUS_ABORTED) {
@@ -908,6 +911,11 @@ const BLEProtocol = (() => {
         return { ok: false, result: endState.fail, message: `OTA failed: ${fname} (0x${endState.fail.toString(16).padStart(2, '0')})` };
       }
       // 超时未决：probe 最终判定（无响应 = 已复位 = 成功；正常响应 = 固件还在 = 真失败）
+      // 【fix24/N1 修订】与轮询内同凭据：见过 VERIFYING 且连接已断 → 复位成功。
+      // 否则 probe 对断链"保守不判活"返回 true → 把刚完成的成功误报成 OTA timeout（假阴性）。
+      if (sawVerifying && !otaChar.service.device.gatt.connected) {
+        return { ok: true, result: 0x00, message: 'OTA succeeded (firmware rebooted)' };
+      }
       const alive = await probeFirmwareAlive();
       if (!alive) {
         console.warn('[OTA] END timeout but firmware not responding (rebooted), treat as success');
