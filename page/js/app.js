@@ -67,6 +67,8 @@
   // 中文：趋势图最大记录数 = 24h（10 分钟采样 × 144）。设备环 SOIL_HISTORY_MAX=144，
   //      前端缓存合并后同样按此封顶——更旧的记录由 30 天日均视图（0xFFE3）承担
   const TREND_MAX_RECORDS = 144;
+  // 日均值本地最多留 30 条（0xFFED 一次能读 30 天）；画图按 state.dailyRange 再截
+  const DAILY_MAX_RECORDS = 30;
   // 合并去重容差（秒）。设备每次连接都会用手机时间重新对时，对时基准刷新后同一采样
   // 记录的换算时间戳可能漂移 1~2 秒；按 timestamp 精确去重会漏判，缓存里就会堆出
   // 成对的"近似重复"并挤掉真正的历史。10 分钟采样间隔下 2 秒容差不会误合并相邻样本。
@@ -145,6 +147,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     dailyMetricTempBtn: document.getElementById('dailyMetricTempBtn'),
     dailyMetricHumBtn: document.getElementById('dailyMetricHumBtn'),
     dailyMetricBattBtn: document.getElementById('dailyMetricBattBtn'),
+    dailyRange7Btn: document.getElementById('dailyRange7Btn'),
+    dailyRange30Btn: document.getElementById('dailyRange30Btn'),
      modal: document.getElementById('compatibilityModal'),
      modalIcon: document.getElementById('modalIcon'),
      modalTitle: document.getElementById('modalTitle'),
@@ -171,6 +175,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      activeDeviceId: null,
      characteristic: null,
      dailyChar: null,
+     daily30Char: null,
+     dailyRange: 7,   // 日均图显示天数：7 或 30（0xFFED 有数据时才能选 30）
      resetChar: null,
     calibChar: null,
     refreshChar: null,
@@ -204,6 +210,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    // 温度单位偏好：默认华氏（°F，美国常用），可在温度卡片切换摄氏（°C），持久化到本地
    try {
      state.tempUnit = localStorage.getItem(`${CACHE_PREFIX}tempUnit:v1`) === 'C' ? 'C' : 'F';
+     // 日均图显示范围偏好（7D / 30D）；真到渲染时还会再校验固件是否支持 0xFFED
+     state.dailyRange = localStorage.getItem(`${CACHE_PREFIX}dailyRange:v1`) === '30' ? 30 : 7;
      // 启动时恢复最近一次连接的设备展示名（未连接也展示，见 showDeviceNameBadge）
      showDeviceNameBadge(localStorage.getItem(DEVICE_NAME_KEY) || '');
    } catch (_) {
@@ -379,15 +387,29 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        return window.matchMedia('(max-width: 640px)').matches;
      }
 
-   function sanitizeDailyRecords(records) {
+   function sanitizeDailyRecords(records, max = DAILY_MAX_RECORDS) {
      if (!Array.isArray(records)) return [];
      return records
        .filter((r) => Number.isFinite(r?.dateEpoch)
          && r.dateEpoch >= DAILY_EPOCH_MIN_VALID
          && r.dateEpoch <= DAILY_EPOCH_MAX_VALID)
       .sort((a, b) => a.dateEpoch - b.dateEpoch)
-      .slice(-7);
+      .slice(-max);
    }
+
+ // 中文：按"本地 0 点 epoch"精确合并两路日均值（0xFFED 的 30 天 + 0xFFE3 的 7 天）。
+ //       dateEpoch 是天索引×86400，不存在秒级漂移，直接按值去重即可；
+ //       同一日期以 extra（0xFFE3，RAM 环）为准——它更新更及时。
+ function mergeDailyRecords(base, extra) {
+   const byDay = new Map();
+   (Array.isArray(base) ? base : []).forEach((r) => {
+     if (Number.isFinite(r?.dateEpoch)) byDay.set(r.dateEpoch, r);
+   });
+   (Array.isArray(extra) ? extra : []).forEach((r) => {
+     if (Number.isFinite(r?.dateEpoch)) byDay.set(r.dateEpoch, r);
+   });
+   return Array.from(byDay.values()).sort((a, b) => a.dateEpoch - b.dateEpoch);
+ }
 
  function sanitizeTrendRecords(records) {
    if (!Array.isArray(records)) return [];
@@ -1167,6 +1189,32 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      });
    }
 
+   // 中文：7D/30D 分段控件的选中态——与 metric 按钮同一套视觉语言
+   function updateDailyRangeButtons() {
+     const range = (state.dailyRange === 30 && state.daily30Char) ? 30 : 7;
+     const pairs = [[els.dailyRange7Btn, 7], [els.dailyRange30Btn, 30]];
+     pairs.forEach(([btn, val]) => {
+       if (!btn) return;
+       const active = range === val;
+       btn.className = `daily-range-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${active ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`;
+       // 老固件没有 0xFFED：30D 置灰并提示（disabled 后点击不生效）
+       btn.disabled = (val === 30 && !state.daily30Char);
+       btn.classList.toggle('opacity-40', val === 30 && !state.daily30Char);
+       btn.title = (val === 30 && !state.daily30Char) ? '需固件支持 30 天日均（0xFFED）' : `${val} 天日均`;
+     });
+   }
+
+   function setDailyRange(range) {
+     if (range !== 7 && range !== 30) return;
+     if (range === 30 && !state.daily30Char) return;
+     state.dailyRange = range;
+     try { localStorage.setItem(`${CACHE_PREFIX}dailyRange:v1`, String(range)); } catch (_) {}
+     updateDailyRangeButtons();
+     if (state.lastDailyRecords && !els.dailyTabPanel.classList.contains('hidden')) {
+       renderDaily(state.lastDailyRecords);
+     }
+   }
+
    function updateTempUnitUI() {
      const active = state.tempUnit;
      (els.tempUnitToggle?.querySelectorAll('.temperature-unit-btn') || []).forEach(btn => {
@@ -1196,12 +1244,19 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
 
 
    function renderDaily(records) {
+    // 中文：state.lastDailyRecords 存的是"设备给的完整集合"（最多 30 天）——
+    //      切 7D/30D 时不用重新读设备，直接在这里截取要画的那一段
     records = sanitizeDailyRecords(records);
     state.lastDailyRecords = records;
      const cfg = DAILY_METRICS[state.dailyMetric] || DAILY_METRICS.temp;
      updateDailyMetricButtons();
+     updateDailyRangeButtons();
 
-     if (!records || !records.length) {
+     // 中文：30D 只在新固件（有 0xFFED）时可选，老固件最多 7 条，选了也没意义
+     const range = (state.dailyRange === 30 && state.daily30Char) ? 30 : 7;
+     const shown = records.slice(-range);
+
+     if (!shown.length) {
        els.dailyEmpty.classList.remove('hidden');
        const ctx = els.dailyChart.getContext('2d');
        if (ctx) ctx.clearRect(0, 0, els.dailyChart.width, els.dailyChart.height);
@@ -1210,8 +1265,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
 
      els.dailyEmpty.classList.add('hidden');
 
-     const xLabels = records.map(r => formatMonthDay(r.dateEpoch));
-     let values = records.map(r => Number(r[cfg.key]) || 0);
+     const xLabels = shown.map(r => formatMonthDay(r.dateEpoch));
+     let values = shown.map(r => Number(r[cfg.key]) || 0);
      if (cfg.key === 'temp') values = values.map(tempVal);
 
      drawMultiSeriesChart(els.dailyChart, [
@@ -1241,6 +1296,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        renderDaily(state.lastDailyRecords);
      } else if (!isTrend) {
        updateDailyMetricButtons();
+       updateDailyRangeButtons();
      }
    }
 
@@ -1285,15 +1341,36 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    }
 
    async function readDaily() {
-     if (!state.dailyChar) return;
-     const val = await state.dailyChar.readValue();
-     const rawRecords = BLEProtocol.parseDailyPacket(val);
-     const records = sanitizeDailyRecords(rawRecords);
-     const dropped = rawRecords.length - records.length;
+     let from30 = [];
+     let from7 = [];
+
+     // 30 天（0xFFED，设备 Flash 日志）：一次读 185B 拿最多 30 天，跨掉电/换电池存活。
+     // 旧固件没有这个特征 → 静默退回下面的 7 天老协议
+     if (state.daily30Char) {
+       try {
+         const val = await state.daily30Char.readValue();
+         from30 = BLEProtocol.parseDaily30Packet(val);
+       } catch (err) {
+         log(`Daily30 read failed: ${err.message}`);
+       }
+     }
+
+     // 7 天（0xFFE3，RAM 环）：老固件唯一来源；新固件也读一次，
+     // 兜住"当天刚结算、Flash 还没追加"的边界，且 RAM 值更新更及时
+     if (state.dailyChar) {
+       const val = await state.dailyChar.readValue();
+       from7 = BLEProtocol.parseDailyPacket(val);
+     }
+
+     if (!from30.length && !from7.length && !state.daily30Char && !state.dailyChar) return;
+
+     const merged = mergeDailyRecords(from30, from7);
+     const records = sanitizeDailyRecords(merged);
+     const dropped = merged.length - records.length;
      if (dropped > 0) {
        log(`Daily read filtered ${dropped} invalid record(s)`);
      }
-     log(`Daily read: ${records.length} day(s)`);
+     log(`Daily read: ${records.length} day(s) (30d=${from30.length}, 7d=${from7.length})`);
      renderDaily(records);
    }
  
@@ -1918,6 +1995,7 @@ function clearConnectError() {
        state.characteristic = dataChar;
        state.dailyChar = dailyChar;
        state.hisBlkChar = hisBlkChar;
+       state.daily30Char = daily30Char;
        state.resetChar = resetChar;
        state.calibChar = calibChar;
        state.refreshChar = refreshChar;
@@ -3086,6 +3164,8 @@ The device will measure the current probe state first, then apply the calibratio
   els.dailyMetricTempBtn.addEventListener('click', () => setDailyMetric('temp'));
   els.dailyMetricHumBtn.addEventListener('click', () => setDailyMetric('hum'));
   els.dailyMetricBattBtn.addEventListener('click', () => setDailyMetric('batt'));
+  els.dailyRange7Btn?.addEventListener('click', () => setDailyRange(7));
+  els.dailyRange30Btn?.addEventListener('click', () => setDailyRange(30));
   // 单位切换：点击切换器任意位置（含按钮、灰底间隙、以及当前激活的单位）都翻转单位（°F ↔ °C）。
   // 用户期望“按到上面就切换”——即使当前在 °C，按到 °C 上也切回 °F，故统一 toggle，不做“切到该按钮单位”的区分。
   els.tempUnitToggle?.addEventListener('click', () => {

@@ -14,6 +14,15 @@ const BLEProtocol = (() => {
   const DAILY_MAX_RECORDS = 7;
   const DAILY_PACKET_SIZE = 1 + DAILY_RECORD_SIZE * DAILY_MAX_RECORDS;
 
+  // 0xFFED 30 天紧凑包（须与固件 soil_daily_log.h 的 SOIL_DAILY30_* 严格对齐）：
+  //   +0 count u8 | +1 base_day u32 | +5 起 30 × 6B
+  //   记录 6B：day_off u16（相对 base_day 的天数差）| temp s16(0.01℃) | hum u8(%) | batt u8(%)
+  // 185B < MTU 246，一次读完；湿度只有 1% 精度（趋势图够用），温度仍是 0.01℃
+  const DAILY30_HDR_SIZE = 5;
+  const DAILY30_RECORD_SIZE = 6;
+  const DAILY30_MAX_RECORDS = 30;
+  const DAILY30_PACKET_SIZE = DAILY30_HDR_SIZE + DAILY30_RECORD_SIZE * DAILY30_MAX_RECORDS;   // 185
+
   // 0xFFEC 分块读协议（须与固件 SOIL_HISTORY_BLK_MAX / soil_history_blk_pkt_t 严格对齐）：
   // 写 2 字节窗口 {offset u8, count u8}（offset 0 = 设备环内最旧一条）→ 读 183 字节块
   // {total u8, offset u8, count u8, 20 × 9B 记录}，未用槽全 0。
@@ -123,6 +132,33 @@ const BLEProtocol = (() => {
         temp: view.getInt16(off + 4, true) / 100,
         hum: view.getUint16(off + 6, true) / 100,
         battPercent: view.getUint8(off + 8),
+      });
+    }
+    return records;
+  }
+
+
+  /**
+   * 解析 0xFFED 30 天紧凑包（185 字节，定长）
+   * 输出与 0xFFE3 同构的记录数组（dateEpoch / temp / hum / battPercent），
+   * 便于上层直接合并——dateEpoch = (base_day + day_off) × 86400（本地 0 点）。
+   * @returns {Array<{dateEpoch:number,temp:number,hum:number,battPercent:number}>}
+   */
+  function parseDaily30Packet(view) {
+    if (!view || view.byteLength < DAILY30_PACKET_SIZE) {
+      throw new Error(`Invalid daily30 packet length: ${view?.byteLength} (expected ${DAILY30_PACKET_SIZE})`);
+    }
+    const count = Math.min(view.getUint8(0), DAILY30_MAX_RECORDS);
+    const baseDay = view.getUint32(1, true);
+    const records = [];
+    for (let i = 0; i < count; i++) {
+      const off = DAILY30_HDR_SIZE + i * DAILY30_RECORD_SIZE;
+      const dayOff = view.getUint16(off, true);
+      records.push({
+        dateEpoch: (baseDay + dayOff) * 86400,
+        temp: view.getInt16(off + 2, true) / 100,
+        hum: view.getUint8(off + 4),          // 已经是整数百分比
+        battPercent: view.getUint8(off + 5),
       });
     }
     return records;
@@ -261,6 +297,8 @@ const BLEProtocol = (() => {
       getChar(UUIDS.LATEST_CHAR),
       // 24h 历史分块读特征（0xFFEC，旧固件无此特征时为 null → 回退 0xFFE1 老协议）
       getChar(UUIDS.HISTORY_BLK_CHAR),
+      // 30 天日均紧凑包（0xFFED，旧固件无此特征时为 null → 只用 0xFFE3 的 7 天）
+      getChar(UUIDS.DAILY30_CHAR),
       // Telink OTA 升级特征（128bit UUID，仅 BLE_OTA_SERVER_ENABLE=1 的固件才有）
       (async () => {
         const otaService = await server.getPrimaryService(UUIDS.OTA_SERVICE);
@@ -274,9 +312,9 @@ const BLEProtocol = (() => {
       })(),
     ]).then(results => results.map(r => (r.status === 'fulfilled' ? r.value : null)));
 
-    const [dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, otaChar, fwVersion] = values;
+    const [dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, otaChar, fwVersion] = values;
 
-    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, otaChar, fwVersion };
+    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, otaChar, fwVersion };
   }
 
   /**
@@ -1032,6 +1070,7 @@ const BLEProtocol = (() => {
     DEVICE_NAME,
     parsePacket,
     parseDailyPacket,
+    parseDaily30Packet,
     hexDump,
     requestSoilDevice,
     finishConnect,
