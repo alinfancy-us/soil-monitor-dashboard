@@ -419,7 +419,12 @@ const BLEProtocol = (() => {
   // 固件 bin 头部 0x18 偏移存放固件长度（Telink bin 格式），发送字节数以此为准
   const OTA = {
     FW_SIZE_MAX: 124 * 1024,   // SDK 默认 ota_firmware_max_size（新固件存放在 flash 0x20000 起 124K 内）
-    BLOCK_BYTES_LIST: [80, 16], // B85 库最大单包 80 字节（整包 84B），老固件回退 16 字节
+    // 中文：包长梯子（pdu_length 必须是 16 的倍数，协议规范 16~240）。
+    //      80 = B85 闭源库 otaWrite 的物理缓冲上限（整包 84B = pdu 80 + adr_index 2 + crc16 2），
+    //      相比老式 16B 提速 5 倍，是"稳定极速点"；实测更大包长（160）会超出库缓冲被设备拒绝
+    //      甚至直接掉线（0x09/0x0F 或 connection terminate），故不纳入梯子。
+    //      老固件（未开逐包进度通知/不支持大包）仍回退 16 字节兼容。
+    BLOCK_BYTES_LIST: [80, 16],
     WINDOW: 32,                // 滑动窗口：允许的最大在途未确认包数（= 固件侧 32 包上报粒度；过大如 256 会压爆设备 RX 缓冲导致丢包序列错误）
     SCHEDULE_GRANULARITY: 32,    // 固件 blc_ota_setOtaScheduleIndication_by_pduNum(32) 的上报粒度，收尾等待按整批对齐
     PROGRESS_TIMEOUT_MS: 2000, // 等待设备进度通知的超时（需覆盖跨 4K 扇区擦除耗时）
@@ -428,6 +433,8 @@ const BLEProtocol = (() => {
     FREERUN_GAP_MS: 6,         // 定速发送的间隔（约 4 包/6ms ≈ 10KB/s，贴近一个连接事件能吃下的量，避免压垮设备断链）
     WRITE_RETRY_MAX: 6,        // GATT busy 等瞬时错误的重试次数
     WRITE_RETRY_GAP_MS: 16,    // 重试基础退避时间
+    IOS_SYNC_INTERVAL: 8,      // iOS(beacio) 步进排空栅栏间隔：每 8 包无响应写后强制 1 包带响应写，排空 beacio pending 队列（波动 0~8，永远摸不到 10 的限流红线）
+    IOS_MICRO_YIELD_MS: 10,    // iOS(beacio) 无响应写之间的微调度让步：仅让出执行权消化 IPC；栅栏带响应写自身已等 RTT，无需再让
   };
   const OTA_CMD = { START: 0xFF01, START_EXT: 0xFF03, END: 0xFF02, RESULT: 0xFF06 };
   const OTA_RESULT_NAMES = {
@@ -509,21 +516,31 @@ const BLEProtocol = (() => {
         if (!retryable || i === OTA.WRITE_RETRY_MAX - 1) {
           throw e;
         }
-        // 中文：频控类错误用更长退避（60ms 递增）给 beacio 令牌桶恢复时间；常规 busy 保持 16ms 档
-        await sleep(rateLimited ? 60 * (i + 1) : OTA.WRITE_RETRY_GAP_MS * (i + 1));
+        // 中文：rate limit → 直接休眠 150ms 起步、每轮 +50ms 的长安全窗口，彻底清空 beacio 扩展
+        //      内部堆积的 IPC/请求队列，而不是频繁自旋重试火上浇油；常规 busy 保持 16ms 短退避
+        if (rateLimited) {
+          // 中文：65ms 匀速节律（Strict Pacing）下正常永不触发；偶发撞线（iOS 系统调度抖动）
+          //      直接休眠 300ms——彻底越过 beacio 的 1 秒滑动统计窗口、重置配额，绝不做短周期
+          //      自旋重试（每次短重试都在刷新滑动窗口，只会连续报错）；距设备端 5s 接收超时余量充足
+          console.warn(`[OTA] rate limit hit (unexpected under strict pacing) — backoff 300ms to fully reset beacio sliding window (retry ${i + 1}/${OTA.WRITE_RETRY_MAX})`);
+          await sleep(300);
+        } else {
+          await sleep(OTA.WRITE_RETRY_GAP_MS * (i + 1));
+        }
       }
     }
     throw lastErr || new Error('GATT write failed');
   }
 
   /**
-   * 中文：OTA 单包固件字节数（pdu_length）选择：
-   *       泰凌微 TLSR8258（B85）闭源库最大支持 80 字节（整包 84B）。
-   *       84B 在 iOS（MTU 185 -> 载荷 182）、Android、PC 上均完美直通，无需平台区分。
+   * 中文：OTA 单包固件字节数（pdu_length）首选值 = 80：B85 芯片库的物理缓冲上限（整包 84B），
+   *       即"稳定极速点"——相比老式 16B 提速 5 倍。更大包长（如 160）实测超出库缓冲会被设备
+   *       拒绝（0x09/0x0F）甚至直接 terminate 连接，故收敛在 80。
+   *       84B 整包在 iOS（MTU 185 → 载荷 182）、Android、PC 上均单帧直通，无需平台区分。
    * @returns {number}
    */
   function pickBlockBytes() {
-    return 80;
+    return 80; // B85 安全满载上限
   }
 
   /**
@@ -552,18 +569,36 @@ const BLEProtocol = (() => {
       .filter((n) => n >= 16 && n <= 240 && n % 16 === 0)
       .sort((a, b) => b - a);
     const t0 = Date.now();
-    console.info(`[OTA] session start: fwSize=${(fwSize / 1024).toFixed(1)}KB, pdu plan=${candidates.join('→')}B`);
+    // 中文：MTU 前提说明：Web Bluetooth 标准不暴露 RequestMtu API；iOS(beacio/CoreBluetooth) 在建连
+    //      时由系统自动发起 ATT Exchange MTU，且 finishConnect 已完成 DIS 0x2A26 读版本（保证至少
+    //      一次 GATT 交互），到用户进入 Settings 点"Update now"时协商早已稳态。
+    //      包长对 MTU 的要求：DATA 整包 = blockBytes + 4（adr_index+crc16），再 +3 ATT 头 →
+    //      80B 需 effective MTU ≥ 87、16B 需 ≥ 23；若协商异常会在首包即报错降级。
+    console.info(`[OTA] session start: fwSize=${(fwSize / 1024).toFixed(1)}KB, pdu plan=${candidates.join('→')}B (needs effective ATT MTU >= ${candidates[0] + 7})`);
     let last = null;
     for (const blockBytes of candidates) {
       try {
         last = await otaTransfer(otaChar, bytes, fwSize, blockBytes, onProgress);
       } catch (err) {
-        // 中文：GATT 异常（如 Chrome 拒发超 MTU 的 244B 包）→ 记录后降包重试；
-        //       链路已断开则没有重试意义，直接抛出交由上层走断链恢复
+        // 中文：自愈式容错：beacio(iOS Safari 扩展)/WebKit 会偶发抛 "A network error occurred..."，
+        //       这类错误链路往往仍然连着（GATT 瞬时抖动），不应让整个 OTA 会话直接失败。
+        //       判定依据用 otaChar 对象的真实连接状态，而不是错误文案：
+        //       ① 链路真断（gatt.connected === false）→ 终态错误，原样抛出，交上层走
+        //          "连接丢失，请重连再试"的断链恢复流程；
+        //       ② 链路还连着但报 network error / disconnect 类错误 → 视为"当前包长设备无法承受"，
+        //          置 result=0x0F 让梯子自动降包重试（80 → 16），会话自愈不中断；
+        //       ③ 其他 GATT 异常（如 Chrome 拒发超 MTU 的包）→ 记录后按普通失败返回。
         const msg = String(err?.message || err || '');
+        const low = msg.toLowerCase();
         console.warn(`[OTA] pdu=${blockBytes} transfer threw: ${msg}`);
-        if (msg.toLowerCase().includes('disconnect')) throw err;
-        last = { ok: false, result: null, message: `transfer error: ${msg}` };
+        const linkDead = !otaChar.service?.device?.gatt?.connected;
+        if (linkDead) throw err;
+        if (low.includes('network error') || low.includes('disconnect') || low.includes('not connected')) {
+          console.warn('[OTA] transient network error but link still alive — degrade pdu and retry (self-healing)');
+          last = { ok: false, result: 0x0f, message: `device rejected/unstable on pdu=${blockBytes} (transient network error, link alive)` };
+        } else {
+          last = { ok: false, result: null, message: `transfer error: ${msg}` };
+        }
       }
       // 中文：需要降包重试的结果：
       //   0x09 = OTA_PDU_LEN_ERR（包长不是 16 的倍数或与声明不符）；
@@ -636,9 +671,40 @@ const BLEProtocol = (() => {
         progressWaiter = waiter;
       });
     };
+    // 中文：断链兜底门禁（dataConfirmed）——只有"全部数据包发出且设备进度确认跟上（排空通过）"
+    //      之后发生的 gattserverdisconnected 才允许兜底判定为重启成功(0x00)；否则（如设备不支持
+    //      当前包长直接 terminate 连接、传输中途掉线）断链必须按失败立即返回，走降级/重试流程，
+    //      绝不能误报成功而跳过 80→16 降级重试。
+    let dataConfirmed = false;
+
+    // 中文：等待设备结果通知（增强版）：除监听 CMD_OTA_RESULT(0xFF06) notify 外，同时监听
+    //      gattserverdisconnected——Telink 协议栈只在固件校验通过后才重启断链（失败时连接保持），
+    //      而 beacio(iOS Safari 扩展) 的原生 App → WKWebView IPC 桥可能在断链瞬间丢弃已收到、
+    //      尚未转发给网页的 result 通知。因此"数据全部确认后"的断链几乎必然是校验通过 → 自主重启。
+    //      误判保护：① dataConfirmed 门禁（见上）；② app.js OTA 结束后重读 DIS 0x2A26 版本对账。
     const waitResult = () => new Promise((resolve) => {
-      resultResolve = resolve;
-      setTimeout(() => { if (resultResolve) { resultResolve = null; resolve(null); } }, OTA.END_TIMEOUT_MS);
+      const device = otaChar.service?.device;
+      let settled = false;
+      let timer = null;
+      const settle = (code, viaDisconnect) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        device?.removeEventListener('gattserverdisconnected', onDisconnect);
+        resultResolve = null;
+        if (viaDisconnect) {
+          if (dataConfirmed) {
+            console.info('[OTA] all blocks confirmed + disconnected after END — inferred as reboot SUCCESS (result notify likely lost in beacio IPC)');
+          } else {
+            console.warn('[OTA] disconnected WITHOUT full data confirmation — treated as FAILURE (no success inference, fallback/retry path)');
+          }
+        }
+        resolve(code);
+      };
+      const onDisconnect = () => settle(dataConfirmed ? 0x00 : null, true);
+      timer = setTimeout(() => settle(null, false), OTA.END_TIMEOUT_MS);
+      device?.addEventListener('gattserverdisconnected', onDisconnect);
+      resultResolve = (code) => settle(code, false);
     });
 
     try {
@@ -654,31 +720,29 @@ const BLEProtocol = (() => {
       console.info(`[OTA] START_EXT sent ok: pdu=${blockBytes}B => ${blockBytes + 4}B/pkt on wire`);
 
       // 2. DATA：每包 4+curBlockBytes 字节 = adr_index(u16 LE，pdu 块序号) + 固件 + crc16(u16 LE，覆盖前 2+curBlockBytes 字节)。
-      //    前序包 curBlockBytes = blockBytes(80)；泰凌微 B85 库要求最后一包按 16 字节向上对齐（不足 16 字节补 0）。
+      //    前序包 curBlockBytes = blockBytes（80，老固件降级 16）；泰凌微 B85 库要求最后一包
+      //    按 16 字节向上对齐（不足 16 字节补 0）。
       //    滑动窗口：仅当在途未确认包数超过 OTA.WINDOW 时才等设备进度通知；
       //    若设备根本不上报进度（旧固件未开 blc_ota_setOtaScheduleIndication_by_pduNum），
       //    首次等待超时后降级为定速发送：没有背压时若全速盲发，设备来不及处理会直接监督超时断链。
       const totalBlocks = Math.ceil(fwSize / blockBytes);
-      console.info(`[OTA] totalBlocks=${totalBlocks}, window=${OTA.WINDOW}, free-run pace=${OTA.FREERUN_BURST}pkt/${OTA.FREERUN_GAP_MS}ms`);
+      console.info(`[OTA] totalBlocks=${totalBlocks}, window=${OTA.WINDOW}, pacing=${IS_IOS ? `iOS fence sync every ${OTA.IOS_SYNC_INTERVAL} pkts (1 with-response drain + ${OTA.IOS_MICRO_YIELD_MS}ms micro-yield)` : `freerun ${OTA.FREERUN_BURST}pkt/${OTA.FREERUN_GAP_MS}ms`}`);
       let flowControl = true;
       let lastPercent = -1;
+      let fenceLogged = false;   // 中文：iOS 栅栏同步首次执行的详细日志只打一次
       for (let i = 0; i < totalBlocks && resultValue === null; i++) {
-        if (flowControl) {
-          if (i - ackedPdu >= OTA.WINDOW) {
-            const ok = await waitProgress(i - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
-            if (!ok && ackedPdu === 0) {
-              flowControl = false;
-              console.warn('[OTA] no progress notify in first window (acked=0), degrade to freerun');
-            }
+        if (flowControl && i - ackedPdu >= OTA.WINDOW) {
+          const ok = await waitProgress(i - OTA.WINDOW + 1, OTA.PROGRESS_TIMEOUT_MS);
+          if (!ok && ackedPdu === 0) {
+            flowControl = false;
+            console.warn('[OTA] no progress notify in first window (acked=0), degrade to freerun');
           }
-        } else if (i % OTA.FREERUN_BURST === 0) {
-          await sleep(OTA.FREERUN_GAP_MS);
         }
 
         const off = i * blockBytes;
-        // 中文：泰凌微 B85 闭源库 otaWrite 规则：前序包数据长均为 blockBytes(80)，
+        // 中文：泰凌微 B85 闭源库 otaWrite 规则：前序包数据长均等于 START_EXT 声明的 blockBytes，
         //       最后一包数据长必须按 16 字节向上对齐（r4[10] = ceil(rem/16)*16），
-        //       若尾包仍补到 80 字节会导致 l2capLen 不匹配报 0x09 (OTA_PDU_LEN_ERR)。
+        //       若尾包仍补到 blockBytes 会导致 l2capLen 不匹配报 0x09 (OTA_PDU_LEN_ERR)。
         const isLast = (i === totalBlocks - 1);
         const rem = fwSize % blockBytes;
         const curBlockBytes = (isLast && rem !== 0) ? Math.ceil(rem / 16) * 16 : blockBytes;
@@ -692,13 +756,28 @@ const BLEProtocol = (() => {
         const crc = telinkCrc16(pkt, 2 + curBlockBytes);
         pkt[pkt.length - 2] = crc & 0xff;
         pkt[pkt.length - 1] = (crc >> 8) & 0xff;
-        /* 中文：同一特征写操作必须串行，避免 WebKit 报 GATT busy。
-         * 平台分流：iOS Safari(beacio) 用 writeValue(带响应)逐包等待固件 ATT Write Response——
-         * 任意时刻在途请求恒为 1，串行化天然规避 beacio 扩展的 IPC/BLE 突发频控
-         * ("Rate limit exceeded — too many BLE requests")，节奏自动对齐空口 RTT(15~30ms)；
-         * PC/Android 等其他平台保持 writeValueWithoutResponse 满速滑动窗口(窗口数不变=32)。 */
-        await writeWithRetry(otaChar, pkt, !IS_IOS);
+        /* 中文：全平台以 writeValueWithoutResponse 为主（无响应写，不占空口反向等待），
+         * 依靠固件每 32 包的进度通知(CMD_OTA_SCHEDULE_PDU_NUM)做滑动窗口流控（窗口=32）。
+         * iOS(beacio) 防频控改用"步进排空栅栏"（见下），彻底废除按包 sleep 的拖速节流。 */
+        // 中文：【核心破局点·步进排空栅栏 Fencing】每逢第 8 包(iOS)或最后一包，强制改用带响应
+        //      写(writeValue)——其 ATT Write Response 返回时，beacio 原生层与 JS 层积压的全部
+        //      pendingRequests 被强制排空归零；其余包全部无响应写快速推进。pending 队列因此
+        //      恒在 0~8 之间波动，数学上 100% 摸不到 10 的限流红线，无需任何按包 sleep。
+        //      非 iOS 平台恒为无响应写（行为不变）。
+        const forceSync = IS_IOS && ((i % OTA.IOS_SYNC_INTERVAL === 0) || isLast);
+        await writeWithRetry(otaChar, pkt, !forceSync);
+        if (forceSync && !fenceLogged) {
+          fenceLogged = true;
+          console.info(`[OTA] iOS fence sync working: every ${OTA.IOS_SYNC_INTERVAL} pkts 1 with-response write drains beacio pending queue (${OTA.IOS_MICRO_YIELD_MS}ms micro-yield between)`);
+        }
 
+        // 中文：仅无响应写之后给 10ms 微调度让步（让出执行权消化 IPC；栅栏带响应写自身已等
+        //      RTT 排空队列，无需再让）；非 iOS 平台仅 freerun（无进度背压）模式下保持定速发送。
+        if (IS_IOS && !forceSync) {
+          await sleep(OTA.IOS_MICRO_YIELD_MS);
+        } else if (!flowControl && i % OTA.FREERUN_BURST === 0) {
+          await sleep(OTA.FREERUN_GAP_MS);
+        }
 
         const sent = Math.min(off + curBlockBytes, fwSize);
         const percent = Math.round(sent * 100 / fwSize);
@@ -717,7 +796,19 @@ const BLEProtocol = (() => {
       // 因此只等到最后一个整批即可（否则等 totalBlocks 永远等不到，白白拖满超时）
       if (flowControl) {
         const lastBatch = Math.floor(totalBlocks / OTA.SCHEDULE_GRANULARITY) * OTA.SCHEDULE_GRANULARITY;
-        await waitProgress(lastBatch || totalBlocks, OTA.END_TIMEOUT_MS);
+        const drained = await waitProgress(lastBatch || totalBlocks, OTA.END_TIMEOUT_MS);
+        if (!drained) {
+          // 中文：排空失败 = 设备确认收到的包数没跟上（有包在 beacio 频控/空口中丢失）。
+          //      此时绝不能发 END——设备会回 0x05(OTA_DATA_INCOMPLETE) 进入失败态，
+          //      这正是此前"ack 604 却发 END(maxIdx 880) → 永远等不到 result"的直接原因。
+          //      结果置 result:null，performOta 不会按包长问题降包重试，直接失败返回交上层整轮重试。
+          console.warn(`[OTA] drain timeout: device acked ${ackedPdu}/${totalBlocks} blocks — abort before END`);
+          return { ok: false, result: null, message: `Incomplete delivery: device acked ${ackedPdu}/${totalBlocks} blocks before END` };
+        }
+        // 中文：排空通过 = 设备已确认到最后一个整批（末尾不足一批的包由设备在 END 对账时收口）。
+        //      置位门禁：此后发生的断链才允许被 waitResult 兜底判定为"重启成功"。
+        dataConfirmed = true;
+        console.info(`[OTA] drain ok: acked ${ackedPdu}/${totalBlocks} blocks (tail partial batch settles at END) — data fully confirmed`);
       }
       // 3. END：CMD_OTA_END(0xFF02) + adr_index_max + 其按位取反，共 6 字节
       const maxIdx = totalBlocks - 1;
