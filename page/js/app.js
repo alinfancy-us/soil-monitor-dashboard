@@ -67,6 +67,10 @@
   // 中文：趋势图最大记录数 = 24h（10 分钟采样 × 144）。设备环 SOIL_HISTORY_MAX=144，
   //      前端缓存合并后同样按此封顶——更旧的记录由 30 天日均视图（0xFFE3）承担
   const TREND_MAX_RECORDS = 144;
+  // 合并去重容差（秒）。设备每次连接都会用手机时间重新对时，对时基准刷新后同一采样
+  // 记录的换算时间戳可能漂移 1~2 秒；按 timestamp 精确去重会漏判，缓存里就会堆出
+  // 成对的"近似重复"并挤掉真正的历史。10 分钟采样间隔下 2 秒容差不会误合并相邻样本。
+  const TREND_MERGE_TOLERANCE_S = 2;
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
   const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
@@ -414,14 +418,27 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
  //      设备新读出的记录覆盖缓存旧值）。供 render() 把轮询/通知的 5 条增量
  //      并回 24h 大缓存用，避免每次小更新把缓存覆盖成只剩 5 条
  function mergeTrendRecords(base, extra) {
-   const map = new Map();
+   // 先按时间排序，再做"近邻合并"：时间差 ≤ TREND_MERGE_TOLERANCE_S 视为同一条，
+   // 保留后出现的那条（extra 里的设备实时值优先覆盖缓存）。不能按 timestamp 建 Map
+   // 精确去重——对时基准每次连接会刷新，同一采样可能漂移 1~2 秒，精确匹配会漏判。
+   const all = [];
    (Array.isArray(base) ? base : []).forEach((r) => {
-     if (Number.isFinite(r?.timestamp)) map.set(r.timestamp, r);
+     if (Number.isFinite(r?.timestamp)) all.push(r);
    });
    (Array.isArray(extra) ? extra : []).forEach((r) => {
-     if (Number.isFinite(r?.timestamp)) map.set(r.timestamp, r);
+     if (Number.isFinite(r?.timestamp)) all.push(r);
    });
-   return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
+   all.sort((a, b) => a.timestamp - b.timestamp);
+   const out = [];
+   for (const r of all) {
+     const last = out[out.length - 1];
+     if (last && Math.abs(r.timestamp - last.timestamp) <= TREND_MERGE_TOLERANCE_S) {
+       out[out.length - 1] = r;
+     } else {
+       out.push(r);
+     }
+   }
+   return out;
  }
 
   // 浏览器本地缓存：保存最近图表数据，确保下次打开无需连接也能直接查看。
