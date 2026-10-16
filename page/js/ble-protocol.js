@@ -14,6 +14,80 @@ const BLEProtocol = (() => {
   const DAILY_MAX_RECORDS = 7;
   const DAILY_PACKET_SIZE = 1 + DAILY_RECORD_SIZE * DAILY_MAX_RECORDS;
 
+  // 0xFFEC 分块读协议（须与固件 SOIL_HISTORY_BLK_MAX / soil_history_blk_pkt_t 严格对齐）：
+  // 写 2 字节窗口 {offset u8, count u8}（offset 0 = 设备环内最旧一条）→ 读 183 字节块
+  // {total u8, offset u8, count u8, 20 × 9B 记录}，未用槽全 0。
+  // 183B ≤ ATT 读响应上限（MTU 185 → 最大 184B）；144 条 = 8 次读。
+  const HIS_BLK_REQ_SIZE = 2;
+  const HIS_BLK_HDR_SIZE = 3;
+  const HIS_BLK_MAX_COUNT = 20;
+  const HIS_BLK_PACKET_SIZE = HIS_BLK_HDR_SIZE + HIS_BLK_MAX_COUNT * RECORD_SIZE;
+  // 拉取全量史的保险上限（144 条 / 20 = 8 次；放宽到 32 次防固件 total 异常时死循环）
+  const HIS_BLK_MAX_CHUNKS = 32;
+
+  /**
+   * 解析 0xFFEC 历史块响应包（183 字节）
+   * @returns {{total:number, offset:number, records:Array}}
+   */
+  function parseHistoryBlockPacket(view) {
+    if (!view || view.byteLength < HIS_BLK_PACKET_SIZE) {
+      throw new Error(`Invalid history block length: ${view?.byteLength} (expected ${HIS_BLK_PACKET_SIZE})`);
+    }
+    const total = view.getUint8(0);
+    const offset = view.getUint8(1);
+    const count = Math.min(view.getUint8(2), HIS_BLK_MAX_COUNT);
+    const records = [];
+    for (let i = 0; i < count; i++) {
+      const off = HIS_BLK_HDR_SIZE + i * RECORD_SIZE;
+      records.push({
+        timestamp: view.getUint32(off, true),
+        temp: view.getInt16(off + 4, true) / 100,
+        hum: view.getUint16(off + 6, true) / 100,
+        batt: view.getUint8(off + 8),
+      });
+    }
+    return { total, offset, records };
+  }
+
+  /**
+   * 读取 0xFFEC 的一个历史块：写 2 字节窗口 → 读 183 字节响应
+   * @param {BluetoothRemoteGATTCharacteristic} blkChar
+   * @param {number} offset - 逻辑序号（0 = 设备环内最旧一条）
+   * @param {number} count  - 请求条数（固件侧钳位到 20）
+   * @returns {Promise<{total:number, offset:number, records:Array}>}
+   */
+  async function readHistoryBlock(blkChar, offset, count) {
+    if (!blkChar) {
+      throw new Error('history block characteristic unavailable');
+    }
+    const req = Uint8Array.of(offset & 0xff, count & 0xff);
+    await blkChar.writeValue(req);           // 带响应写：确保窗口写入送达后 再发读请求
+    const val = await blkChar.readValue();
+    return parseHistoryBlockPacket(val);
+  }
+
+  /**
+   * 从 0xFFEC 拉取设备全部 24h 历史（old → new），按 total/空块自动收敛
+   * @param {BluetoothRemoteGATTCharacteristic} blkChar
+   * @param {(fetched:number, total:number) => void} [onProgress] - 每块回调（进度提示）
+   * @returns {Promise<Array>} 记录数组（按时间从旧到新）
+   */
+  async function fetchFullHistory(blkChar, onProgress) {
+    const all = [];
+    let offset = 0;
+    let total = Infinity;
+    for (let chunk = 0; chunk < HIS_BLK_MAX_CHUNKS; chunk++) {
+      const blk = await readHistoryBlock(blkChar, offset, HIS_BLK_MAX_COUNT);
+      total = blk.total;
+      all.push(...blk.records);
+      onProgress?.(all.length, total);
+      // 终止条件：设备无数据 / 块为空（offset ≥ total）/ 已取满
+      if (total === 0 || blk.records.length === 0 || all.length >= total) break;
+      offset += blk.records.length;
+    }
+    return all;
+  }
+
   function parsePacket(view) {
     if (view.byteLength < PACKET_SIZE) {
       throw new Error(`Invalid packet length: ${view.byteLength} (expected ${PACKET_SIZE})`);
@@ -185,6 +259,8 @@ const BLEProtocol = (() => {
       getChar(UUIDS.DEV_NAME_CHAR),
       // 最新一次测量记录（9 字节，布局同历史记录；旧固件无此特征时为 null）
       getChar(UUIDS.LATEST_CHAR),
+      // 24h 历史分块读特征（0xFFEC，旧固件无此特征时为 null → 回退 0xFFE1 老协议）
+      getChar(UUIDS.HISTORY_BLK_CHAR),
       // Telink OTA 升级特征（128bit UUID，仅 BLE_OTA_SERVER_ENABLE=1 的固件才有）
       (async () => {
         const otaService = await server.getPrimaryService(UUIDS.OTA_SERVICE);
@@ -198,9 +274,9 @@ const BLEProtocol = (() => {
       })(),
     ]).then(results => results.map(r => (r.status === 'fulfilled' ? r.value : null)));
 
-    const [dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, otaChar, fwVersion] = values;
+    const [dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, otaChar, fwVersion] = values;
 
-    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, otaChar, fwVersion };
+    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, otaChar, fwVersion };
   }
 
   /**
@@ -966,6 +1042,9 @@ const BLEProtocol = (() => {
     sendRefresh,
     parseLatestValue,
     readLatest,
+    parseHistoryBlockPacket,
+    readHistoryBlock,
+    fetchFullHistory,
     readTempOffset,
     sendTempOffset,
     readCalibStatus,

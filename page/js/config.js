@@ -7,7 +7,7 @@ const SoilPulseConfig = (() => {
 
   // 前端页面版本号：与 index.html 的 <script src="...?v=X"> 保持一致，每次功能变更递增。
   // 页面底部会显示该值，便于现场确认浏览器实际加载的是哪一版前端（排查缓存问题）
-  const PAGE_VERSION = '1.4.6';
+  const PAGE_VERSION = '1.5.1';
 
   // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致（固件改名须保留此前缀）。
   // 它参与 requestDevice 的过滤（与 services UUID 同一 filter 内 AND 匹配），
@@ -33,6 +33,10 @@ const SoilPulseConfig = (() => {
     // 最新一次测量记录读特征（9 字节，布局同历史记录），须与固件 app_att.h 的 SOIL_LATEST_CHAR_UUID 对齐；
     // v2 规格：refresh 一次性测量不写历史，Refresh 按钮的实时值从这里轮询读取（旧固件无此特征）
     LATEST_CHAR: '0000ffeb-0000-1000-8000-00805f9b34fb',
+    // 24h 历史分块读特征（0xFFEC）：先写 2 字节窗口 {offset, count}，再读出 183 字节块
+    // （3B 头 total/offset/count + 20×9B 记录），须与固件 app_att.h 的 SOIL_HIS_BLK_CHAR_UUID 对齐；
+    // 旧固件无此特征时为 null，前端回退 0xFFE1 的 5 条老协议
+    HISTORY_BLK_CHAR: '0000ffec-0000-1000-8000-00805f9b34fb',
     // Telink OTA 升级服务（128bit，须与固件 app_att.c 的 TELINK_OTA_UUID_SERVICE / TELINK_SPP_DATA_OTA
     // 的 GATT 小端字节序反转后一致），仅 BLE_OTA_SERVER_ENABLE=1 的固件才有
     OTA_SERVICE: '00010203-0405-0607-0809-0a0b0c0d1912',

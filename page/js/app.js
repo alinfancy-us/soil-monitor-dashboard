@@ -64,6 +64,9 @@
      FIRMWARE_MANIFEST_URL,
      TEMP_OFFSET,
 } = SoilPulseConfig;
+  // 中文：趋势图最大记录数 = 24h（10 分钟采样 × 144）。设备环 SOIL_HISTORY_MAX=144，
+  //      前端缓存合并后同样按此封顶——更旧的记录由 30 天日均视图（0xFFE3）承担
+  const TREND_MAX_RECORDS = 144;
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
   const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
@@ -382,30 +385,44 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       .slice(-7);
    }
 
-  function sanitizeTrendRecords(records) {
-    if (!Array.isArray(records)) return [];
-    return records
-      .map((r) => ({
-        timestamp: Number(r?.timestamp),
-        temp: Number(r?.temp),
-        hum: Number(r?.hum),
-        batt: Number(r?.batt),
-      }))
-      .filter((r) => Number.isFinite(r.timestamp)
-        && r.timestamp >= 0
-        && r.timestamp <= TREND_EPOCH_MAX_VALID
-        && Number.isFinite(r.temp)
-        && r.temp > -80
-        && r.temp < 120
-        && Number.isFinite(r.hum)
-        && r.hum >= 0
-        && r.hum <= 100
-        && Number.isFinite(r.batt)
-        && r.batt >= 0
-        && r.batt <= 100)
-      .sort((a, b) => a.timestamp - b.timestamp)
-      .slice(-5);
-  }
+ function sanitizeTrendRecords(records) {
+   if (!Array.isArray(records)) return [];
+   return records
+     .map((r) => ({
+       timestamp: Number(r?.timestamp),
+       temp: Number(r?.temp),
+       hum: Number(r?.hum),
+       batt: Number(r?.batt),
+     }))
+     .filter((r) => Number.isFinite(r.timestamp)
+       && r.timestamp > 0
+       && r.timestamp <= TREND_EPOCH_MAX_VALID
+       && Number.isFinite(r.temp)
+       && r.temp > -80
+       && r.temp < 120
+       && Number.isFinite(r.hum)
+       && r.hum >= 0
+       && r.hum <= 100
+       && Number.isFinite(r.batt)
+       && r.batt >= 0
+       && r.batt <= 100)
+     .sort((a, b) => a.timestamp - b.timestamp)
+     .slice(-TREND_MAX_RECORDS);
+ }
+
+ // 中文：按 timestamp 去重合并（base 在前、增量在后；同一时刻以增量为准——
+ //      设备新读出的记录覆盖缓存旧值）。供 render() 把轮询/通知的 5 条增量
+ //      并回 24h 大缓存用，避免每次小更新把缓存覆盖成只剩 5 条
+ function mergeTrendRecords(base, extra) {
+   const map = new Map();
+   (Array.isArray(base) ? base : []).forEach((r) => {
+     if (Number.isFinite(r?.timestamp)) map.set(r.timestamp, r);
+   });
+   (Array.isArray(extra) ? extra : []).forEach((r) => {
+     if (Number.isFinite(r?.timestamp)) map.set(r.timestamp, r);
+   });
+   return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
+ }
 
   // 浏览器本地缓存：保存最近图表数据，确保下次打开无需连接也能直接查看。
   function byteSize(text) {
@@ -825,7 +842,9 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     }
  
    function render(records) {
-    records = sanitizeTrendRecords(records);
+    // 中文：先并入既有 24h 数据再清洗封顶——轮询(0xFFE1 5 条)/通知带来的增量
+    //      直接覆盖 state.lastRecords 会把 24h 缓存缩水成 5 条
+    records = sanitizeTrendRecords(mergeTrendRecords(state.lastRecords, records));
     if (!records.length) return;
      state.lastRecords = records;
     saveTrendRecordsCache(records, state.activeDeviceId);
@@ -843,10 +862,12 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        syncBatteryPill();
      }
  
+     // 中文：表格只列最近 20 条（24h 全量数据看上方趋势图；144 行全渲染徒增 DOM）
      els.historyBody.innerHTML = records
+       .slice(-20)
        .map((r, i) => `
          <tr class="border-b border-slate-50 last:border-0">
-           <td class="py-2 pr-2 text-slate-400">${i + 1}</td>
+           <td class="py-2 pr-2 text-slate-400">${records.length - Math.min(records.length, 20) + i + 1}</td>
            <td class="py-2 pr-2">${formatTime(r.timestamp)}</td>
            <td class="py-2 pr-2 text-amber-500 font-medium">${fmtTemp(r.temp)}</td>
            <td class="py-2 pr-2 text-sky-500 font-medium">${r.hum.toFixed(1)}%</td>
@@ -1853,7 +1874,7 @@ function clearConnectError() {
        if (token !== connectToken) return;   // 期间用户又发起了新连接，丢弃本次
 
        // 阶段2：gatt.connect + 服务/特征发现，由 finishConnect 内部保证 5s 超时
-       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
+       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
          device,
          (records, hex) => {
            log(`Notification: ${hex}`);
@@ -1879,6 +1900,7 @@ function clearConnectError() {
        state.device = device;
        state.characteristic = dataChar;
        state.dailyChar = dailyChar;
+       state.hisBlkChar = hisBlkChar;
        state.resetChar = resetChar;
        state.calibChar = calibChar;
        state.refreshChar = refreshChar;
@@ -1956,14 +1978,38 @@ function clearConnectError() {
        // 中文：合并 0xFFEB latest——设备端 s_last_measure 含 Refresh 一次性测量值，
        //     若它比历史最后一条更新（如上次连接点过 Refresh），恢复卡片显示；
        //     旧固件无此特征时 readLatest 返回 null，静默跳过
-       try {
-         const devLatest = await BLEProtocol.readLatest(state.latestChar);
-         const histLatest = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
-         if (devLatest && (!histLatest || devLatest.timestamp > histLatest.timestamp)) {
-           applyLatestRecord(devLatest);
-           log(`Restored newer latest measurement from 0xFFEB (${formatTime(devLatest.timestamp)})`);
-         }
-       } catch (_) { /* latest 读取失败不影响连接流程 */ }
+      try {
+        const devLatest = await BLEProtocol.readLatest(state.latestChar);
+        const histLatest = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
+        if (devLatest && (!histLatest || devLatest.timestamp > histLatest.timestamp)) {
+          applyLatestRecord(devLatest);
+          log(`Restored newer latest measurement from 0xFFEB (${formatTime(devLatest.timestamp)})`);
+        }
+      } catch (_) { /* latest 读取失败不影响连接流程 */ }
+
+      // 中文：24h 历史分块拉取（0xFFEC，144 条 = 8 次读）：设备环是权威数据源，
+      //      与本地缓存按 timestamp 合并（设备值覆盖同刻缓存值）后整表重渲染。
+      //      旧固件无此特征（hisBlkChar 为 null）时跳过，维持 0xFFE1 5 条老协议表现
+      if (state.hisBlkChar) {
+        try {
+          /* 中文：8 次块读写整体占用全局 GATT 锁——否则 5s 轮询的探活读会插进来，
+           *      安卓上表现为 "GATT operation already in progress" 或块数据错位 */
+          const devRecords = await gattOp(
+            () => BLEProtocol.fetchFullHistory(state.hisBlkChar, (fetched, total) => {
+              log(`24h history: ${Math.min(fetched, total)}/${total} records`);
+            }),
+            'fetch 24h history (0xFFEC)',
+            15000   // 8 块 × (write+read)，Bluefy/iOS 单次往返可达 250ms，5s 不够
+          );
+          log(`24h history fetched: ${devRecords.length} record(s)`);
+          const merged = mergeTrendRecords(loadCachedTrendRecords(state.activeDeviceId), devRecords);
+          if (merged.length) {
+            render(merged);
+          }
+        } catch (err) {
+          log(`24h history fetch failed (fallback to 5-record protocol): ${err.message || err}`);
+        }
+      }
 
        // 读取设备已保存的校准状态（0xFFE9），在干/湿校准点展示"已校准"提示（只提示存在性，不展示具体数值）
        await refreshCalibHints();
@@ -2065,10 +2111,10 @@ function clearConnectError() {
 
   // 给任意 GATT Promise 包一层 5s 超时：底层链路半死时 readValue/writeValue 可能永远
   // 悬空（挂死会卡死 gattBusy 与按钮流程）。超时只是放弃等待，底层操作无法真正取消
-  function withGattTimeout(promise, label = 'GATT operation') {
+  function withGattTimeout(promise, label = 'GATT operation', timeoutMs = GATT_OP_TIMEOUT_MS) {
     let timer;
     const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out after ${GATT_OP_TIMEOUT_MS / 1000}s`)), GATT_OP_TIMEOUT_MS);
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs / 1000}s`)), timeoutMs);
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
@@ -2078,7 +2124,7 @@ function clearConnectError() {
   // 直接抛 "GATT operation already in progress" / status 133（iOS/PC 系统栈会内部排队，
   // 不会出现）。所有按钮写统一经 gattOp 串行化；轮询/Refresh 轮询走 gattBusy 跳拍（非阻塞）。
   // 锁内操作都有 withGattTimeout 兜底，保证锁必然释放（≤5s）。
-  async function gattOp(op, label = 'GATT operation') {
+  async function gattOp(op, label = 'GATT operation', timeoutMs = GATT_OP_TIMEOUT_MS) {
     let waited = false;
     while (state.gattBusy) {
       waited = true;
@@ -2087,7 +2133,7 @@ function clearConnectError() {
     if (waited) log(`gattOp [${label}]: waited for GATT lock`);
     state.gattBusy = true;
     try {
-      return await withGattTimeout(op(), label);
+      return await withGattTimeout(op(), label, timeoutMs);
     } finally {
       state.gattBusy = false;
     }
