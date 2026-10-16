@@ -1,3 +1,45 @@
+/* 【fix23】全局异常捕获：闪退/异常现场持久化到 localStorage，崩溃后下次加载可查。
+ * 覆盖 window error + unhandledrejection，记录 OTA 阶段（ble-protocol.js 写 window.__otaStage）。
+ * 环形保留最近 6 条防膨胀。必须置于一切业务代码之前注册。 */
+(function () {
+  'use strict';
+  if (window.__soilCrashLogInstalled) return;
+  window.__soilCrashLogInstalled = true;
+  var KEY = 'soilpulse_crash_log_v1';
+  function nowStage() {
+    try { return window.__otaStage || 'idle'; } catch (e) { return '?'; }
+  }
+  function ringPush(rec) {
+    try {
+      var arr;
+      try { arr = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { arr = []; }
+      if (!Array.isArray(arr)) arr = [];
+      arr.push(rec);
+      if (arr.length > 6) arr = arr.slice(-6);
+      localStorage.setItem(KEY, JSON.stringify(arr));
+    } catch (e) { /* localStorage 不可用（隐私模式等）时静默 */ }
+  }
+  window.addEventListener('error', function (ev) {
+    var rec = { t: Date.now(), type: 'error', msg: String(ev && ev.message || ''), src: ev && ev.filename || '', line: (ev && ev.lineno) || 0, stage: nowStage() };
+    ringPush(rec);
+    console.error('[CrashLog]', rec);
+  });
+  window.addEventListener('unhandledrejection', function (ev) {
+    var r = ev && ev.reason;
+    var msg = '';
+    try { msg = (r && (r.message || (r.stack && String(r.stack).split('\n')[0]) || r.toString())) || String(r); } catch (e) { msg = String(r); }
+    var rec = { t: Date.now(), type: 'unhandledrejection', msg: String(msg).slice(0, 500), stage: nowStage() };
+    ringPush(rec);
+    console.error('[CrashLog]', rec);
+  });
+  try {
+    var arr = JSON.parse(localStorage.getItem(KEY) || '[]');
+    if (Array.isArray(arr) && arr.length) {
+      console.warn('[CrashLog] 上次会话闪退/异常记录 ' + arr.length + ' 条：', arr);
+    }
+  } catch (e) { /* ignore */ }
+})();
+
 /**
  * SoilPulse Dashboard Application UI Manager
  */
