@@ -435,6 +435,8 @@ const BLEProtocol = (() => {
     STATUS_SUCCESS: 0x02,      //   END 校验通过 + boot mark 已切，待复位（=成功终态）
     STATUS_ABORTED: 0x03,      //   会话失败（原因码在 my_OtaData[5]，即 SOIL_OTA_RES）
     STATUS_PREPARING: 0x04,    //   目标区预擦中（官方预擦策略：进 OTA 整区预擦 ~3s，web 轮询等待就绪再发 DATA）
+    STATUS_VERIFYING: 0x05,    //   END 已受理：固件在主循环分块回读校验整包 CRC32（约 1~2s，逐块喂狗+让出射频不断链），
+                               //   web 读到 0x05 继续轮询等待 SUCCESS/ABORTED 终态，勿重发 END
     PER_PACKET_GAP_MS: 10,      // 每包写后统一等待。历史实测（2026-10-13，用户设备）：置 0 不加间隔时
                                //   Android 的 writeValue 不等 ATT 响应（再次实证）→ 连发积压，固件在
                                //   4K 扇区擦除窗口（~20-100ms）内收包偶发 CRC 错包（实测 idx=94 坏包
@@ -455,6 +457,15 @@ const BLEProtocol = (() => {
                                //   不再按固定时长判断"够不够"，而是再停一轮重读一次：追上=在途滞后
                                //   （Android writeValue 不等响应，web 已发≠固件已收），不重传；
                                //   仍落后=真缺包才重传。
+    ANDROID_PACING_GAP_MS: 20, // Android 专属单包节流：Android Chrome 把带响应写当无响应写（瞬间
+                               //   resolve），for 循环跑太快会把原生蓝牙队列塞爆 → 丢包率飙升 →
+                               //   频繁触发 Go-Back-N 回退重传反而拖慢整体。强制每包等待 20ms
+                               //   （约一个 15ms 连接事件 + 余量），人为制造"带响应"的延迟错觉。
+                               //   iOS/Chrome 的 writeValue 真等 ATT 响应（响应即背压），维持 10ms。
+    GBN_REWIND_SETTLE_MS: 50,  // Go-Back-N 回退的【最低】排空等待：实际等待 = max(本值,
+                               //   在途包数 × ANDROID_PACING_GAP_MS)，按 Android 底层队列
+                               //   压包量动态拉长，确保旧队列彻底死寂后再灌入重传包。
+                               //   真机高频丢包测试若仍见回退后报错序，可直接上调本值至 100~150ms
   };
   const OTA_RESULT_NAMES = {
     0x00: 'success',
@@ -497,38 +508,6 @@ const BLEProtocol = (() => {
    * 中文：Bluefy / iOS WebKit 常见 "GATT operation already in progress"，
    *       对同一特征的写入必须串行并做短退避重试，避免 OTA 中途直接失败。
    */
-  /**
-   * 无响应写 + 重试（DATA 整包用）：全平台 fire-and-forget（不等 ATT 响应），
-   * 每包后由 PER_PACKET_GAP_MS 固定间隔提供背压（固件 flash 消化时间），丢包由 readAck
-   * 窗口确认兜底重传。重试时包可能已发出（fire-and-forget 无法确知），固件对 idx<next
-   * 的 dup 包忽略，无害。
-   */
-  async function writeNoResponseWithRetry(otaChar, data) {
-    let lastErr = null;
-    for (let i = 0; i < OTA.WRITE_RETRY_MAX; i++) {
-      try {
-        await otaChar.writeValueWithoutResponse(data);
-        return;
-      } catch (e) {
-        lastErr = e;
-        const msg = String(e?.message || e || '').toLowerCase();
-        console.warn(`[OTA][write-nr] #${i} attempt ${i + 1}/${OTA.WRITE_RETRY_MAX} failed t=${Date.now()}: ${e?.message || e}`);
-        // 链路已断开是终态错误，不可重试，直接抛出让上层走断链恢复流程
-        // iOS 断连后旧特征报 "no longer valid"（UUID 失效提示），同样为终态，一并命中
-        const disconnected = msg.includes('disconnect') || msg.includes('gatt server is disconnected') || msg.includes('no longer valid');
-        // 限流类错误（Chrome/系统对无响应写有速率限制）需用更长退避等待限流恢复
-        const rateLimited = msg.includes('rate limit') || msg.includes('too many') || msg.includes('quota');
-        const retryable = !disconnected && (rateLimited || msg.includes('already in progress') || msg.includes('busy') || msg.includes('operation failed'));
-        if (!retryable || i === OTA.WRITE_RETRY_MAX - 1) {
-          throw e;
-        }
-        const gap = rateLimited ? OTA.RATE_LIMIT_RETRY_GAP_MS : OTA.WRITE_RETRY_GAP_MS;
-        await sleep(gap * (i + 1));
-      }
-    }
-    throw lastErr || new Error('GATT write failed');
-  }
-
   /**
    * 带响应写 + 重试（全部包用：START_EXT / DATA / END）：固件处理完回 ATT 响应，
    * 逐包确认送达——END 尤其不能丢（Bluefy 上无响应写可能丢 END、固件不复位、web 端超时）。
@@ -759,6 +738,11 @@ const BLEProtocol = (() => {
       let lastPercent = -1;
       let stallResends = 0;
       let lastRealNext = 0;   // 上一个窗口固件确认进度，用于判断"固件是否在推进"（连续无推进才判停滞）
+      let ackedPdu = 0;       // 设备真实接收进度（readAck/notify 确认）——Go-Back-N 回退基准：
+                              //   发送指针 i 与 ackedPdu 的脱节量 >= WINDOW 即触发回退检查
+      // Android 专属防堆积节流开关：Android Chrome 的 writeValue 不等 ATT 响应（瞬间 resolve），
+      // 循环过快会塞爆原生蓝牙队列 → 丢包率飙升 → 频繁触发 Go-Back-N 回退拖慢整体（见 OTA 常量注释）
+      const isAndroid = /Android/i.test(navigator.userAgent);
       const sendPkt = async (idx, isResend) => {
         const off = idx * DATA_BYTES;
         const pkt = new Uint8Array(2 + OTA.BLOCK_BYTES + 2);   // 整包 = idx(2)+data(176)+crc(2)
@@ -775,10 +759,11 @@ const BLEProtocol = (() => {
         // 变砖只能线刷。回退到带响应写降低失败概率（固件侧已屏蔽 mark 半写污染作根治）；
         // readAck 窗口确认与落后重传仍保留，作为停滞兜底
         await writeWithRetry(otaChar, pkt);
-        // 每包后统一等待（PER_PACKET_GAP_MS=10）：Android 的 writeValue 不等 ATT 响应，
-        // 固定间隔是它唯一背压——预擦后无扇区擦除窗口，10ms 覆盖 Android resolve 滞后
-        // 防 GATT 重叠；iOS/Chrome 的 writeValue 等响应，10ms 只是附加保险
-        await sleep(OTA.PER_PACKET_GAP_MS);
+        // 单包节流（防 Android 底层队列堆积）：Android 的 writeValue 不等 ATT 响应、瞬间
+        // resolve，Promise 返回≠包已上链路——固定间隔是它在物理层的唯一背压。Android 强制
+        // 20ms（约一个连接事件，见 OTA.ANDROID_PACING_GAP_MS）；iOS/Chrome 真等 ATT 响应
+        // （响应本身即背压），维持 PER_PACKET_GAP_MS=10 附加保险
+        await sleep(isAndroid ? OTA.ANDROID_PACING_GAP_MS : OTA.PER_PACKET_GAP_MS);
         throwIfOtaAborted();   // 断连中止：残留流程立即止损，不等 write 失败
 
         const sent = Math.min(off + DATA_BYTES, fwSize);
@@ -791,10 +776,11 @@ const BLEProtocol = (() => {
 
       for (let i = 0; i < totalBlocks; i++) {
         await sendPkt(i, false);
-        // 窗口边界确认：每发满 32 包停一次，readAck 拿固件真实进度，缺包则重传。
+        // 窗口边界确认：每发满 WINDOW(8) 包停一次，readAck 拿固件真实进度；
+        // 确认真的缺包则 Go-Back-N 回退发送指针重发（见下方 [GBN] 分支）。
         // 首个窗口跳过确认：Android 链路刚建立、写队列积压（writeValue 不等 ATT 响应，web 已发≠
         // 固件已收，实测首窗口 read 常读到 0——整个窗口还在 BLE 队列里）。等第二窗口边界再确认
-        // （此时距 START 已 ~2.6s、队列已清、链路稳定），首窗口真丢的包由 [acked, 64) 重传兜底。
+        // （此时距 START 已 ~2.6s、队列已清、链路稳定），首窗口真丢的包由后续窗口确认/收尾补发兜底。
         if ((i + 1) % OTA.WINDOW === 0 && i + 1 < totalBlocks && i + 1 >= OTA.WINDOW * 2) {
           await sleep(OTA.CONFIRM_DIGEST_MS);   // 让固件消化在途窗口（flash 页写 + 偶发擦除）并收到进度 notify
           // notify 主通道：固件进度通知（每 8 包回报）已到且 ≥ 已发数 → 免 readAck 直接继续。
@@ -802,6 +788,7 @@ const BLEProtocol = (() => {
           // notify 丢失/滞后/不可用（Android）→ 走下方 readAck 兜底，行为与纯 readAck 一致。
           if (latestOtaProgress >= i + 1) {
             stallResends = 0;             // 固件在推进（notify 为证）
+            ackedPdu = Math.max(ackedPdu, latestOtaProgress);   // 同步 Go-Back-N 回退基准
             lastRealNext = latestOtaProgress;
             console.debug(`[OTA] window #${(i + 1) / OTA.WINDOW}: notify acked=${latestOtaProgress}, skip readAck`);
             continue;
@@ -823,8 +810,18 @@ const BLEProtocol = (() => {
             }
           }
           if (confirmed < i + 1) {
-            console.warn(`[OTA][RTX] window: device acked=${confirmed} (sent=${i + 1}), resending [${confirmed}, ${i + 1}) ${i + 1 - confirmed} pkt(s)`);
-            for (let j = confirmed; j <= i; j++) await sendPkt(j, true);
+            // 【Go-Back-N 回退（Android 丢包自愈）】设备确认进度落后于发送指针 = 空口丢包，
+            // 或固件主动丢弃了错序包。不再原地正向补发 [confirmed, i+1)——重发包会与仍排在
+            // Android 底层队列里的旧包交叠、越补越乱——而是把主循环发送指针整体回退到设备
+            // 期望的包序号，由主循环按正常节奏（含 Android 20ms 节流）重发。固件对 idx<next
+            // 的重复包忽略、idx==next 落盘，天然自愈。回退期间进度条会短暂回退，属预期表现。
+            console.warn(`[OTA][GBN] packet gap detected! device acked=${confirmed}, web at ${i + 1}, rewinding to ${confirmed}`);
+            // 【熔断计数器不变量，重构时不得破坏】stallResends 只在"连续 >=3 个窗口固件确认进度
+            // 零推进"时累积；任何一次有效推进（confirmed > lastRealNext，包括互不相干的新丢包
+            // 回退点）都必须清零——否则 70KB 长升级中发生 4 次独立丢包就会被误判"无限死循环"
+            // 冤枉中止 OTA。当前 if/else 两分支即该不变量的实现，合并或移除清零分支即为回归。
+            // 在途包数必须在 i 回退赋值之前计算（回退后 i 不再代表发送前沿）。
+            const inflight = (i + 1) - confirmed;   // 可能仍压在 Android 底层队列里的在途包数
             if (confirmed <= lastRealNext) {
               stallResends++;
               if (stallResends >= OTA.MAX_STALL_RESENDS) {
@@ -833,9 +830,18 @@ const BLEProtocol = (() => {
             } else {
               stallResends = 0;   // 固件在推进（只是 Android 继续丢），重置停滞计数
             }
-          } else {
-            stallResends = 0;     // 在途滞后最终追上，无缺包，直接继续
+            lastRealNext = confirmed;
+            ackedPdu = confirmed;
+            i = confirmed - 1;    // 回退发送指针：for 的 i++ 后恰好从设备期望的包序号重新发送
+            // 动态排空等待：Android 底层可能还压着 [confirmed, i] 的在途包（写不等 ATT 响应、
+            // ~20ms/包排空）。按在途包数换算等待（如 5 包 ≈ 100ms），确保旧队列彻底死寂后再灌入
+            // 重传包——否则重发包被追加到队列尾，旧包空跑一遍浪费空口带宽（固件 ignore，安全但不经济）。
+            await sleep(Math.max(OTA.GBN_REWIND_SETTLE_MS, inflight * OTA.ANDROID_PACING_GAP_MS));
+            continue;
           }
+          // 无缺包（或在途滞后已追上）：设备已确认收齐当前窗口，同步回退基准
+          stallResends = 0;
+          ackedPdu = Math.max(ackedPdu, confirmed);
           lastRealNext = confirmed;
         }
       }
@@ -882,6 +888,8 @@ const BLEProtocol = (() => {
           endState = 'success';                        // 固件明确确认：校验通过 + boot mark 已切
         } else if (ack.status === OTA.STATUS_ABORTED) {
           endState = { fail: ack.result };             // 固件失败终态（SOIL_OTA_RES 原因码）
+        } else if (ack.status === OTA.STATUS_VERIFYING) {
+          // END 已受理、固件主循环分块回读校验中（~1-2s）：继续轮询等终态，不重发 END
         } else if (ack.status === OTA.STATUS_ACTIVE && ack.progress >= totalBlocks) {
           // END 未生效：固件仍 active 且收满 → 重发 END（≤3 次；重复 END 固件 s_ota_active=0 忽略，无害）
           if (endResends < 3) {
