@@ -423,9 +423,11 @@ const BLEProtocol = (() => {
     //   Chrome/Safari/iOS 均协商到 185，全平台通用。
     //   提速效果：包数 874(80B) → 393(176B)，beacio 按包限流下总时长约 -55%。
     BLOCK_BYTES: 176,
-    WINDOW: 32,                // readAck 窗口确认粒度：每发满 32 包做一次 GATT Read 确认（request-response，
-                               //   全平台可靠），缺包重传缺失段。32 包 = 5632B ≈ 8% 进度，一次 read ~50ms 往返，
-                               //   401 包共 13 次 ≈ 650ms 总开销，可接受。
+    WINDOW: 8,                 // readAck 窗口确认粒度：每发满 8 包做一次确认，与固件进度 notify 频率
+                               //   （SOIL_OTA_SCHEDULE_EVERY=8）完全对齐——Android 上 notify 及时到达即免
+                               //   readAck（8 包边界恰好是固件发进度 notify 的触发点），丢包 8 包内被发现、
+                               //   缺失段更短、重传更及时。iOS notify 恒滞后 → 走 readAck 兜底（read 频率
+                               //   为 32 包窗口的 4 倍，总开销 ~1s，可接受）。
     MAX_STALL_RESENDS: 3,      // readAck 显示固件进度连续无推进（重传后仍卡住）的轮数上限，超限中止
     END_TIMEOUT_MS: 10000,     // END 后等待固件终态（readAck 轮询）的总超时
     STATUS_IDLE: 0x00,         // readAck 会话状态（固件 my_OtaData[4]，GATT Read 全平台可靠）：
@@ -447,10 +449,12 @@ const BLEProtocol = (() => {
     WRITE_RETRY_MAX: 10,       // GATT busy / 限流等瞬时错误的重试次数（含限流重试，故上调）
     WRITE_RETRY_GAP_MS: 16,    // 重试基础退避时间
     RATE_LIMIT_RETRY_GAP_MS: 200, // 限流类错误（rate limit / too many）的专用退避：限流恢复需要时间，不能用 16ms 级退避
-    CONFIRM_DIGEST_MS: 80,     // 窗口确认前的小停 / 落后确认的重读间隔：给固件消化在途窗口
-                               // （flash 页写 + 偶发 4K 扇区擦除）留时间。窗口 read 落后时不再按固定
-                               // 时长判断"够不够"，而是再停一轮重读一次：追上=在途滞后（Android
-                               // writeValue 不等响应，web 已发≠固件已收），不重传；仍落后=真缺包才重传。
+    CONFIRM_DIGEST_MS: 30,     // 窗口确认前的小停 / 落后确认的重读间隔：8 包窗口固件消化快（8 包写完
+                               //   ~80ms，固件随即置 notify 标记、主循环 flush），30ms 足够等 notify
+                               //   派发到 Android；iOS notify 滞后则由 readAck 兜底。窗口 read 落后时
+                               //   不再按固定时长判断"够不够"，而是再停一轮重读一次：追上=在途滞后
+                               //   （Android writeValue 不等响应，web 已发≠固件已收），不重传；
+                               //   仍落后=真缺包才重传。
   };
   const OTA_RESULT_NAMES = {
     0x00: 'success',
