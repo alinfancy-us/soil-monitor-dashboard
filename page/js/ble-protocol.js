@@ -510,7 +510,8 @@ const BLEProtocol = (() => {
         const msg = String(e?.message || e || '').toLowerCase();
         console.warn(`[OTA][write-nr] #${i} attempt ${i + 1}/${OTA.WRITE_RETRY_MAX} failed t=${Date.now()}: ${e?.message || e}`);
         // 链路已断开是终态错误，不可重试，直接抛出让上层走断链恢复流程
-        const disconnected = msg.includes('disconnect') || msg.includes('gatt server is disconnected');
+        // iOS 断连后旧特征报 "no longer valid"（UUID 失效提示），同样为终态，一并命中
+        const disconnected = msg.includes('disconnect') || msg.includes('gatt server is disconnected') || msg.includes('no longer valid');
         // 限流类错误（Chrome/系统对无响应写有速率限制）需用更长退避等待限流恢复
         const rateLimited = msg.includes('rate limit') || msg.includes('too many') || msg.includes('quota');
         const retryable = !disconnected && (rateLimited || msg.includes('already in progress') || msg.includes('busy') || msg.includes('operation failed'));
@@ -542,7 +543,8 @@ const BLEProtocol = (() => {
         const msg = String(e?.message || e || '').toLowerCase();
         console.warn(`[OTA][write] #${i} attempt ${i + 1}/${OTA.WRITE_RETRY_MAX} failed t=${Date.now()}: ${e?.message || e}`);
         // 中文：链路已断开是终态错误，不可重试，直接抛出让上层走断链恢复流程
-        const disconnected = msg.includes('disconnect') || msg.includes('gatt server is disconnected');
+        // iOS 断连后旧特征报 "no longer valid"（UUID 失效提示），同样为终态，一并命中
+        const disconnected = msg.includes('disconnect') || msg.includes('gatt server is disconnected') || msg.includes('no longer valid');
         // 限流类错误（beacio/系统对过密 BLE 请求的拒绝）同样可重试，但需用更长退避等待限流恢复
         const rateLimited = msg.includes('rate limit') || msg.includes('too many') || msg.includes('quota');
         const retryable = !disconnected && (rateLimited || msg.includes('already in progress') || msg.includes('busy') || msg.includes('operation failed'));
@@ -568,6 +570,8 @@ const BLEProtocol = (() => {
    * @param {(info:{phase:string,percent:number,sent:number,total:number}) => void} onProgress
    * @returns {Promise<{ok:boolean, result:number|null, message:string}>}
    */
+  // OTA 特征 notify 订阅标记（keep-alive 通道）：模块级，跨 performOta 重试保持已订阅状态
+  let otaNotifySubscribed = false;
   async function performOta(otaChar, firmware, onProgress) {
     if (!otaChar) throw new Error('OTA characteristic unavailable');
 
@@ -581,9 +585,54 @@ const BLEProtocol = (() => {
       throw new Error(`Invalid firmware size: ${fwSize} (max ${OTA.FW_SIZE_MAX})`);
     }
 
-    // 不再订阅 OTA 特征通知：进度流控与 END 终态判定全部走 readAck（GATT Read，
-    // request-response，全平台语义一致可靠）——避免 startNotifications 的平台差异
-    // （Bluefy 挂起 / Android 差异）成为依赖点。固件端通知照常推送，无人订阅无害。
+    // 订阅 OTA 特征通知（keep-alive + ready 主通道，幂等）：预擦期间固件每擦一扇区发进度
+    // 通知（刷新 iOS 链路活动防断连），预擦完成发带 ACTIVE 的 ready 通知（web 收到即发 DATA）。
+    // 订阅失败仅降级：keep-alive 失效 + ready 走超时 readAck 兜底，不阻塞 OTA——避免
+    // startNotifications 的平台差异（Bluefy 挂起 / Android 差异）成为依赖点。
+    let otaReadyResolve = null;              // 当前等待轮的 ready resolve（每次 START 前重置）
+    let otaWaitingReady = false;             // 是否处于"等预擦就绪"阶段（防 DATA/END 通知误触发）
+    let latestOtaProgress = 0;               // 固件最近回报的已收包数（DATA 窗口确认 notify 主通道）
+    let otaNotifyCount = 0;                  // 诊断：OTA 特征 notify 累计到达数（0 = 通道未通）
+
+    // 断连中止：iOS 预擦断连/链路异常后，旧特征上的 write 必失败（no longer valid），
+    // 与其让残留流程（ready 超时→readAck 重试→DATA 写旧特征）浪费整个重连周期，
+    // 不如监听 gattserverdisconnected 立即中止本次会话，由 app.js 干净重连后重新
+    // performOta（新连接新特征，无条件重订阅）。
+    let otaSessionAborted = false;
+    const abortOtaSession = () => { otaSessionAborted = true; };
+    const otaDevice = otaChar.service.device;
+    otaDevice.addEventListener('gattserverdisconnected', abortOtaSession);
+    const throwIfOtaAborted = () => {
+      if (otaSessionAborted) throw new Error('OTA aborted: device disconnected during session');
+    };
+    const onOtaNotify = (event) => {
+      otaNotifyCount++;
+      if (otaNotifyCount === 1) console.debug('[OTA] first notify received, channel OK');   // 诊断：通道是否通
+      try {
+        const raw = new Uint8Array(event.target.value.buffer, event.target.value.byteOffset, event.target.value.byteLength);
+        if (raw.byteLength < 4 || raw[0] !== 0x08 || raw[1] !== 0xFF) return;   // 仅处理进度/就绪格式
+        const progress = raw[2] | (raw[3] << 8);
+        if (progress > latestOtaProgress) latestOtaProgress = progress;         // 单调更新（预擦/就绪包 progress=0 无害）
+        if (otaWaitingReady && raw.byteLength >= 6 && raw[4] === OTA.STATUS_ACTIVE) {
+          otaWaitingReady = false;
+          otaReadyResolve?.(true);           // 预擦完成 → web 立即开始 DATA
+        }
+      } catch (e) { /* 包格式异常忽略，兜底路径接管 */ }
+    };
+    // 每次 performOta 无条件订阅（startNotifications 幂等）：CCCD 使能随连接生命周期重置，
+    // 断连重连后是新连接（CCCD 未使能），必须重新订阅——模块级标记只做诊断，不能跳过重订阅。
+    if (otaChar) {
+      try {
+        await otaChar.startNotifications();
+        otaChar.addEventListener('characteristicvaluechanged', onOtaNotify);
+        otaNotifySubscribed = true;
+        console.log('[OTA] notify subscribed OK (keep-alive + ready channel enabled)');
+      } catch (err) {
+        console.warn(`[OTA] notify subscribe failed (keep-alive/ready disabled): ${err?.message || err}`);
+      }
+    } else {
+      console.warn('[OTA] notify subscribe skipped (no OTA char)');
+    }
 
     // 超时兜底探测：固件是否还响应 read。固件 watchdog 复位是断电重启（不发 BLE disconnect 包，
     // Android 链路监控可能 20s+ 才检测到断链）——readValue 连续无响应（3s 超时/异常 × 2）=
@@ -645,44 +694,54 @@ const BLEProtocol = (() => {
       // 明确 idle(0x00) 才重发 START（≤2 次）；active(0x01) 即继续。DATA 尚未开始，
       // 重发 START 重置会话无代价。读不可用/异常终态不折腾，由窗口确认兜底。
       await sleep(250);
-      // 预擦窗口盲等（Android GATT 栈锁死根因修复）：固件收到 START 后整区预擦 ~3.1s，
+      // 预擦完成等待（notify 为主 + 超时 readAck 兜底）：固件收到 START 后整区预擦 ~3.1s，
       // flash 驱动全程关中断（40~80ms/扇区）。此窗口内发起 GATT Read 在 Android 上可能挂起：
-      // promise 3s 超时只放弃等待、不取消底层 ATT 事务，未完成的读会锁死整个特征，之后所有
-      // writeValue/readValue 全部报 "already in progress"（实测连续 1.7s+ 全灭、仅断链能释放）。
-      // 故 START 后盲等覆盖预擦窗口（栈完全空闲），窗口外再发起首次确认读。
-      const PRE_ERASE_BLIND_MS = 4000;              // 覆盖预擦 3.1s + 0.9s 余量（用户拍板：加 0.5s 保险）
-      console.debug(`[OTA] blind-wait ${(PRE_ERASE_BLIND_MS / 1000).toFixed(1)}s for target pre-erase (no GATT I/O)...`);
-      await sleep(PRE_ERASE_BLIND_MS);
-      // START 激活确认：idle → 重发 START（≤2 次）；preparing(0x04) = 目标区预擦中（官方预擦策略，
-      // ~3.1s）→ 轮询等待就绪；active → 继续发 DATA。预擦完成前发 DATA 会被固件丢弃（不推进序号），
-      // 必须等 ACTIVE 再发。
-      let prepDeadline = Date.now() + 8000;         // 每次 START 发出后重置：预擦 124K ≈ 3.1s，8s 宽裕
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const ack = await readAck();
-        if (ack !== null && ack.status === OTA.STATUS_ACTIVE) break;   // 明确已激活 → 发 DATA
-        if (ack === null) {                                            // 读失败/超时：预擦窗口已被盲等覆盖，多为栈瞬时问题
-          console.warn('[OTA] START confirm read failed, retry after 1s');
-          await sleep(1000);
-          continue;                                                    // 重读；连续失败 2 次后固件必已就绪，安全进入 DATA
-        }
-        if (ack.status === OTA.STATUS_IDLE) {                          // 明确 idle：START 未达 → 重发
-          console.warn(`[OTA] START not confirmed (idle), resend #${attempt + 1}`);
-          await writeWithRetry(otaChar, startExt);
-          await sleep(250);
-          prepDeadline = Date.now() + 8000;                            // 重发后固件重新预擦：重置就绪 deadline
-          await sleep(PRE_ERASE_BLIND_MS);                             // 重发后同样盲等预擦窗口，避免再撞关中断
-        } else if (ack.status === OTA.STATUS_PREPARING) {              // 预擦中 → 轮询等就绪
-          onProgress?.({ phase: 'preparing', percent: 0, sent: 0, total: fwSize });   // 兜底幂等：保持 preparing 文案
-          console.debug('[OTA] firmware erasing target, waiting ready...');
-          while (Date.now() < prepDeadline) {
-            await sleep(OTA.CONFIRM_DIGEST_MS);
-            const again = await readAck();
-            if (again !== null && again.status === OTA.STATUS_ACTIVE) break;      // 就绪 → 发 DATA
-            if (again !== null && again.status !== OTA.STATUS_PREPARING) break;   // 异常终态 → 不折腾
-            if (again === null) await sleep(1000);                                // 读失败/超时：不退出，稍候重试
+      // promise 3s 超时只放弃等待、不取消底层 ATT 事务，未完成的读会锁死整个特征。故等待期间
+      // 零 GATT I/O（栈完全空闲）——iOS 由固件 ready notify 精确触发（省盲等余量 ~1.1s）；
+      // Android notify 不可靠 → 超时后 readAck 兜底（预擦已完，安全）。
+      const PRE_ERASE_BLIND_MS = 4000;              // 兜底等待上限：覆盖预擦 3.1s + 0.9s 余量
+      const NOTIFY_READY_WAIT_MS = PRE_ERASE_BLIND_MS;
+      otaWaitingReady = true;
+      const ready = await new Promise((resolve) => {
+        otaReadyResolve = resolve;
+        setTimeout(() => resolve(false), NOTIFY_READY_WAIT_MS);   // 超时兜底：走 readAck 确认
+      });
+      otaWaitingReady = false;
+      if (ready) {
+        console.debug(`[OTA] ready notify received (${(NOTIFY_READY_WAIT_MS / 1000).toFixed(1)}s window), target pre-erased`);
+      } else {
+        console.debug(`[OTA] ready notify timeout (${(NOTIFY_READY_WAIT_MS / 1000).toFixed(1)}s), fallback readAck confirm`);
+        // START 激活确认：idle → 重发 START（≤2 次）；preparing(0x04) = 目标区预擦中（官方预擦策略，
+        // ~3.1s）→ 轮询等待就绪；active → 继续发 DATA。预擦完成前发 DATA 会被固件丢弃（不推进序号），
+        // 必须等 ACTIVE 再发。
+        let prepDeadline = Date.now() + 8000;         // 每次 START 发出后重置：预擦 124K ≈ 3.1s，8s 宽裕
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const ack = await readAck();
+          if (ack !== null && ack.status === OTA.STATUS_ACTIVE) break;   // 明确已激活 → 发 DATA
+          if (ack === null) {                                            // 读失败/超时：多为栈瞬时问题
+            console.warn('[OTA] START confirm read failed, retry after 1s');
+            await sleep(1000);
+            continue;                                                    // 重读；连续失败 2 次后固件必已就绪，安全进入 DATA
           }
-          break;   // 无论超时/异常都继续（预擦 ≤3.1s < 8s deadline，固件必已就绪）
-        } else break;   // 异常终态（success/aborted）→ 不折腾，后续流程会暴露
+          if (ack.status === OTA.STATUS_IDLE) {                          // 明确 idle：START 未达 → 重发
+            console.warn(`[OTA] START not confirmed (idle), resend #${attempt + 1}`);
+            await writeWithRetry(otaChar, startExt);
+            await sleep(250);
+            prepDeadline = Date.now() + 8000;                            // 重发后固件重新预擦：重置就绪 deadline
+            await sleep(PRE_ERASE_BLIND_MS);                             // 重发后同样盲等预擦窗口，避免再撞关中断
+          } else if (ack.status === OTA.STATUS_PREPARING) {              // 预擦中 → 轮询等就绪
+            onProgress?.({ phase: 'preparing', percent: 0, sent: 0, total: fwSize });   // 兜底幂等：保持 preparing 文案
+            console.debug('[OTA] firmware erasing target, waiting ready...');
+            while (Date.now() < prepDeadline) {
+              await sleep(OTA.CONFIRM_DIGEST_MS);
+              const again = await readAck();
+              if (again !== null && again.status === OTA.STATUS_ACTIVE) break;      // 就绪 → 发 DATA
+              if (again !== null && again.status !== OTA.STATUS_PREPARING) break;   // 异常终态 → 不折腾
+              if (again === null) await sleep(1000);                                // 读失败/超时：不退出，稍候重试
+            }
+            break;   // 无论超时/异常都继续（预擦 ≤3.1s < 8s deadline，固件必已就绪）
+          } else break;   // 异常终态（success/aborted）→ 不折腾，后续流程会暴露
+        }
       }
 
       // 2. DATA：整包 = adr_index(u16 LE) + 176 字节固件 + crc16(u16 LE，覆盖前 178 字节)。
@@ -716,6 +775,7 @@ const BLEProtocol = (() => {
         // 固定间隔是它唯一背压——预擦后无扇区擦除窗口，10ms 覆盖 Android resolve 滞后
         // 防 GATT 重叠；iOS/Chrome 的 writeValue 等响应，10ms 只是附加保险
         await sleep(OTA.PER_PACKET_GAP_MS);
+        throwIfOtaAborted();   // 断连中止：残留流程立即止损，不等 write 失败
 
         const sent = Math.min(off + DATA_BYTES, fwSize);
         const percent = Math.round(sent * 100 / fwSize);
@@ -732,7 +792,20 @@ const BLEProtocol = (() => {
         // 固件已收，实测首窗口 read 常读到 0——整个窗口还在 BLE 队列里）。等第二窗口边界再确认
         // （此时距 START 已 ~2.6s、队列已清、链路稳定），首窗口真丢的包由 [acked, 64) 重传兜底。
         if ((i + 1) % OTA.WINDOW === 0 && i + 1 < totalBlocks && i + 1 >= OTA.WINDOW * 2) {
-          await sleep(OTA.CONFIRM_DIGEST_MS);   // 让固件消化在途窗口（flash 页写 + 偶发擦除）
+          await sleep(OTA.CONFIRM_DIGEST_MS);   // 让固件消化在途窗口（flash 页写 + 偶发擦除）并收到进度 notify
+          // notify 主通道：固件进度通知（每 8 包回报）已到且 ≥ 已发数 → 免 readAck 直接继续。
+          // 只用于"跳过确认"（固件已收齐为证），不触发重传——重传永远基于 readAck 真实进度；
+          // notify 丢失/滞后/不可用（Android）→ 走下方 readAck 兜底，行为与纯 readAck 一致。
+          if (latestOtaProgress >= i + 1) {
+            stallResends = 0;             // 固件在推进（notify 为证）
+            lastRealNext = latestOtaProgress;
+            console.debug(`[OTA] window #${(i + 1) / OTA.WINDOW}: notify acked=${latestOtaProgress}, skip readAck`);
+            continue;
+          }
+          // 诊断：notify 已订阅且累计收到过（otaNotifyCount>0）但窗口确认时进度仍落后——
+          // iOS Safari characteristicvaluechanged 事件派发延迟（write 流中不派发/晚派发），
+          // 链路层实际已收到（固件 push 成功）；readAck 兜底保证正确性，notify 仅 Android 加速。
+          console.debug(`[OTA] window #${(i + 1) / OTA.WINDOW}: notify lagging acked=${latestOtaProgress} (sent=${i + 1}), readAck fallback`);
           const ack = await readAck();
           if (ack === null) continue;      // read 不可用（瞬时失败）→ 跳过本窗口确认，END 校验兜底
           let confirmed = ack.progress;
@@ -830,7 +903,7 @@ const BLEProtocol = (() => {
       }
       return { ok: false, result: 0, message: 'OTA timeout waiting for device result (firmware still alive)' };
     } finally {
-      // 无通知订阅/监听需要清理（END 判定全走 readAck，见上方注释）
+      otaDevice.removeEventListener('gattserverdisconnected', abortOtaSession);
     }
   }
 
