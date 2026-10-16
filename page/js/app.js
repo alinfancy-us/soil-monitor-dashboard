@@ -68,6 +68,10 @@
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
   const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
   const DEVICE_NAME_KEY = `${CACHE_PREFIX}devName:v1`;   // 最近一次连接的设备展示名（断开连接后仍展示）
+  // 上一轮 OTA 已写入、但尚未经设备回报版本验证的记录（见 verifyPendingFwUpdate）。
+  // 与 fwVer 缓存分开存：fwVer 只放"设备亲口报出的版本"，绝不放"我们希望它变成的版本"
+  const PENDING_FW_TTL_MS = 7 * 24 * 3600 * 1000;   // 7 天未验证自动作废，避免陈旧记录长期误导
+  const pendingFwKey = (deviceId) => `${CACHE_PREFIX}pendingFw:v1:${deviceId}`;   // 按设备分 key，互不覆盖
   const RECORD_KEY_RE = /^SoilPulse:(trend|daily):v1:/;  // 注意：与 CACHE_PREFIX='SoilPulse:' 大小写一致，否则容量清理匹配不到任何 key
 
   function cacheKey(type, deviceId) {
@@ -516,6 +520,79 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     } catch (_) {}
   }
 
+  // —— OTA 结果验证闭环 ——
+  // 固件返回 SUCCESS 的语义是"回读 CRC32 通过 + boot mark 已切"，只证明写进去了，
+  // 不证明新固件能跑起来：新固件若初始化失败，bootctl 会在几次非预期复位后把另一个槽
+  // 恢复成 KNLT 并复位过去，设备最终跑的是旧版本。
+  // 因此升级成功时不把目标版本写进 state.fwVersion / fwVer 缓存（那是"期望"不是"事实"），
+  // 只记一条待验证；下次连上读到 DIS 0x2A26 的设备自报版本后再比对，一致才算真成功。
+  function setPendingFwVerify(deviceId, version) {
+    if (!deviceId || !version) return;
+    try {
+      localStorage.setItem(pendingFwKey(deviceId), JSON.stringify({ version, at: Date.now() }));
+    } catch (_) {}
+  }
+
+  function getPendingFwVerify(deviceId) {
+    if (!deviceId) return null;
+    const key = pendingFwKey(deviceId);
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const p = JSON.parse(raw);
+      if (!p || !p.version) return null;
+      if (!p.at || Date.now() - p.at > PENDING_FW_TTL_MS) {
+        localStorage.removeItem(key);   // 过期作废
+        return null;
+      }
+      return p;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function clearPendingFwVerify(deviceId) {
+    if (!deviceId) return;
+    try {
+      localStorage.removeItem(pendingFwKey(deviceId));
+    } catch (_) {}
+  }
+
+  /**
+   * 重连后校验上一轮升级是否真的生效。
+   * 必须在 state.fwVersion 已按 DIS 结果赋值、且 OTA 状态区已清空之后调用：
+   * 回滚场景下 checkFirmwareUpdate 会用设备真实（旧）版本重新比对清单，自动重新提示升级。
+   * @param {string} deviceId        当前设备 id
+   * @param {string|null} reportedVersion 固件 DIS 0x2A26 自报版本（读取失败为 null）
+   */
+  function verifyPendingFwUpdate(deviceId, reportedVersion) {
+    const pending = getPendingFwVerify(deviceId);
+    if (!pending) return;
+
+    // DIS 读失败：无从判定，保留记录等下次连接（TTL 兜底），宁可晚确认也不误报
+    if (!reportedVersion) {
+      log(`[OTA] update not verified yet: DIS read failed (expected v${pending.version}), retry next connect`);
+      return;
+    }
+
+    clearPendingFwVerify(deviceId);
+    // 归一化后比较：容忍 DIS 里的前导 v/V 与空白差异（两边的值来自同一个 CI 版本号，
+    // 只需抵御格式噪声；不能用 compareVersions——它会把 dev 的 commit hash 也解析成数字）
+    const norm = (v) => String(v || '').trim().replace(/^[vV]/, '');
+    if (norm(reportedVersion) === norm(pending.version)) {
+      log(`[OTA] update verified: device reports v${reportedVersion}`);
+      return;
+    }
+
+    // 设备自报版本 ≠ 刚写入的版本 → 新固件没起来（大概率被 bootctl 回滚到另一个槽）。
+    // state.fwVersion / fwVer 缓存此时已是设备真实版本，升级提示会重新出现。
+    els.otaStatus.textContent =
+      `Update did not take effect — device still reports v${reportedVersion} (expected v${pending.version}). Please retry.`;
+    els.otaStatus.className = 'text-xs font-medium text-rose-600';
+    setOtaRetryVisible(true);
+    log(`[OTA] UPDATE NOT APPLIED: wrote v${pending.version} but device reports v${reportedVersion} — likely rolled back by bootctl`);
+  }
+
   // 设备展示名徽章：设置文字并显示，同时持久化到 localStorage——断开连接、刷新页面后
   // 仍展示最近一次连接的设备名（需求：disconnect 时不隐藏设备名）
   function showDeviceNameBadge(name) {
@@ -572,9 +649,20 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
   // 电量胶囊高亮状态：仅"已连接且本会话拿到过实时数据"才绿色高亮。
   // 首屏会用本地缓存回显历史（restoreCachedCharts → render），若不区分连接态，
   // 未连接的页面也会显示"电量 100%"绿色高亮误导用户；断开时保留最后一次读数仅灰显，
-  // 与温度/湿度卡保留最后读数的行为一致
+  // 与温度/湿度卡保留最后读数的行为一致。
+  // 【低电】batt===0 且已连接 → 红色 + 明确文案。固件侧 0% 是"真实低电正常返回"
+  //   （不是测量失败），所以这里可以放心把 0 当成"该换电池了"处理；
+  //   未连接时不提示，避免缓存回显的旧 0% 造成误报。
   function syncBatteryPill() {
-    els.battPill?.classList.toggle('batt-idle', !(state.device?.gatt.connected && state.latestShown));
+    const connected = !!(state.device?.gatt.connected && state.latestShown);
+    const low = connected && Number(state.latestShown?.batt) === 0;
+    els.battPill?.classList.toggle('batt-idle', !connected);
+    els.battPill?.classList.toggle('batt-low', low);
+    if (els.battPill) {
+      const label = low ? 'Battery empty — replace batteries' : 'Battery level';
+      els.battPill.setAttribute('aria-label', label);
+      els.battPill.title = low ? '电量耗尽，请更换电池（低于 2.2V 触摸功能将失效）' : '';
+    }
   }
 
   // 清空 live 展示区（切换到另一台设备、或没有该设备缓存时，避免继续显示上一台设备的数据）。
@@ -1819,6 +1907,9 @@ function clearConnectError() {
        els.otaStatus.className = 'text-xs font-medium text-slate-600';
        els.otaProgressWrap.classList.add("hidden");
        setOtaRetryVisible(false);
+       // 上一轮升级写入后尚未验证的版本，在此刻比对：只有设备自报出新版本号才算成功。
+       // 放在 OTA 状态区清空之后，确保告警文案不会被上面的默认清空覆盖
+       verifyPendingFwUpdate(device.id, fwVersion);
        clearConnectError();
        setConnectBusy(false);   // 连接成功：解锁 Connect 按钮（此时才允许点击 Disconnect）
        log('Connected & Listening for updates.');
@@ -2613,6 +2704,17 @@ The device will measure the current probe state first, then apply the calibratio
       : `OTA error: ${raw}`;
   }
 
+  // START 阶段被固件拒绝（低电 17 / pdu 9 / 固件尺寸越界等）：预擦都还没开始，
+  // Flash 一个字节都没动。文案要明确这一点，否则用户会以为"升级失败=可能变砖"。
+  function formatOtaRejection(err) {
+    const why = {
+      17: "battery too low — replace the batteries first (below 2.2V the touch sensor stops working)",
+      9:  "the device rejected the 176-byte block size",
+      11: "the firmware size is out of range",
+    }[err?.otaResult] || (err?.message || "the device refused the upgrade");
+    return `Upgrade refused before any flash erase: ${why}. Nothing was written — fix this and tap Retry.`;
+  }
+
   // 新版本横幅一键升级：从 page/firmware/ 下载清单指向的固件并推送
   els.otaUpdateNowBtn.addEventListener("click", async () => {
     const upd = state.fwUpdate;
@@ -2708,11 +2810,15 @@ The device will measure the current probe state first, then apply the calibratio
       if (ok) {
         state.fwUpdate = null;
         state.otaJustSucceeded = true;   // 中文：成功提示展示期——设备重启断链后保留 Setting 页展示本条成功文案
-        // 升级成功：徽章立即切换为新版本，并写入按设备缓存——设备重启重连后
-        // 即使 DIS 读取再失败，也不会因“版本未知”再次提示升级
+        // 【闭环补强】不再把“上传 bin 的版本”写进 state.fwVersion / fwVer 缓存。
+        // 固件 SUCCESS 只代表回读 CRC32 通过 + boot mark 已切，不证明新固件能跑起来：
+        // bootctl 在几次非预期复位后会把另一个槽恢复成 KNLT 并复位过去，设备实际跑旧版本。
+        // 旧写法会把缓存写成目标版本，之后 compareVersions 恒判定“已是最新”，
+        // 于是回滚的设备永远不再收到升级提示 —— 静默失效。改为记一条待验证，
+        // 由重连时读 DIS 0x2A26 的设备自报版本来确认（verifyPendingFwUpdate）
         if (version) {
-          state.fwVersion = version;
-          setCachedFwVersion(state.activeDeviceId, version);
+          setPendingFwVerify(state.activeDeviceId, version);
+          els.otaStatus.textContent = `Firmware v${version} written, device rebooting — reconnect to confirm`;
         }
         renderFirmwareCard();
         // 统一成功交互（所有成功路径一致）：成功文案在 Setting 页展示数秒后，自动切到
@@ -2724,15 +2830,21 @@ The device will measure the current probe state first, then apply the calibratio
       }
     } catch (err) {
       // 中文：真实中途断链会走到这里（并非“已在进行中”类忙碌错误），需展示安抚性提示而非原始报错文案
-      els.otaStatus.textContent = formatOtaError(err);
+      // 中文：固件在 START 阶段就拒绝（otaStage='start'，如低电 17）时，Flash 未擦未写、
+      //       也没有任何在途 DATA 写请求——保持连接，让用户换电池后直接点 Retry；
+      //       只有真正进过 DATA 阶段才需要下面那套"断链清队列"的补救。
+      const startRejected = err?.otaStage === 'start';
+      els.otaStatus.textContent = startRejected ? formatOtaRejection(err) : formatOtaError(err);
       els.otaStatus.className = "text-xs font-medium text-rose-600";
       setOtaRetryVisible(true);
       log(`[OTA] error: ${err.message || err}`);
-      // 中文：失败后主动断开设备——Android WebBluetooth 的 writeValue 不等固件 ATT 响应连发
-      //       （实测 3~4ms/包），上一轮 OTA 的写请求队列会残留；不重连直接重试时，残留包
-      //       继续投递到已重置的固件端（expect=0 收到 141+）导致 jump 错位直到超时。
-      //       断开强制下次重试走全新连接，pending 写队列随连接取消清空。
-      try { state.device?.gatt?.disconnect?.(); } catch (_) { /* 断开失败不影响错误展示 */ }
+      if (!startRejected) {
+        // 中文：失败后主动断开设备——Android WebBluetooth 的 writeValue 不等固件 ATT 响应连发
+        //       （实测 3~4ms/包），上一轮 OTA 的写请求队列会残留；不重连直接重试时，残留包
+        //       继续投递到已重置的固件端（expect=0 收到 141+）导致 jump 错位直到超时。
+        //       断开强制下次重试走全新连接，pending 写队列随连接取消清空。
+        try { state.device?.gatt?.disconnect?.(); } catch (_) { /* 断开失败不影响错误展示 */ }
+      }
     } finally {
       state.otaRunning = false;
       els.otaUpdateNowBtn.textContent = 'Update now';          // 中文：会话结束（成功/失败/重试）统一恢复原文案

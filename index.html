@@ -69,6 +69,23 @@
       opacity: 0.6;
     }
 
+    /* 低电态（batt===0 且已连接）：红色 + 红色图标。
+       固件侧 0% 是"真实低电、正常返回"，所以这里能确定该换电池了，而不是测量失败。
+       选择器排在 batt-idle 之后，两者同时存在时以低电为准（不会出现灰红打架） */
+    #battPill.batt-low {
+      background-color: #fef2f2;
+    }
+
+    #battPill.batt-low #battValue,
+    #battPill.batt-low .batt-unit {
+      color: #dc2626;
+    }
+
+    #battPill.batt-low > span[aria-hidden="true"] {
+      filter: grayscale(0);
+      opacity: 1;
+    }
+
     /* 设备名徽章：断连时灰显（与电量胶囊 batt-idle 行为一致），连接后恢复品牌色 */
     #deviceNameText.dev-name-idle {
       background-color: #f1f5f9;

@@ -459,6 +459,8 @@ const BLEProtocol = (() => {
                                //   确保旧队列彻底死寂后再灌入重传包。
                                //   真机高频丢包测试若仍见回退后报错序，可直接上调本值至 100~150ms
   };
+  // 与固件 app_ota.c 的 SOIL_OTA_RES 枚举逐项对齐（0x00~0x11）。
+  // 漏项会导致 readAck 拿到 ABORTED 却显示成 "code 0x0A" 这种无意义提示。
   const OTA_RESULT_NAMES = {
     0x00: 'success',
     0x01: 'packet sequence error',
@@ -468,10 +470,16 @@ const BLEProtocol = (() => {
     0x05: 'data incomplete',
     0x06: 'flow error',
     0x07: 'firmware CRC error',
+    0x08: 'firmware version error',
     0x09: 'PDU length error (device may not support large-block OTA)',
+    0x0A: 'firmware boot mark error',
+    0x0B: 'firmware size error',
     0x0C: 'data packet timeout',
     0x0D: 'OTA process timeout',
-    0x0F: 'connection terminated',
+    0x0E: 'connection terminated',
+    0x0F: 'not supported',
+    0x10: 'internal logic error',
+    0x11: 'battery too low (below 2.2V, replace batteries before upgrading)',
   };
 
   /**
@@ -570,6 +578,9 @@ const BLEProtocol = (() => {
     // 不如监听 gattserverdisconnected 立即中止本次会话，由 app.js 干净重连后重新
     // performOta（新连接新特征）。
     let otaSessionAborted = false;
+    // 是否已进入 DATA 阶段（写过一个固件包）。用于区分"START 预检被拒"和"传输中途失败"：
+    // 前者 Flash 一个字节未动、链路里也没有残留写请求，不该为清队列而断链。
+    let otaDataStarted = false;
     const abortOtaSession = () => { otaSessionAborted = true; };
     const otaDevice = otaChar.service.device;
     otaDevice.addEventListener('gattserverdisconnected', abortOtaSession);
@@ -632,7 +643,14 @@ const BLEProtocol = (() => {
     const throwIfDeviceAborted = (ack) => {
       if (ack !== null && ack.status === OTA.STATUS_ABORTED) {
         const why = OTA_RESULT_NAMES[ack.result] ?? `0x${ack.result.toString(16)}`;
-        throw new Error(`OTA aborted by device: ${why} (result=${ack.result})`);
+        const err = new Error(`OTA aborted by device: ${why} (result=${ack.result})`);
+        // 结构化附加信息：result = 固件原因码；stage = 拒绝发生的阶段。
+        // stage='start' 表示 DATA 一包都没发（START 预检被拒，如低电 17），
+        // 此时链路里没有任何在途写请求，调用方无需断链清队列 —— 断链只会丢掉
+        // 原因提示、把用户踢回"未连接"，换好电池还得重新扫描设备。
+        err.otaResult = ack.result;
+        err.otaStage = otaDataStarted ? 'data' : 'start';
+        throw err;
       }
     };
 
@@ -673,6 +691,11 @@ const BLEProtocol = (() => {
       const blindForErase = async () => {
         await sleep(250);
         const ack0 = await readAck();
+        // 【fix26】START 阶段固件已拒绝（低电 17 / pdu 9 等）：readAck 稳定返回
+        // ABORTED+原因码，此前会被当成"读失败"落进下面的固定盲等，白等 4.5s
+        // 才在下一轮确认里抛错（实测日志：12:48:40 拒绝 → 12:48:45 才断链）。
+        // 这里先判终态，立即抛出真实原因，也避免在"本就没开始擦"的情况下继续等。
+        throwIfDeviceAborted(ack0);
         if (ack0 !== null && ack0.status === OTA.STATUS_PREPARING && ack0.eraseEstMs > 0) {
           const blind = ack0.eraseEstMs + OTA.PRE_ERASE_EXTRA_MS;
           console.debug(`[OTA] erase est ${ack0.eraseEstMs}ms → blind ${blind}ms`);
@@ -735,6 +758,7 @@ const BLEProtocol = (() => {
       //    idx==next 落盘，天然自愈。readAck 不可用（老固件）时跳过确认，由 END 固件校验兜底。
       const DATA_BYTES = OTA.BLOCK_BYTES;   // 每包固件字节数 = pdu_length = 176
       const totalBlocks = Math.ceil(fwSize / DATA_BYTES);
+      otaDataStarted = true;        // 从此处起才可能残留写请求，失败后需要断链清队列
       window.__otaStage = 'data';   // 【fix23】崩溃现场阶段标记：DATA 传输
       let lastPercent = -1;
       let stallResends = 0;
