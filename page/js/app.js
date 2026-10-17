@@ -1375,23 +1375,12 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
   // 等待 beacio 重新注入（方案A）：后台切回时扩展注入可能被系统挂起，navigator.bluetooth 瞬时不可用。
   // 重新触发自研握手并等待恢复：① navigator.bluetooth 出现；② beacio:extension:ready 事件；
   // ③ ping/pong 握手成功（beacioL）。超时未恢复返回 false，由 ensureIosEnv 走正常引导。
+  // 【崩溃修复】2026-10-12 无状态探测重构删除了 startBeacioDetect/beacioL，但本函数仍引用
+  // → 点 Connect 抛 "Can't find variable: startBeacioDetect"（unhandledrejection）。
+  // probeBeacioReady 已覆盖全部等待语义（dataset 注入标记 / navigator.beacio / navigator.bluetooth
+  // 快信号 + beacio:extension:ready 事件 + ping/pong 握手），直接委托即可
   function waitBeacioActive(timeoutMs) {
-    return new Promise((resolve) => {
-      startBeacioDetect();                     // 幂等，重新触发官方 ping/pong 握手
-      if (beacioL || navigator.bluetooth) { resolve(true); return; }
-      let timer = null;
-      const onReady = () => { finish(true); };
-      const onPong = (e) => { if (e && e.detail && e.detail.nonce) finish(true); };
-      function finish(ok) {
-        clearTimeout(timer);
-        window.removeEventListener('beacio:extension:ready', onReady);
-        window.removeEventListener('beacio:extension:pong', onPong);
-        resolve(ok);
-      }
-      window.addEventListener('beacio:extension:ready', onReady, { once: true });
-      window.addEventListener('beacio:extension:pong', onPong);
-      timer = setTimeout(() => finish(!!(beacioL || navigator.bluetooth)), timeoutMs);
-    });
+    return probeBeacioReady(timeoutMs);
   }
 
   function beacioGotoOnboarding() {
@@ -1436,7 +1425,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     showGuideModal({
       iconHtml: GUIDE_LOGO_ICON,
       title: 'Bluetooth needs beacio',
-      message: 'The beacio Safari extension does not appear to be installed on this iPhone. To connect, install the free beacio extension (iOS 26.2+), then enable it: tap the "aA" icon in the address bar → Manage Extensions → turn on beacio → choose "Allow on Every Website", then refresh this page and tap Connect.',
+      message: 'The beacio Safari extension does not appear to be installed on this iPhone or iPad. To connect, install the free beacio extension (iOS/iPadOS 26.2+), then enable it: tap the "aA" icon in the address bar → Manage Extensions → turn on beacio → choose "Allow on Every Website", then refresh this page and tap Connect.',
       action: { text: 'Install beacio (free)', href: BEACIO_APPSTORE_URL },
     });
   }
@@ -1470,13 +1459,19 @@ function clearConnectError() {
    // ===== 平台判定与浏览器引导（平台优先重构：全链路只判一次平台，加载/点击共用同一闸门） =====
 
    // 平台判定：ios / android / desktop。iOS 用排除法（所有 iOS 浏览器壳 UA 都含 Safari，
-   // MSStream 排除旧 Edge）；iPadOS 桌面级 UA（Macintosh）归入 desktop，与既有行为一致。
+   // MSStream 排除旧 Edge）；iPadOS 桌面级 UA（Macintosh，Chrome/Safari 默认"桌面模式"）
+   // 通过触屏信号识别后归入 ios，与 iPhone 走同一套 Safari/beacio/Bluefy 升级引导——
+   // Mac 真机没有触摸屏（maxTouchPoints=0），iPad 触屏 maxTouchPoints≥5，
+   // maxTouchPoints>1 即可无歧义区分。若归入 desktop，iPad Chrome 会弹桌面"Copy Link"
+   // 引导，无法利用 x-safari-https 深链与 beacio/Bluefy 路径，OTA 引导链路断裂。
    function detectPlatform() {
      const ua = navigator.userAgent;
      if (/iPad|iPhone|iPod/.test(ua) && !window.MSStream) return 'ios';
      if (/Android/.test(ua)) return 'android';
+     if (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) return 'ios';   // iPadOS 桌面级 UA
      return 'desktop';
    }
+
 
    // UA-CH 品牌精确识别：真实 Chrome 上报 "Google Chrome"、Edge 上报 "Microsoft Edge"，
    // 其余 Chromium 系浏览器（Brave/Opera/Vivaldi/Arc/微信 XWeb/三星 等）只报自己或 Chromium。
@@ -1564,7 +1559,7 @@ function clearConnectError() {
      showGuideModal({
        iconHtml: GUIDE_LOGO_ICON,
        title: 'Open in Safari to Connect',
-       message: 'Your iPhone does not support Web Bluetooth in this browser. Tap "Open in Safari" to switch to the Safari browser and connect.',
+       message: 'Your iPhone or iPad does not support Web Bluetooth in this browser. Tap "Open in Safari" to switch to the Safari browser and connect.',
        action: {
          text: 'Open in Safari',
          onClick: (e) => {
@@ -1581,7 +1576,7 @@ function clearConnectError() {
      showGuideModal({
        iconHtml: GUIDE_LOGO_ICON,
        title: 'Open in Safari to Connect',
-       message: `This App mode on iPhone can't use Web Bluetooth. Tap "Copy Link", then open it in the Safari browser and tap Connect there. Tip: if you want to keep this page on your Home Screen, uncheck "Open as Web App" when adding it, so it opens in Safari with Bluetooth available.`,
+       message: `This App mode on iPhone or iPad can't use Web Bluetooth. Tap "Copy Link", then open it in the Safari browser and tap Connect there. Tip: if you want to keep this page on your Home Screen, uncheck "Open as Web App" when adding it, so it opens in Safari with Bluetooth available.`,
        action: {
          text: 'Copy Link',
          onClick: async (e) => {
@@ -1603,7 +1598,7 @@ function clearConnectError() {
      showGuideModal({
        iconHtml: GUIDE_LOGO_ICON,
        title: 'Bluetooth needs beacio',
-       message: 'To connect on iPhone, the free beacio Safari extension (iOS 26.2+) must be installed and enabled. Have you installed beacio before? Choose the first option only if you really installed it before — after enabling or installing, return here, refresh the page, and tap Connect again.',
+       message: 'To connect on iPhone or iPad, the free beacio Safari extension (iOS/iPadOS 26.2+) must be installed and enabled. Have you installed beacio before? Choose the first option only if you really installed it before — after enabling or installing, return here, refresh the page, and tap Connect again.',
        hideAction: true,
      });
      beacioGotoOnboarding();
@@ -1697,7 +1692,7 @@ function clearConnectError() {
    // async：④' 的 beacio 注入等待（probeBeacioReady）需要 await；调用方须 await 本函数
    async function ensureIosEnv() {
      if (isBluefy() && navigator.bluetooth) { log('[gate] ios: Bluefy + API → direct'); return true; }   // ② Bluefy 直连
-     if (!isNativeSafari()) { log('[gate] ios: non-native-Safari shell → x-safari guide'); guideIosNonSafari(); return false; }   // ③ Safari 优先
+     if (!isNativeSafari()) { log('[gate] ios: non-native-Safari shell → x-safari guide'); guideIosNonSafari(); return false; }   // ③ Safari 优先（iPhone/iPad 同逻辑：iPadOS 17+ 的 x-safari 深链同样可用）
      if (navigator.bluetooth) { log('[gate] ios: Safari + API (beacio active) → direct'); return true; }   // ④ beacio active 注入 → 直连
      // ④' 唤醒恢复竞态兜底：锁屏唤醒后 Safari 从内存快照恢复页面，beacio 扩展桥可能尚未
      // 重新注入 navigator.bluetooth——立即判负会把已装用户误导向 beacio 引导。此处等待至多
@@ -1911,7 +1906,7 @@ function clearConnectError() {
          // （页面尚在恢复渲染，WebKit 未注册 activation），requestDevice 被静默拒绝；
          // 再点一次 Connect 手势重新注册即可正常弹出授权/设备选择器
          const wakeHint = (detectPlatform() === 'ios' && isNativeSafari())
-           ? ' If you just unlocked your iPhone, tap Connect once more.'
+           ? ' If you just unlocked your iPhone/iPad, tap Connect once more.'
            : '';
          showConnectError('Bluetooth failed to start. Make sure Bluetooth is on and allow Bluetooth permission for this browser, then retry.' + wakeHint);
          log(`Bluetooth could not start (requestDevice): ${(err && err.name) || '?'}: ${(err && err.message) || err}`);
