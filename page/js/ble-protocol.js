@@ -14,14 +14,29 @@ const BLEProtocol = (() => {
   const DAILY_MAX_RECORDS = 7;
   const DAILY_PACKET_SIZE = 1 + DAILY_RECORD_SIZE * DAILY_MAX_RECORDS;
 
-  // 0xFFED 30 天紧凑包（须与固件 soil_daily_log.h 的 SOIL_DAILY30_* 严格对齐）：
-  //   +0 count u8 | +1 base_day u32 | +5 起 30 × 6B
-  //   记录 6B：day_off u16（相对 base_day 的天数差）| temp s16(0.01℃) | hum u8(%) | batt u8(%)
-  // 185B < MTU 246，一次读完；湿度只有 1% 精度（趋势图够用），温度仍是 0.01℃
-  const DAILY30_HDR_SIZE = 5;
+  // 0xFFED 30 天紧凑包（须与固件 soil_daily_log.h 的 SOIL_DAILY30_* 严格对齐）
+  //   184B = +0 count u8 | +1 base_day u16（本地天号 − 2000-01-01）| +3 tz_code u8
+  //          | +4 起 30 × 6B（day_off u16 | temp s16(0.01℃) | hum u8 | batt u8）
+  //   tz_code = (tz_min + 840)/15 + 1，反算 tz_min = (tz_code − 1) × 15 − 840
+  // ⚠ 184B 是硬上限：ATT 读响应单包最大 MTU−1，而 MTU_SIZE_SETTING=185。
+  //   再长就会退化成 Read Blob 长读，各家手机协议栈行为不一致，不能依赖。
+  // 为什么包头带时区：base_day 只是"设备本地天序号"，还原绝对 epoch 必须知道时区；
+  //   靠 0xFFE3 反推不行——0xFFE3 是 RAM 环，换电池后只剩 Flash 的 30 天。
+  const DAILY30_HDR_SIZE = 4;
   const DAILY30_RECORD_SIZE = 6;
   const DAILY30_MAX_RECORDS = 30;
-  const DAILY30_PACKET_SIZE = DAILY30_HDR_SIZE + DAILY30_RECORD_SIZE * DAILY30_MAX_RECORDS;   // 185
+  const DAILY30_PACKET_SIZE = DAILY30_HDR_SIZE + DAILY30_RECORD_SIZE * DAILY30_MAX_RECORDS;   // 184
+  const DAILY30_DAY_ORIGIN = 10957;   // 2000-01-01 的天号
+  const DAILY30_TZ_STEP = 15;
+  const DAILY30_TZ_BIAS = 840;
+
+  // 0xFFEE 30 天温度极值包（须与固件 SOIL_DAILY30_EXT_* 严格对齐）
+  //   124B = +0 count u8 | +1 base_day u16 | +3 tz_code u8 | +4 起 30 × 4B
+  //          （day_off u16 | tmin_d10 s8 | tmax_d10 s8），tmin/tmax 为"相对当日均值的 0.1℃ 偏移"，
+  //          0x80(= -128) 哨兵 = 该天无极值（旧固件记录）。124B < 184B，单次读无需分块。
+  const DAILY30_EXT_RECORD_SIZE = 4;
+  const DAILY30_EXT_MAX_RECORDS = 30;
+  const DAILY30_EXT_PACKET_SIZE = DAILY30_HDR_SIZE + DAILY30_EXT_RECORD_SIZE * DAILY30_EXT_MAX_RECORDS;   // 124
 
   // 0xFFEC 分块读协议（须与固件 SOIL_HISTORY_BLK_MAX / soil_history_blk_pkt_t 严格对齐）：
   // 写 2 字节窗口 {offset u8, count u8}（offset 0 = 设备环内最旧一条）→ 读 183 字节块
@@ -139,9 +154,13 @@ const BLEProtocol = (() => {
 
 
   /**
-   * 解析 0xFFED 30 天紧凑包（185 字节，定长）
-   * 输出与 0xFFE3 同构的记录数组（dateEpoch / temp / hum / battPercent），
-   * 便于上层直接合并——dateEpoch = (base_day + day_off) × 86400（本地 0 点）。
+   * 解析 0xFFED 30 天紧凑包（184B）
+   * 输出与 0xFFE3 同构的记录数组（dateEpoch / temp / hum / battPercent）。
+   *
+   * 还原公式：dateEpoch = (base_day + day_off) × 86400 + tz_min × 60
+   *   base_day 以 2000-01-01 为零点（u16，够用到 2179 年），tz_min 来自包头 tz_code，
+   *   两者合起来才能还原成与 0xFFE3 完全一致的"本地 0 点 epoch"，被 mergeDailyRecords 去重。
+   * @param {DataView} view
    * @returns {Array<{dateEpoch:number,temp:number,hum:number,battPercent:number}>}
    */
   function parseDaily30Packet(view) {
@@ -149,16 +168,54 @@ const BLEProtocol = (() => {
       throw new Error(`Invalid daily30 packet length: ${view?.byteLength} (expected ${DAILY30_PACKET_SIZE})`);
     }
     const count = Math.min(view.getUint8(0), DAILY30_MAX_RECORDS);
-    const baseDay = view.getUint32(1, true);
+    const baseDay = DAILY30_DAY_ORIGIN + view.getUint16(1, true);
+    const tzCode = view.getUint8(3);
+    const tzMin = tzCode ? ((tzCode - 1) * DAILY30_TZ_STEP - DAILY30_TZ_BIAS) : 0;
+    const tz = tzMin * 60;
     const records = [];
     for (let i = 0; i < count; i++) {
       const off = DAILY30_HDR_SIZE + i * DAILY30_RECORD_SIZE;
       const dayOff = view.getUint16(off, true);
       records.push({
-        dateEpoch: (baseDay + dayOff) * 86400,
+        dateEpoch: (baseDay + dayOff) * 86400 + tz,
         temp: view.getInt16(off + 2, true) / 100,
         hum: view.getUint8(off + 4),          // 已经是整数百分比
         battPercent: view.getUint8(off + 5),
+      });
+    }
+    return records;
+  }
+
+
+  /**
+   * 解析 0xFFEE 30 天温度极值包（124B）
+   * 每条 4B：day_off u16 + tmin_d10 s8 + tmax_d10 s8，day_off/base_day/tz_code 与 0xFFED 完全同义，
+   * 前端按 dateEpoch 与 parseDaily30Packet 的输出对齐。
+   * 极值是"相对当日均值的 0.1℃ 偏移"：min ≤ 0、max ≥ 0；0x80 = 该天无极值数据（旧固件记录）。
+   * @param {DataView} view
+   * @returns {Array<{dateEpoch:number,tempMinD10:number,tempMaxD10:number}>}
+   *          tempMinD10/tempMaxD10 为 null 表示无极值（不画标记）
+   */
+  function parseDaily30ExtPacket(view) {
+    if (!view || view.byteLength < DAILY30_EXT_PACKET_SIZE) {
+      throw new Error(`Invalid daily30ext packet length: ${view?.byteLength} (expected ${DAILY30_EXT_PACKET_SIZE})`);
+    }
+    const EXT_UNKNOWN = -128;
+    const count = Math.min(view.getUint8(0), DAILY30_EXT_MAX_RECORDS);
+    const baseDay = DAILY30_DAY_ORIGIN + view.getUint16(1, true);
+    const tzCode = view.getUint8(3);
+    const tzMin = tzCode ? ((tzCode - 1) * DAILY30_TZ_STEP - DAILY30_TZ_BIAS) : 0;
+    const tz = tzMin * 60;
+    const records = [];
+    for (let i = 0; i < count; i++) {
+      const off = DAILY30_HDR_SIZE + i * DAILY30_EXT_RECORD_SIZE;
+      const dayOff = view.getUint16(off, true);
+      const tmin = view.getInt8(off + 2);
+      const tmax = view.getInt8(off + 3);
+      records.push({
+        dateEpoch: (baseDay + dayOff) * 86400 + tz,
+        tempMinD10: tmin === EXT_UNKNOWN ? null : tmin,
+        tempMaxD10: tmax === EXT_UNKNOWN ? null : tmax,
       });
     }
     return records;
@@ -299,6 +356,8 @@ const BLEProtocol = (() => {
       getChar(UUIDS.HISTORY_BLK_CHAR),
       // 30 天日均紧凑包（0xFFED，旧固件无此特征时为 null → 只用 0xFFE3 的 7 天）
       getChar(UUIDS.DAILY30_CHAR),
+      // 30 天温度极值包（0xFFEE，旧固件无此特征时为 null → 日均图无极值标记）
+      getChar(UUIDS.DAILY30_EXT_CHAR),
       // Telink OTA 升级特征（128bit UUID，仅 BLE_OTA_SERVER_ENABLE=1 的固件才有）
       (async () => {
         const otaService = await server.getPrimaryService(UUIDS.OTA_SERVICE);
@@ -312,9 +371,9 @@ const BLEProtocol = (() => {
       })(),
     ]).then(results => results.map(r => (r.status === 'fulfilled' ? r.value : null)));
 
-    const [dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, otaChar, fwVersion] = values;
+    const [dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, daily30ExtChar, otaChar, fwVersion] = values;
 
-    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, otaChar, fwVersion };
+    return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, daily30ExtChar, otaChar, fwVersion };
   }
 
   /**
@@ -373,15 +432,15 @@ const BLEProtocol = (() => {
   }
 
   /**
-   * 写入 0xFFE8 温度偏移值（有符号 1 字节，单位 0.1℃，内部钳位到 ±10℃）
+   * 写入 0xFFE8 温度偏移值（小端 int16，单位 0.01℃，±1000 = ±10.00℃，与固件 SOIL_TEMP_OFFSET_* 一致）
    * @param {BluetoothRemoteGATTCharacteristic} tempOffsetChar
-   * @param {number} offsetX10 - 单位 0.1℃
+   * @param {number} offsetX100 - 单位 0.01℃（250 = 2.50℃）
    */
-  async function sendTempOffset(tempOffsetChar, offsetX10) {
+  async function sendTempOffset(tempOffsetChar, offsetX100) {
     if (!tempOffsetChar) {
       throw new Error('temperature offset characteristic unavailable');
     }
-    const clamped = Math.max(TEMP_OFFSET.MIN_X10, Math.min(TEMP_OFFSET.MAX_X10, Math.round(offsetX10)));
+    const clamped = Math.max(TEMP_OFFSET.MIN_X10, Math.min(TEMP_OFFSET.MAX_X10, Math.round(offsetX100)));
     const v = new Uint8Array(2);
     new DataView(v.buffer).setInt16(0, clamped, true);  // 小端 int16，0.01℃
     await tempOffsetChar.writeValue(v);
@@ -1071,6 +1130,7 @@ const BLEProtocol = (() => {
     parsePacket,
     parseDailyPacket,
     parseDaily30Packet,
+    parseDaily30ExtPacket,
     hexDump,
     requestSoilDevice,
     finishConnect,

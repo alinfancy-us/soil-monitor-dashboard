@@ -58,6 +58,7 @@
      DEV_NAME_MAX_BYTES,
      DEVICE_NAME,
      DEBUG_ENABLED, POLL_ENABLED, POLL_INTERVAL,
+     IDLE_WARN_MS, IDLE_GRACE_S,
      DASHBOARD_URL, BLUEFY_APPSTORE_URL, BLUEFY_DEEPLINK, BEACIO_APPSTORE_URL,
      DAILY_EPOCH_MIN_VALID, DAILY_EPOCH_MAX_VALID, TREND_EPOCH_MAX_VALID,
      CACHE_PREFIX, CACHE_MAX_ITEM_BYTES, CACHE_MAX_TOTAL_BYTES,
@@ -85,6 +86,25 @@
 
   function cacheKey(type, deviceId) {
     return `${CACHE_PREFIX}${type}:v1:${deviceId}`;
+  }
+
+  // 清空水位（clear cutoff）：设备被 Clear / Factory reset 后，记下清空时刻（秒）。
+  // 早于此刻的历史记录不可能属于"清空后的设备"——无论它来自 localStorage 缓存、
+  // 还是内存里的 state.lastRecords 残留，一律在这两个入口滤掉。
+  // 为什么光删不够：清空瞬间仍可能有 in-flight 的 0xFFE1 读 / 重连通知触发 render()，
+  // 把刚删掉的旧记录 merge 回来并 saveTrendRecordsCache 写回缓存，下一次打开页面
+  // restoreCachedCharts 又把它们画出来 —— 表现为"重置后设备只有 1 条，页面却显示 2 条"。
+  // 时间戳是唯一能跨会话、跨重连都生效的判据，所以选择记水位而不是依赖"删干净"。
+  const clearedAtKey = (deviceId) => `${CACHE_PREFIX}clearedAt:v1:${deviceId}`;
+
+  function setClearCutoff(deviceId) {
+    if (!deviceId) return;
+    try { localStorage.setItem(clearedAtKey(deviceId), String(Math.floor(Date.now() / 1000))); } catch (_) {}
+  }
+
+  function getClearCutoff(deviceId) {
+    if (!deviceId) return 0;
+    try { return Number(localStorage.getItem(clearedAtKey(deviceId))) || 0; } catch (_) { return 0; }
   }
  
 // 校准尝试结果 localStorage key：state 初始化（calibAttempt 恢复）在页面加载时就会调用
@@ -130,6 +150,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     tempOffsetScaleMax: document.getElementById('tempOffsetScaleMax'),
     factoryResetBtn: document.getElementById('factoryResetBtn'),
     factoryResetStatus: document.getElementById('factoryResetStatus'),
+    idlePrompt: document.getElementById('idlePrompt'),
+    idleCountdown: document.getElementById('idleCountdown'),
+    idleKeepBtn: document.getElementById('idleKeepBtn'),
+    idleSleepBtn: document.getElementById('idleSleepBtn'),
      tempValue: document.getElementById('tempValue'),
      tempUnitLabel: document.getElementById('tempUnitLabel'),
      tempUnitToggle: document.getElementById('tempUnitToggle'),
@@ -142,20 +166,26 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     trendRangeText: document.getElementById('trendRangeText'),
      trendTabBtn: document.getElementById('trendTabBtn'),
      trendTabPanel: document.getElementById('trendTabPanel'),
-     dailyTabBtn: document.getElementById('dailyTabBtn'),
      dailyTabPanel: document.getElementById('dailyTabPanel'),
     dailyMetricTempBtn: document.getElementById('dailyMetricTempBtn'),
     dailyMetricHumBtn: document.getElementById('dailyMetricHumBtn'),
     dailyMetricBattBtn: document.getElementById('dailyMetricBattBtn'),
     dailyRange7Btn: document.getElementById('dailyRange7Btn'),
     dailyRange30Btn: document.getElementById('dailyRange30Btn'),
+    dailyEmpty: document.getElementById('dailyEmpty'),
+    dailyNote: document.getElementById('dailyNote'),
+    dailyExtNote: document.getElementById('dailyExtNote'),
+    dailyRangeCard: document.getElementById('dailyRangeCard'),
+    dailyRangeLabel: document.getElementById('dailyRangeLabel'),
+    dailyRangeValue: document.getElementById('dailyRangeValue'),
+    dailyRangeUnit: document.getElementById('dailyRangeUnit'),
+    dailyRangeDate: document.getElementById('dailyRangeDate'),
      modal: document.getElementById('compatibilityModal'),
      modalIcon: document.getElementById('modalIcon'),
      modalTitle: document.getElementById('modalTitle'),
      modalMessage: document.getElementById('modalMessage'),
      modalActionBtn: document.getElementById('modalActionBtn'),
      dailyChart: document.getElementById('dailyChart'),
-     dailyEmpty: document.getElementById('dailyEmpty'),
      mainTabDataBtn: document.getElementById('mainTabDataBtn'),
      mainTabGuideBtn: document.getElementById('mainTabGuideBtn'),
      mainTabSettingBtn: document.getElementById('mainTabSettingBtn'),
@@ -176,6 +206,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      characteristic: null,
      dailyChar: null,
      daily30Char: null,
+     daily30ExtChar: null,   // 0xFFEE 30 天温度极值（相对均值的 0.1℃ 偏移），按 dateEpoch join 到 0xFFED
      dailyRange: 7,   // 日均图显示天数：7 或 30（0xFFED 有数据时才能选 30）
      resetChar: null,
     calibChar: null,
@@ -183,7 +214,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     latestChar: null,
     latestShown: null,   // "Latest measurement" 卡片当前展示的记录（时间戳水位），防止被更旧的历史数据覆盖
     tempOffsetChar: null,
-    tempOffsetX10: 0,
+    tempOffsetX100: 0,   // 设备 0xFFE8 原值：小端 int16，单位 0.01℃（±1000 = ±10.00℃），不是 0.1℃
     calibStatusChar: null,
     calibSaved: null,
     devNameChar: null,
@@ -191,6 +222,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     otaRunning: false,
     otaLastFirmware: null,
     otaJustSucceeded: false,   // 中文：OTA 刚成功（设备重启断链）——断链清理时保留 Setting 页展示成功提示
+    idleTimer: null,           // 180s 无续命 → 弹"保持连接"提醒
+    idleTickTimer: null,       // 弹窗里的 30s 倒计时
+    idleLeft: 0,
+    idleSleepExpected: false,  // 预期内的休眠断链（倒计时归零 / 用户点 Let it sleep）——用于区分"省电断开"与"真故障"
     fwVersion: null,
     fwUpdate: null,
      pollTimer: null,
@@ -227,11 +262,24 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    function tempDeltaSymbol() { return state.tempUnit === 'F' ? '°F' : '℃'; }
    function fmtTempDelta(deltaC, decimals = 1) { return `${tempDeltaVal(deltaC).toFixed(decimals)} ${tempDeltaSymbol()}`; }
 
+   // 温度极值风险阈值（℃ 为内部真值，绘制/文案时再经 tempVal 换到当前显示单位）：
+   //   霜冻：日最低 ≤ 2℃ —— 这是"土壤温度"不是气温，≤2℃ 时根区已临近冰点，
+   //         浅根/幼苗开始受害。别用 5℃：温带春秋季常态夜温就常在 3~5℃，
+   //         阈值太宽会让大半年天天亮蓝点，标记失去信息量
+   //   热害：日最高 ≥ 35℃ —— 常见作物光合开始受阻、土壤表层失水陡增
+   const DAILY_FROST_C = 2;
+   const DAILY_HEAT_C = 35;
+
+
    const DAILY_METRICS = {
      temp: {
        key: 'temp',
        title: 'Temperature',
        color: '#f59e0b',
+       // 按钮"卡片切换"样式：选中=线色填充白字（-600 深一档保证对比度），未选=同色浅底。
+       // 与顶部 24h/7D/30D 的中性灰分段控件拉开层次，且按钮颜色即图线颜色的映射
+       onCls: 'bg-amber-600 text-white shadow-sm',
+       offCls: 'bg-amber-50 text-amber-700 hover:bg-amber-100',
        formatValue: v => `${v.toFixed(1)}${tempUnitSymbol()}`,
        axisFormatter: v => v.toFixed(1),
        range: null,
@@ -241,6 +289,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        key: 'hum',
        title: 'Moisture',
        color: '#0ea5e9',
+       onCls: 'bg-sky-600 text-white shadow-sm',
+       offCls: 'bg-sky-50 text-sky-700 hover:bg-sky-100',
        formatValue: v => `${v.toFixed(1)}%`,
        axisFormatter: v => v.toFixed(0),
        range: [0, 100],
@@ -250,9 +300,17 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        key: 'battPercent',
        title: 'Battery',
        color: '#10b981',
+       onCls: 'bg-emerald-600 text-white shadow-sm',
+       offCls: 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100',
        formatValue: v => `${v.toFixed(0)}%`,
        axisFormatter: v => v.toFixed(0),
-       range: [0, 100],
+       // 中文：电量不要再固定 0~100 轴。2 节干电池满量程 1000mV 对应 100%，
+       //      30 天通常只掉 1~3%，钉死在 0~100 上会画成一条水平线，看不出变化；
+       //      改自动量程（niceRange 会留 20% 余量），边界夹在 0~100，最小跨度 4%
+       //      以免把 1% 的量化台阶放大成断崖。
+       range: null,
+       bounds: [0, 100],
+       minSpan: 4,
        button: 'dailyMetricBattBtn',
      },
    };
@@ -265,7 +323,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      console.debug(`[SoilPulse +${dt}s] ${msg}`);
    }
  
-   function setStatus(mode) {
+   // customText 用于区分断开原因（如"设备省电休眠"与"真故障"），不传则用默认文案
+   function setStatus(mode, customText) {
      const map = {
        disconnected: ['bg-slate-300', 'Disconnected', false],
        connecting:   ['bg-amber-400', 'Connecting…', true],
@@ -273,7 +332,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      };
      const [dot, text, active] = map[mode];
      els.statusDot.className = `w-3 h-3 rounded-full ${dot}`;
-     els.statusText.textContent = text;
+     els.statusText.textContent = customText || text;
     els.deviceNameText.classList.toggle('dev-name-idle', mode === 'disconnected');
     els.calibStatus.style.color = '';
      els.connectBtn.textContent = mode === 'connected' ? 'Disconnect' : 'Connect';
@@ -397,7 +456,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       .slice(-max);
    }
 
- // 中文：按"本地 0 点 epoch"精确合并两路日均值（0xFFED 的 30 天 + 0xFFE3 的 7 天）。
+// 中文：按"本地 0 点 epoch"精确合并两路日均值（0xFFED 的 30 天 + 0xFFE3 的 7 天）。
  //       dateEpoch 是天索引×86400，不存在秒级漂移，直接按值去重即可；
  //       同一日期以 extra（0xFFE3，RAM 环）为准——它更新更及时。
  function mergeDailyRecords(base, extra) {
@@ -409,6 +468,21 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      if (Number.isFinite(r?.dateEpoch)) byDay.set(r.dateEpoch, r);
    });
    return Array.from(byDay.values()).sort((a, b) => a.dateEpoch - b.dateEpoch);
+ }
+
+// 中文：把 0xFFEE 的温度极值按 dateEpoch 挂到日均记录上（值 = 相对当日均值的 0.1℃ 偏移）。
+//       挂在记录上而不是另存一张 Map：sanitizeDailyRecords 只做过滤/排序/截断、保留整条对象，
+//       所以极值能跟着日均缓存一起持久化，切 7D/30D、重绘、离线看缓存时都还在。
+//       旧固件记录（0xFFEE 缺失或 0x80=UNKNOWN）不挂字段，渲染侧按"无极值"处理。
+ function attachDailyExt(records, extMap) {
+   if (!extMap || !extMap.size || !Array.isArray(records)) return records;
+   records.forEach((r) => {
+     const ext = extMap.get(r?.dateEpoch);
+     if (!ext || ext.tempMinD10 == null || ext.tempMaxD10 == null) return;
+     r.tempMinD10 = ext.tempMinD10;
+     r.tempMaxD10 = ext.tempMaxD10;
+   });
+   return records;
  }
 
  function sanitizeTrendRecords(records) {
@@ -675,13 +749,18 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
   function loadCachedTrendRecords(deviceId) {
     if (!deviceId) return [];
     const cache = readJsonCache(cacheKey('trend', deviceId));
-    return sanitizeTrendRecords(cache?.records);
+    const records = sanitizeTrendRecords(cache?.records);
+    const cutoff = getClearCutoff(deviceId);
+    return cutoff ? records.filter((r) => r.timestamp > cutoff) : records;
   }
 
   function loadCachedDailyRecords(deviceId) {
     if (!deviceId) return [];
     const cache = readJsonCache(cacheKey('daily', deviceId));
-    return sanitizeDailyRecords(cache?.records);
+    const records = sanitizeDailyRecords(cache?.records);
+    const cutoff = getClearCutoff(deviceId);
+    // dateEpoch 是"当天 0 点"，保留清空当天及之后的桶（+86400 让清空当天不被误杀）
+    return cutoff ? records.filter((r) => Number(r.dateEpoch) + 86400 > cutoff) : records;
   }
 
   function saveTrendRecordsCache(records, deviceId) {
@@ -756,16 +835,32 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     }
   }
 
-  function clearAllCache() {
-    const keys = Object.keys(localStorage).filter((key) => key.startsWith(CACHE_PREFIX));
+  // 中文：只清"设备数据"类缓存（trend / daily / fwVer / pendingFw），
+  //      保留 lastDevice（上次连接的设备，决定首屏回显哪台设备的数据）、
+  //      devName、tempUnit、dailyRange —— 这些是用户偏好，不属于"测量数据"。
+  //      历史实现按 CACHE_PREFIX 全删，导致清一次数据就丢掉 lastDevice，
+  //      下次打开页面不再回显上次设备，表现为"分设备缓存逻辑消失了"。
+  function clearAllCache({ markCutoff = true } = {}) {
+    const isDataKey = (key) => RECORD_KEY_RE.test(key)
+      || key.startsWith(`${CACHE_PREFIX}fwVer:`)
+      || key.startsWith(`${CACHE_PREFIX}pendingFw:`);
+    const keys = Object.keys(localStorage).filter(isDataKey);
     keys.forEach((key) => localStorage.removeItem(key));
+    // 只有设备确实被清了才立水位：否则设备里还是老数据，立了水位会把
+    // 重连后 0xFFEC 读回来的真实历史也一起挡掉，等于"假装清干净了"
+    if (markCutoff) setClearCutoff(state.activeDeviceId);
     resetDisplay();
-    log(`Cache cleared: removed ${keys.length} key(s)`);
+    state.lastNotifiedRec = null;   // 清掉 notify 去重基线，避免重连后拿旧记录做基线
+    log(`Cache cleared: removed ${keys.length} key(s)${markCutoff ? ' + clear cutoff set' : ''}`);
   }
 
   // Factory reset 联动：设备端数据全部擦除后，网页本地为该设备缓存的数据同步清除——
   // 校准尝试记录（CALIB_ATTEMPT_KEY，不在 CACHE_PREFIX 下，clearAllCache 管不到）、
   // 该设备的历史/日均值缓存、设备展示名徽章。lastDevice（便于重连）与温度单位偏好保留
+  // 【必须同时清内存】只删 localStorage 是不够的：state.lastRecords / lastDailyRecords
+  //   仍留在内存里，图表也还画在 canvas 上；下一次 render()（轮询/重连/切 tab）会拿这份
+  //   残留数据 merge 并 saveTrendRecordsCache 写回本地缓存 → 设备明明已擦除，网页上
+  //   "重置后历史数据还在"，重连后还会被 restoreCachedCharts 重新画出来。
   function clearLocalDeviceCache() {
     try {
       localStorage.removeItem(CALIB_ATTEMPT_KEY);
@@ -777,6 +872,9 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     renderCalibPointUi('dry', 'clear');
     renderCalibPointUi('wet', 'clear');
     clearDeviceNameBadge();
+    setClearCutoff(state.activeDeviceId);   // 立水位：重置前的记录一律不再进 24h 表
+    resetDisplay();                 // 清内存（lastRecords/lastDailyRecords/latestShown）+ 重绘空图表/空表格
+    state.lastNotifiedRec = null;   // 清掉 notify 去重基线
   }
 
     /**
@@ -824,7 +922,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     /**
      * 绘制Y轴刻度文本。
      */
-    function drawYAxisTicks(ctx, lo, hi, padTop, plotH, x, align, color, formatter) {
+    function drawYAxisTicks(ctx, lo, hi, padTop, plotH, x, align, color, formatter, skipYs) {
       ctx.fillStyle = color;
       ctx.font = '10px sans-serif';
       ctx.textAlign = align;
@@ -833,6 +931,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       for (let i = 0; i <= 4; i++) {
         const val = hi - (hi - lo) * (i / 4);
         const y = padTop + (plotH / 4) * i;
+        // 中文：落在阈值角标上的刻度直接不画（由角标顶替），避免两行字叠在一起
+        if (skipYs && skipYs.some((sy) => Math.abs(sy - y) < 9)) continue;
         ctx.fillText(fmt(val), x, y);
       }
     }
@@ -882,8 +982,14 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
  
    function render(records) {
     // 中文：先并入既有 24h 数据再清洗封顶——轮询(0xFFE1 5 条)/通知带来的增量
-    //      直接覆盖 state.lastRecords 会把 24h 缓存缩水成 5 条
-    records = sanitizeTrendRecords(mergeTrendRecords(state.lastRecords, records));
+    //      直接覆盖 state.lastRecords 会把 24h 缓存缩水成 5 条。
+    //      内存残留若早于"清空水位"则不参与合并：设备被重置后旧记录不得借这一拍复活，
+    //      但本次传入的 records（设备新鲜读出的）不受水位影响。
+    const cutoff = getClearCutoff(state.activeDeviceId);
+    const base = cutoff
+      ? (state.lastRecords || []).filter((r) => Number(r?.timestamp) > cutoff)
+      : state.lastRecords;
+    records = sanitizeTrendRecords(mergeTrendRecords(base, records));
     if (!records.length) return;
      state.lastRecords = records;
     saveTrendRecordsCache(records, state.activeDeviceId);
@@ -987,61 +1093,106 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        return;
      }
 
-     const stepX = plotW / (records.length - 1);
+     // 中文：X 轴按真实时间定位。旧实现是 i * stepX（等距索引），坐标与时间无关——
+     //      设备重启 / 清空 / 深睡造成几小时断档时，断档会被画成和正常 10 分钟间隔一样宽，
+     //      点越多越假（144 条时一条直线铺满，完全看不出哪段没数据）。
+     //      采样均匀时两法视觉一致，有断档时只有时间轴才说得清"哪里缺数据"。
+     const n = records.length;
+     const t0 = records[0].timestamp;
+     const t1 = records[n - 1].timestamp;
+     const span = Math.max(1, t1 - t0);
+     const xOf = (ts) => padLeft + ((ts - t0) / span) * plotW;
+
+     // 断档判定：超过"中位采样间隔 ×3"且至少 30 分钟才断线，避免正常抖动把曲线切碎
+     const deltas = [];
+     for (let i = 1; i < n; i++) deltas.push(records[i].timestamp - records[i - 1].timestamp);
+     const sortedDeltas = [...deltas].sort((a, b) => a - b);
+     const medDelta = sortedDeltas.length ? sortedDeltas[Math.floor(sortedDeltas.length / 2)] : 0;
+     const gapLimit = Math.max(medDelta * 3, 1800);
+     const segs = [[0]];
+     for (let i = 1; i < n; i++) {
+       if (records[i].timestamp - records[i - 1].timestamp > gapLimit) segs.push([i]);
+       else segs[segs.length - 1].push(i);
+     }
 
      const plotSeries = (vals, color, lo, hi, fillArea) => {
-       if (fillArea) {
-         ctx.beginPath();
-         vals.forEach((v, i) => {
-           const x = padLeft + i * stepX;
-           const y = padTop + (1 - (v - lo) / (hi - lo)) * plotH;
-           i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-         });
-         ctx.lineTo(padLeft + (vals.length - 1) * stepX, padTop + plotH);
-         ctx.lineTo(padLeft, padTop + plotH);
-         ctx.closePath();
-         ctx.fillStyle = `${color}12`;
-         ctx.fill();
-       }
+       segs.forEach((seg) => {
+         // 面积填充按段闭合：断档两侧各自成块，不跨断档拉直线
+         if (fillArea && seg.length > 1) {
+           ctx.beginPath();
+           seg.forEach((i, k) => {
+             const x = xOf(records[i].timestamp);
+             const y = padTop + (1 - (vals[i] - lo) / (hi - lo)) * plotH;
+             k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+           });
+           ctx.lineTo(xOf(records[seg[seg.length - 1]].timestamp), padTop + plotH);
+           ctx.lineTo(xOf(records[seg[0]].timestamp), padTop + plotH);
+           ctx.closePath();
+           ctx.fillStyle = `${color}12`;
+           ctx.fill();
+         }
 
-       ctx.beginPath();
-       ctx.strokeStyle = color;
-       ctx.lineWidth = compact ? 2.2 : 2.5;
-       ctx.lineJoin = 'round';
-       ctx.lineCap = 'round';
-       vals.forEach((v, i) => {
-         const x = padLeft + i * stepX;
-         const y = padTop + (1 - (v - lo) / (hi - lo)) * plotH;
-         i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-       });
-       ctx.stroke();
+         if (seg.length > 1) {
+           ctx.beginPath();
+           ctx.strokeStyle = color;
+           ctx.lineWidth = compact ? 2.2 : 2.5;
+           ctx.lineJoin = 'round';
+           ctx.lineCap = 'round';
+           seg.forEach((i, k) => {
+             const x = xOf(records[i].timestamp);
+             const y = padTop + (1 - (vals[i] - lo) / (hi - lo)) * plotH;
+             k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+           });
+           ctx.stroke();
+         }
 
-       vals.forEach((v, i) => {
-         const x = padLeft + i * stepX;
-         const y = padTop + (1 - (v - lo) / (hi - lo)) * plotH;
-         ctx.beginPath();
-         ctx.arc(x, y, compact ? 3.2 : 4, 0, Math.PI * 2);
-         ctx.fillStyle = '#fff';
-         ctx.fill();
-         ctx.lineWidth = compact ? 2 : 2.2;
-         ctx.strokeStyle = color;
-         ctx.stroke();
+        // 中文：数据点标记按"像素间距"决定画法。点密集（间距 < ~3 倍标记直径）时
+        //      逐点画圈会互相重叠成"毛毛虫"，段边界标记也会在图中间冒出圆圈，
+        //      此时整条曲线只在最末点（最新读数）画一个标记；稀疏或单点段逐点标记。
+        const markerR = compact ? 3.2 : 4;
+        const xFirst = xOf(records[seg[0]].timestamp);
+        const xLast = xOf(records[seg[seg.length - 1]].timestamp);
+        const spacing = seg.length > 1 ? (xLast - xFirst) / (seg.length - 1) : Infinity;
+        const dense = spacing < markerR * 6;
+        const lastIdx = records.length - 1;
+        const markIdx = dense ? (seg.includes(lastIdx) ? [lastIdx] : []) : seg;
+        markIdx.forEach((i) => {
+          const x = xOf(records[i].timestamp);
+          const y = padTop + (1 - (vals[i] - lo) / (hi - lo)) * plotH;
+          ctx.beginPath();
+          ctx.arc(x, y, markerR, 0, Math.PI * 2);
+          ctx.fillStyle = '#fff';
+          ctx.fill();
+          ctx.lineWidth = compact ? 2 : 2.2;
+          ctx.strokeStyle = color;
+          ctx.stroke();
+        });
        });
      };
 
      plotSeries(hums, '#0ea5e9', hLo, hHi, true);
      plotSeries(temps, '#f59e0b', tRange.lo, tRange.hi, false);
 
+     // 中文：X 轴刻度改为"本地整点刻度"，不再按记录索引抽样。
+     //      旧实现按 i % skip 抽标签，跳过的记录数与真实时间无关，
+     //      所以点一多标签就和曲线对不上（用户看到的"超过 5 条就对不齐"）。
      ctx.fillStyle = '#94a3b8';
      ctx.font = compact ? '8.5px sans-serif' : '9px sans-serif';
-     ctx.textAlign = 'center';
      ctx.textBaseline = 'top';
-     const maxLabels = Math.max(2, Math.floor(plotW / (compact ? 50 : 56)));
-     const skip = records.length > maxLabels ? Math.ceil(records.length / maxLabels) : 1;
-     records.forEach((r, i) => {
-       if (i % skip !== 0 && i !== records.length - 1) return;
-       const x = padLeft + i * stepX;
-       ctx.fillText(formatShortTime(r.timestamp), x, padTop + plotH + 6);
+     const labelY = padTop + plotH + 6;
+     const maxTicks = Math.max(2, Math.floor(plotW / (compact ? 62 : 76)));
+     const stepH = [1, 2, 3, 4, 6, 12, 24].find((hh) => span / (hh * 3600) <= maxTicks) || 24;
+     const ticks = [];
+     for (let tick = Math.floor(t0 / 3600) * 3600; tick <= t1; tick += 3600) {
+       if (tick < t0) continue;
+       if (new Date(tick * 1000).getHours() % stepH !== 0) continue;
+       ticks.push(tick);
+     }
+     // 跨度不足一个刻度（刚连上只有两三条）：退化为首尾标注，避免只剩一个孤立标签
+     if (ticks.length < 2) { ticks.length = 0; ticks.push(t0, t1); }
+     ticks.forEach((ts, k) => {
+       ctx.textAlign = k === 0 ? 'left' : (k === ticks.length - 1 ? 'right' : 'center');
+       ctx.fillText(formatShortTime(ts), padLeft + ((ts - t0) / span) * plotW, labelY);
      });
    }
 
@@ -1065,15 +1216,29 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       const rightAxis = options.rightAxisIndices || [];
       const dual = rightAxis.length > 0;
 
-      const padTop = 20;
-      const padBottom = 44;
-      const padLeft = Math.max(38, w * 0.10);
-      const padRight = dual ? Math.max(38, w * 0.10) : Math.max(24, w * 0.06);
+      // 中文：内边距按"够放刻度就停"取值——手机绘图区本来就窄，旧的 padLeft 38 /
+      //      padBottom 44 把 1/4 画布留成了空白，数据看着像"没几条"。左侧只留
+      //      10px 字号刻度宽度（"28.3" ≈ 21px + 6px 间隙），底部只留一行日期高度。
+      const padTop = 8;
+      const padBottom = 22;
+      // 中文：左槽只放"刻度数字 + 阈值角标"两列，宽度按 10px 刻度（"44.2" ≈ 21px）
+      //      加 6px 间隙取值；右侧非双轴视图只留 8px 呼吸位
+      const padLeft = Math.max(28, w * 0.07);
+      const padRight = dual ? Math.max(28, w * 0.07) : Math.max(8, w * 0.02);
       const plotW = w - padLeft - padRight;
       const plotH = h - padTop - padBottom;
 
-      const ranges = series.map(({ values }) => {
-        const min = Math.min(...values), max = Math.max(...values);
+      // 中文：band = 每个点的"取值范围"（日均温度 min–max）。量程必须把它算进去，
+      //      否则极值会被裁到画布外——均值线在 20~25℃ 时，一个 -3℃ 的霜冻极值会画到坐标轴外
+      const bandIdx = options.band ? (options.band.index ?? 0) : -1;
+      const ranges = series.map(({ values }, idx) => {
+        let min = Math.min(...values), max = Math.max(...values);
+        if (idx === bandIdx) {
+          const blo = options.band.lo.filter(Number.isFinite);
+          const bhi = options.band.hi.filter(Number.isFinite);
+          if (blo.length) min = Math.min(min, ...blo);
+          if (bhi.length) max = Math.max(max, ...bhi);
+        }
         return niceRange(min, max);
       });
 
@@ -1084,12 +1249,95 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       let rightHi = rightAxis.length ? Math.max(...rightAxis.map(i => ranges[i].hi)) : 1;
       if (options.leftAxisRange) { leftLo = options.leftAxisRange[0]; leftHi = options.leftAxisRange[1]; }
       if (options.rightAxisRange) { rightLo = options.rightAxisRange[0]; rightHi = options.rightAxisRange[1]; }
+      // 中文：自动量程的物理边界（电量 0~100 这类），只夹边界、不改变自适应能力
+      if (options.leftAxisBounds) {
+        leftLo = Math.max(options.leftAxisBounds[0], leftLo);
+        leftHi = Math.min(options.leftAxisBounds[1], leftHi);
+      }
+      // 中文：最小可视跨度——电量这类"1% 量化"的指标，跨度过小会把 1 个 LSB 的
+      //      量化台阶放大成"断崖"。至少给 4 个百分点，噪声不再被戏剧化。
+      if (options.leftAxisMinSpan && leftHi - leftLo < options.leftAxisMinSpan) {
+        const mid = (leftLo + leftHi) / 2;
+        leftLo = mid - options.leftAxisMinSpan / 2;
+        leftHi = mid + options.leftAxisMinSpan / 2;
+        if (options.leftAxisBounds) {
+          if (leftLo < options.leftAxisBounds[0]) { leftHi += options.leftAxisBounds[0] - leftLo; leftLo = options.leftAxisBounds[0]; }
+          if (leftHi > options.leftAxisBounds[1]) { leftLo -= leftHi - options.leftAxisBounds[1]; leftHi = options.leftAxisBounds[1]; }
+        }
+      }
+      if (leftHi - leftLo < 1e-6) leftHi = leftLo + 1;
+
+      // 中文：温度风险区背景——整片高于热害阈值涂淡红、低于霜冻阈值涂淡蓝。
+      //      比"每天一根竖须/一条 min–max 色带"更省心：不需要任何图例，曲线掉进蓝区
+      //      就是要防冻、伸进红区就是要防灼。画在坐标轴框架之前，网格线保持清晰。
+      if (options.band) {
+        const useRight = rightAxis.includes(bandIdx >= 0 ? bandIdx : 0);
+        const zLo = useRight ? rightLo : leftLo;
+        const zHi = useRight ? rightHi : leftHi;
+        const zy = v => padTop + (1 - (v - zLo) / (zHi - zLo)) * plotH;
+        const heat = options.band.heatAbove;
+        const frost = options.band.frostBelow;
+
+        // 阈值线：虚线而非实线，避免和均值线抢注意力；只画在对应色区的边界上
+        const edge = (y, color) => {
+          ctx.save();
+          ctx.setLineDash([4, 3]);
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(padLeft, y);
+          ctx.lineTo(padLeft + plotW, y);
+          ctx.stroke();
+          ctx.restore();
+        };
+
+        ctx.save();
+        if (Number.isFinite(heat) && heat < zHi) {
+          const yEdge = zy(Math.max(zLo, heat));
+          ctx.fillStyle = 'rgba(220,38,38,0.10)';
+          ctx.fillRect(padLeft, padTop, plotW, Math.max(0, yEdge - padTop));
+          edge(yEdge, 'rgba(220,38,38,0.45)');
+          // 阈值数值不画在图内：最新的竖条正好落在右侧、左缘也被首日条压住，
+          // 改成摘要头右侧的固定图例（见 updateDailyZoneLegend）
+        }
+        if (Number.isFinite(frost) && frost > zLo) {
+          const yEdge = zy(Math.min(zHi, frost));
+          ctx.fillStyle = 'rgba(2,132,199,0.10)';
+          ctx.fillRect(padLeft, yEdge, plotW, Math.max(0, padTop + plotH - yEdge));
+          edge(yEdge, 'rgba(2,132,199,0.45)');
+        }
+        ctx.restore();
+      }
 
       drawAxisFrame(ctx, padTop, padLeft, padRight, w, plotH);
 
       const leftColor = options.leftAxisColor || '#64748b';
       const leftFmt = options.leftAxisFormatter || (v => v.toFixed(1));
-      drawYAxisTicks(ctx, leftLo, leftHi, padTop, plotH, padLeft - 6, 'right', leftColor, leftFmt);
+      // 中文：阈值角标（≥35.0 红 / ≤2.0 蓝）与刻度数字同列，先算出它们的 y，
+      //      再交给刻度绘制做"让位"——阈值贴近某个刻度时，那个灰色刻度干脆不画，
+      //      由彩色角标顶替。这样永远不会出现两行字叠在一起（旧做法是挪 7px，
+      //      刻度一多仍然会压住）。
+      const thMarks = [];
+      if (options.band && !dual) {
+        const pushMark = (val, color, prefix) => {
+          if (!Number.isFinite(val) || val <= leftLo || val >= leftHi) return;
+          thMarks.push({
+            y: padTop + (1 - (val - leftLo) / (leftHi - leftLo)) * plotH,
+            color,
+            text: `${prefix}${val.toFixed(1)}`,
+          });
+        };
+        pushMark(options.band.heatAbove, '#dc2626', '≥');
+        pushMark(options.band.frostBelow, '#0284c7', '≤');
+      }
+      drawYAxisTicks(ctx, leftLo, leftHi, padTop, plotH, padLeft - 6, 'right', leftColor, leftFmt, thMarks.map(m => m.y));
+      thMarks.forEach(({ y, color, text }) => {
+        ctx.font = 'bold 8px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = color;
+        ctx.fillText(text, padLeft - 6, y);
+      });
 
       if (dual) {
         const rightColor = options.rightAxisColor || '#64748b';
@@ -1114,7 +1362,58 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       const stepX = plotW / (len - 1);
       const allLabels = [];
 
+      // 中文：点击/tap 选日（Apple Health 式）。把本次布局存到 canvas 上，
+      //      外部点击处理器用它把 offsetX 换算成天序号，无需重复推算内边距
+      canvas._chartLayout = { padLeft, plotW, stepX, len };
+      const selIdx = Number.isInteger(options.selIdx) ? options.selIdx : len - 1;
+
+      // 中文：min–max 画成 Apple Health 健康数据那种"圆头竖条"——每天一根，
+      //      条的两端即当天最低/最高。圆头粗条自带"这是一段范围"的语义，
+      //      不需要图例；均值即条的中点，不再叠折线（叠线会和条互相打架）。
+      //      画在网格之后、无系列线遮挡，选中日加一条浅灰竖细线做指示。
+      if (options.band) {
+        const useRight = rightAxis.includes(bandIdx >= 0 ? bandIdx : 0);
+        const lo = useRight ? rightLo : leftLo;
+        const hi = useRight ? rightHi : leftHi;
+        const yOf = v => padTop + (1 - (v - lo) / (hi - lo)) * plotH;
+        const { lo: bLo, hi: bHi } = options.band;
+        const xOf = i => padLeft + i * stepX;
+
+        ctx.save();
+        if (Number.isInteger(options.selIdx) && options.selIdx >= 0 && options.selIdx < len) {
+          ctx.strokeStyle = '#cbd5e1';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(xOf(options.selIdx), padTop);
+          ctx.lineTo(xOf(options.selIdx), padTop + plotH);
+          ctx.stroke();
+        }
+        const { color: barColor } = series[bandIdx >= 0 ? bandIdx : 0] || {};
+        ctx.strokeStyle = barColor || '#f59e0b';
+        ctx.lineCap = 'round';
+        // 条宽随像素间距伸缩：30D 手机 ~8.6px/天 → 3.6px；7D/桌面 40px+ → 封顶 7px
+        ctx.lineWidth = Math.max(3, Math.min(7, stepX * 0.42));
+        for (let i = 0; i < len; i++) {
+          if (!Number.isFinite(bLo[i]) || !Number.isFinite(bHi[i])) continue;
+          ctx.beginPath();
+          ctx.moveTo(xOf(i), yOf(bHi[i]));
+          ctx.lineTo(xOf(i), yOf(bLo[i]));
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // 中文：rangeBars 模式下，band 系列改用上面的圆头竖条表达，不再画折线+点标记
+      const barsFor = (options.rangeBars && options.band) ? (bandIdx >= 0 ? bandIdx : 0) : -1;
+
+      // 中文：像素密度判定，与 24h 图 drawChart 的点标记同一套口径（间距 < 6 倍
+      //      标记半径即算密）。逐点画 3.5px 圈在密集视图会连成"毛毛虫"，
+      //      密集时点标记只画最末一天（最新读数）；稀疏时维持逐点原样。
+      const markerR = 3.5;
+      const dense = stepX < markerR * 6;
+
       series.forEach(({ values, color }, idx) => {
+        if (idx === barsFor) return;
         const useRight = rightAxis.includes(idx);
         const lo = useRight ? rightLo : leftLo;
         const hi = useRight ? rightHi : leftHi;
@@ -1131,11 +1430,15 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         });
         ctx.stroke();
 
-        values.forEach((v, i) => {
+        // 中文：点标记按像素间距决定画法——与 24h 图 drawChart 同一阈值
+        //      （间距 < 6 倍标记半径即密）。密集时逐点画圈会连成"毛毛虫"，
+        //      只在最末点（最新一天）画一个；稀疏时逐点标记。
+        const markIdx = dense ? [len - 1] : values.map((_, i) => i);
+        markIdx.forEach((i) => {
           const x = padLeft + i * stepX;
-          const y = padTop + (1 - (v - lo) / (hi - lo)) * plotH;
+          const y = padTop + (1 - (values[i] - lo) / (hi - lo)) * plotH;
           ctx.beginPath();
-          ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+          ctx.arc(x, y, markerR, 0, Math.PI * 2);
           ctx.fillStyle = '#fff';
           ctx.fill();
           ctx.lineWidth = 2;
@@ -1172,9 +1475,15 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         const maxLabels = Math.max(2, Math.floor(plotW / 44));
         const skip = len > maxLabels ? Math.ceil(len / maxLabels) : 1;
         options.xLabels.forEach((label, i) => {
-          if (i % skip !== 0 && i !== len - 1) return;
+          if (i !== len - 1) {
+            if (i % skip !== 0) return;
+            // 末位标签固定要画；skip 抽稀后若倒数第二个正好落在它旁边，让位避免重叠
+            if (i === len - 2 && skip > 1) return;
+          }
           const x = padLeft + i * stepX;
-          ctx.fillText(String(label), x, padTop + plotH + 6);
+          // 中文：首尾标签钳回画布内——padRight 收窄后末位"10/21"再居中会探出右缘被裁
+          const cx = Math.min(w - 14, Math.max(14, x));
+          ctx.fillText(String(label), cx, padTop + plotH + 6);
         });
       }
     }
@@ -1184,35 +1493,126 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        const btn = els[cfg.button];
        if (!btn) return;
        const active = state.dailyMetric === metric;
-       btn.className = `daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${active ? 'bg-white shadow-sm' : 'text-slate-500'}`;
-       btn.style.color = active ? cfg.color : '';
+       // "卡片切换"样式：每个指标一张卡，选中=线色填充白字，未选=同色浅底。
+       // 视觉语言与顶部中性的 24h/7D/30D 分段控件区分开；按钮颜色即图线颜色
+       btn.className = `daily-metric-btn w-full text-center rounded-xl px-2 py-1.5 text-xs sm:px-2.5 sm:text-sm font-semibold transition ${active ? cfg.onCls : cfg.offCls}`;
+       btn.style.color = '';   // 颜色交给类控制，勿再以 style 覆盖
      });
    }
 
-   // 中文：7D/30D 分段控件的选中态——与 metric 按钮同一套视觉语言
-   function updateDailyRangeButtons() {
-     const range = (state.dailyRange === 30 && state.daily30Char) ? 30 : 7;
-     const pairs = [[els.dailyRange7Btn, 7], [els.dailyRange30Btn, 30]];
-     pairs.forEach(([btn, val]) => {
-       if (!btn) return;
-       const active = range === val;
-       btn.className = `daily-range-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${active ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`;
-       // 老固件没有 0xFFED：30D 置灰并提示（disabled 后点击不生效）
-       btn.disabled = (val === 30 && !state.daily30Char);
-       btn.classList.toggle('opacity-40', val === 30 && !state.daily30Char);
-       btn.title = (val === 30 && !state.daily30Char) ? '需固件支持 30 天日均（0xFFED）' : `${val} 天日均`;
-     });
+   // 中文：24h / 7D / 30D 现在是同一排的三个等权视图按钮（与上方 Temperature / Moisture /
+   //      Refresh 三列同节奏）。"日均"不再是独立 tab——选中 7D/30D 就是进日均视图，
+   //      所以选中态只有一份真相：dailyTabPanel 是否可见 + state.dailyRange。
+   function dailyCan30() {
+     if (state.daily30Char) return true;
+     return Array.isArray(state.lastDailyRecords) && state.lastDailyRecords.length > 7;
    }
 
-   function setDailyRange(range) {
-     if (range !== 7 && range !== 30) return;
-     if (range === 30 && !state.daily30Char) return;
-     state.dailyRange = range;
-     try { localStorage.setItem(`${CACHE_PREFIX}dailyRange:v1`, String(range)); } catch (_) {}
-     updateDailyRangeButtons();
-     if (state.lastDailyRecords && !els.dailyTabPanel.classList.contains('hidden')) {
-       renderDaily(state.lastDailyRecords);
+   function daily30BlockReason() {
+     if (state.daily30Char) return '';
+     const n = Array.isArray(state.lastDailyRecords) ? state.lastDailyRecords.length : 0;
+     return n > 0 ? '暂只有 7 天内的日均数据，累积更多或连接新固件后可看 30 天'
+                  : '需固件支持 30 天日均（0xFFED）';
+   }
+
+   // 中文：实际生效的日均区间（30D 不可用时回落到 7D）
+   function activeDailyRange() {
+     return (state.dailyRange === 30 && dailyCan30()) ? 30 : 7;
+   }
+
+   function isDailyView() {
+     return !els.dailyTabPanel.classList.contains('hidden');
+   }
+
+   const CHART_TAB_BASE = 'chart-tab-btn whitespace-nowrap rounded-lg px-2 py-1.5 text-sm font-semibold transition';
+   const CHART_TAB_ON = 'bg-emerald-700 text-white';
+   const CHART_TAB_OFF = 'bg-slate-100 text-slate-500 hover:bg-slate-200';
+
+   function updateChartViewButtons() {
+     const daily = isDailyView();
+     const range = activeDailyRange();
+     const can30 = dailyCan30();
+     if (els.trendTabBtn) {
+       els.trendTabBtn.className = `${CHART_TAB_BASE} ${daily ? CHART_TAB_OFF : CHART_TAB_ON}`;
+       els.trendTabBtn.title = '最近 24 小时的逐条记录';
      }
+     if (els.dailyRange7Btn) {
+       els.dailyRange7Btn.className = `${CHART_TAB_BASE} ${(daily && range === 7) ? CHART_TAB_ON : CHART_TAB_OFF}`;
+       els.dailyRange7Btn.title = '7 天日均';
+     }
+     if (els.dailyRange30Btn) {
+       els.dailyRange30Btn.className = `${CHART_TAB_BASE} ${(daily && range === 30) ? CHART_TAB_ON : CHART_TAB_OFF}${can30 ? '' : ' opacity-40 cursor-not-allowed'}`;
+       els.dailyRange30Btn.disabled = !can30;
+       els.dailyRange30Btn.title = can30 ? '30 天日均（设备 Flash 日志）' : daily30BlockReason();
+     }
+   }
+
+   function updateDailyNote(range) {
+     if (!els.dailyNote) return;
+     els.dailyNote.textContent = `${range}-day daily average`;
+   }
+
+   // 温度极值文案：图上色带只看得出"每天摆幅"，这行补上窗口内最低/最高那天的确切读数与日期。
+   // 只在温度指标下出现（湿度极值多为浇水尖峰、电池单调下降，都没有阈值型信息）。
+   function updateDailyExtNote(shown, cfg, band) {
+     const el = els.dailyExtNote;
+     if (!el) return;
+     if (cfg.key !== 'temp' || !band) {
+       el.classList.add('hidden');
+       el.textContent = '';
+       return;
+     }
+     let low = null, high = null;
+     shown.forEach((r) => {
+       const t = Number(r.temp);
+       if (!Number.isFinite(t)) return;
+       if (Number.isFinite(r.tempMinD10)) {
+         const v = t + r.tempMinD10 / 10;
+         if (!low || v < low.v) low = { v, r };
+       }
+       if (Number.isFinite(r.tempMaxD10)) {
+         const v = t + r.tempMaxD10 / 10;
+         if (!high || v > high.v) high = { v, r };
+       }
+     });
+     const parts = [];
+     if (low) parts.push(`${low.v <= DAILY_FROST_C ? '❄ ' : ''}Low ${fmtTemp(low.v)} · ${formatMonthDay(low.r.dateEpoch)}`);
+     if (high) parts.push(`${high.v >= DAILY_HEAT_C ? '🔥 ' : ''}High ${fmtTemp(high.v)} · ${formatMonthDay(high.r.dateEpoch)}`);
+    el.textContent = parts.join('    ');
+    el.classList.toggle('hidden', parts.length === 0);
+  }
+
+  // 中文：Apple Health 式摘要头——大号数字给出"选中那天"的读数（温度=min–max 区间），
+  //      其余指标给单值。默认选最新一天，点图中任意天由点击处理器切换。
+  function updateDailyRangeHeader(shown, cfg, band, selIdx) {
+    const card = els.dailyRangeCard;
+    if (!card) return;
+    const r = shown[selIdx];
+    if (!r) { card.classList.add('hidden'); return; }
+    card.classList.remove('hidden');
+    if (els.dailyRangeLabel) els.dailyRangeLabel.textContent = cfg.title;
+    let value = '';
+    let unit = '';
+    if (cfg.key === 'temp' && band && Number.isFinite(band.lo[selIdx]) && Number.isFinite(band.hi[selIdx])) {
+      value = `${band.lo[selIdx].toFixed(1)} – ${band.hi[selIdx].toFixed(1)}`;
+      unit = tempUnitSymbol();
+    } else {
+      let v = Number(r[cfg.key]) || 0;
+      if (cfg.key === 'temp') v = tempVal(v);   // formatValue 期望的是已换算单位前的摄氏度
+      value = cfg.formatValue(v);
+    }
+    if (els.dailyRangeValue) els.dailyRangeValue.textContent = value;
+    if (els.dailyRangeUnit) els.dailyRangeUnit.textContent = unit;
+    if (els.dailyRangeDate) els.dailyRangeDate.textContent = r.dateEpoch ? `· ${formatMonthDay(r.dateEpoch)}` : '';
+  }
+
+  function setDailyRange(range) {
+     if (range !== 7 && range !== 30) return;
+     if (range === 30 && !dailyCan30()) return;
+     state.dailyRange = range;
+     state.dailySelIdx = null;   // 换窗口后选中日重新回到最新一天
+     try { localStorage.setItem(`${CACHE_PREFIX}dailyRange:v1`, String(range)); } catch (_) {}
+     switchChartView('daily');
    }
 
    function updateTempUnitUI() {
@@ -1247,27 +1647,67 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     // 中文：state.lastDailyRecords 存的是"设备给的完整集合"（最多 30 天）——
     //      切 7D/30D 时不用重新读设备，直接在这里截取要画的那一段
     records = sanitizeDailyRecords(records);
+    // 清空水位之后：早于清空日的日均桶不再展示（设备已擦除，这些只可能是缓存残留）
+    const dailyCutoff = getClearCutoff(state.activeDeviceId);
+    if (dailyCutoff) records = records.filter((r) => Number(r.dateEpoch) + 86400 > dailyCutoff);
     state.lastDailyRecords = records;
      const cfg = DAILY_METRICS[state.dailyMetric] || DAILY_METRICS.temp;
      updateDailyMetricButtons();
-     updateDailyRangeButtons();
+     updateChartViewButtons();
 
-     // 中文：30D 只在新固件（有 0xFFED）时可选，老固件最多 7 条，选了也没意义
-     const range = (state.dailyRange === 30 && state.daily30Char) ? 30 : 7;
+     // 中文：30D 只在能拿到 30 天数据时可选（新固件 0xFFED 或缓存已超 7 天）
+     const range = activeDailyRange();
+     updateDailyNote(range);
      const shown = records.slice(-range);
 
      if (!shown.length) {
        els.dailyEmpty.classList.remove('hidden');
+       els.dailyNote?.classList.add('hidden');
+       if (els.dailyExtNote) { els.dailyExtNote.classList.add('hidden'); els.dailyExtNote.textContent = ''; }
+       if (els.dailyRangeCard) els.dailyRangeCard.classList.add('hidden');
        const ctx = els.dailyChart.getContext('2d');
        if (ctx) ctx.clearRect(0, 0, els.dailyChart.width, els.dailyChart.height);
        return;
      }
 
      els.dailyEmpty.classList.add('hidden');
+     els.dailyNote?.classList.remove('hidden');
 
      const xLabels = shown.map(r => formatMonthDay(r.dateEpoch));
      let values = shown.map(r => Number(r[cfg.key]) || 0);
      if (cfg.key === 'temp') values = values.map(tempVal);
+
+     // 中文：温度极值（0xFFEE）。设备存的是"相对当日均值的 0.1℃ 偏移"，
+     //      绝对温度 = 当日均值 + delta/10；单位换算必须在算出绝对值之后再做
+     //      （℉ 是仿射变换，偏移量不能单独换算后相加）。
+     let band = null;
+     if (cfg.key === 'temp') {
+       const bLo = [], bHi = [];
+       let hasExt = false;
+       shown.forEach((r) => {
+         const t = Number(r.temp);
+         const ok = Number.isFinite(t) && Number.isFinite(r.tempMinD10) && Number.isFinite(r.tempMaxD10);
+         if (!ok) { bLo.push(NaN); bHi.push(NaN); return; }
+         hasExt = true;
+         bLo.push(tempVal(t + r.tempMinD10 / 10));
+         bHi.push(tempVal(t + r.tempMaxD10 / 10));
+       });
+       if (hasExt) {
+         band = {
+           lo: bLo,
+           hi: bHi,
+           frostBelow: tempVal(DAILY_FROST_C),
+           heatAbove: tempVal(DAILY_HEAT_C),
+         };
+       }
+     }
+     updateDailyExtNote(shown, cfg, band);
+
+     // 中文：选中日（Apple Health 式点选）。默认最新一天；切换范围后序号可能越界，钳回
+     if (!Number.isInteger(state.dailySelIdx) || state.dailySelIdx < 0 || state.dailySelIdx >= shown.length) {
+       state.dailySelIdx = shown.length - 1;
+     }
+     updateDailyRangeHeader(shown, cfg, band, state.dailySelIdx);
 
      drawMultiSeriesChart(els.dailyChart, [
        { values, color: cfg.color },
@@ -1276,27 +1716,38 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        xLabels,
        height: isMobileViewport() ? 240 : 228,
        leftAxisRange: cfg.range || undefined,
+       leftAxisBounds: cfg.bounds || undefined,
+       leftAxisMinSpan: cfg.minSpan || undefined,
        leftAxisColor: cfg.color,
        leftAxisFormatter: cfg.axisFormatter,
+       band,
+       rangeBars: cfg.key === 'temp',
+       selIdx: state.dailySelIdx,
      });
 
      saveDailyRecordsCache(records, state.activeDeviceId);
    }
  
-   function switchChartTab(tab) {
-     const isTrend = tab === 'trend';
+   // 中文：视图切换的唯一入口——'trend'(24h 逐条) / 'daily'(7D、30D 日均)。
+   //      tab 式双按钮 + 面板内的范围控件已合并成顶部一排三个等权按钮，
+   //      所以选中态统一交给 updateChartViewButtons()，这里只负责面板与重绘。
+   function switchChartView(view) {
+     const isTrend = view === 'trend';
      els.trendTabPanel.classList.toggle('hidden', !isTrend);
      els.dailyTabPanel.classList.toggle('hidden', isTrend);
-     els.trendTabBtn.className = `chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-emerald-700 text-white' : 'bg-slate-100 text-slate-500'}`;
-     els.dailyTabBtn.className = `chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-slate-100 text-slate-500' : 'bg-emerald-700 text-white'}`;
- 
-     if (isTrend && state.lastRecords) {
-       drawChart(state.lastRecords);
-     } else if (!isTrend && state.lastDailyRecords) {
+     updateChartViewButtons();
+
+     if (isTrend) {
+       if (state.lastRecords) drawChart(state.lastRecords);
+       return;
+     }
+     if (state.lastDailyRecords) {
        renderDaily(state.lastDailyRecords);
-     } else if (!isTrend) {
+     } else {
        updateDailyMetricButtons();
-       updateDailyRangeButtons();
+       updateDailyNote(activeDailyRange());
+       els.dailyEmpty?.classList.remove('hidden');
+       els.dailyNote?.classList.add('hidden');
      }
    }
 
@@ -1344,34 +1795,51 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      let from30 = [];
      let from7 = [];
 
-     // 30 天（0xFFED，设备 Flash 日志）：一次读 185B 拿最多 30 天，跨掉电/换电池存活。
-     // 旧固件没有这个特征 → 静默退回下面的 7 天老协议
-     if (state.daily30Char) {
-       try {
-         const val = await state.daily30Char.readValue();
-         from30 = BLEProtocol.parseDaily30Packet(val);
-       } catch (err) {
-         log(`Daily30 read failed: ${err.message}`);
-       }
-     }
-
-     // 7 天（0xFFE3，RAM 环）：老固件唯一来源；新固件也读一次，
-     // 兜住"当天刚结算、Flash 还没追加"的边界，且 RAM 值更新更及时
+     // 7 天（0xFFE3，RAM 环）：与 30 天合并，兜住"当天刚结算、Flash 还没追加"的边界，
+     // 且 RAM 值更新更及时（同一天以它为准）。
      if (state.dailyChar) {
        const val = await state.dailyChar.readValue();
        from7 = BLEProtocol.parseDailyPacket(val);
      }
 
-     if (!from30.length && !from7.length && !state.daily30Char && !state.dailyChar) return;
+    // 30 天（0xFFED，设备 Flash 日志）：一次读 184B 拿最多 30 天，跨掉电/换电池存活。
+    // 包头自带设备时区，不需要再从 0xFFE3 反推（换电池后 0xFFE3 是空的）。
+    if (state.daily30Char) {
+      try {
+        const val = await state.daily30Char.readValue();
+        from30 = BLEProtocol.parseDaily30Packet(val);
+      } catch (err) {
+        log(`Daily30 read failed: ${err.message}`);
+      }
+    }
 
-     const merged = mergeDailyRecords(from30, from7);
-     const records = sanitizeDailyRecords(merged);
-     const dropped = merged.length - records.length;
-     if (dropped > 0) {
-       log(`Daily read filtered ${dropped} invalid record(s)`);
-     }
-     log(`Daily read: ${records.length} day(s) (30d=${from30.length}, 7d=${from7.length})`);
-     renderDaily(records);
+    // 30 天温度极值（0xFFEE，新固件专有）：124B 单次读完，无需分块。
+    // 旧固件没有该特征 → daily30ExtChar 为 null，静默降级为"只画均值"。
+    let extMap = null;
+    if (state.daily30ExtChar) {
+      try {
+        const val = await state.daily30ExtChar.readValue();
+        const extRecs = BLEProtocol.parseDaily30ExtPacket(val);
+        extMap = new Map(extRecs.map(e => [e.dateEpoch, e]));
+      } catch (err) {
+        log(`Daily30Ext read failed: ${err.message}`);
+      }
+    }
+
+    if (!from30.length && !from7.length && !state.daily30Char && !state.dailyChar) return;
+
+    const merged = mergeDailyRecords(from30, from7);
+    // 中文：极值必须在 merge 之后按 dateEpoch 挂——同日以 0xFFE3(RAM 环) 为准，
+    //      它会整条覆盖 0xFFED 的同一天记录；先挂再 merge 会让最近 7 天的极值被冲掉
+    attachDailyExt(merged, extMap);
+
+    const records = sanitizeDailyRecords(merged);
+    const dropped = merged.length - records.length;
+    if (dropped > 0) {
+      log(`Daily read filtered ${dropped} invalid record(s)`);
+    }
+    log(`Daily read: ${records.length} day(s) (30d=${from30.length}, 7d=${from7.length}, ext=${extMap ? extMap.size : 0})`);
+    renderDaily(records);
    }
  
  
@@ -1427,7 +1895,86 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        state.pollTimer = null;
      }
    }
- 
+
+   // —— 连接空闲提醒（与固件 SOIL_CONN_IDLE_TIMEOUT_S=240 配合）——
+   // 设备端：240s 内没有任何读写就主动断链回睡眠（省电，防止连上后忘断开）。
+   // web 端：180s 无续命就弹窗倒计时 30s 问"还要不要连着"，点保持才写 0xFFE7 续命。
+   //        不点、点"休眠"或倒计时归零都**不做任何事**，交给设备 240s 自己断——
+   //        少一条主动断代码路径，也天然覆盖"页面被挂起/被杀"的情况。
+   // 只有**能清零设备 idle 的写操作**（Refresh/Apply/校准/Clear/改名）成功后才重新计时；
+   // 轮询的读不算（设备端也不认读），否则 5s 一次的轮询会让提醒永远不出现。
+   function clearIdleWatch() {
+     if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
+     if (state.idleTickTimer) { clearInterval(state.idleTickTimer); state.idleTickTimer = null; }
+     hideIdlePrompt();
+   }
+
+   function hideIdlePrompt() {
+     if (els.idlePrompt) els.idlePrompt.classList.add('hidden');
+     if (els.idlePrompt) els.idlePrompt.classList.remove('flex');
+   }
+
+   /** 重新开始 180s 计时。必须在"设备侧 idle 被清零"之后调用，否则提醒会早于设备超时。 */
+   function armIdleWatch() {
+     clearIdleWatch();
+     state.idleSleepExpected = false;
+     if (!state.device?.gatt.connected || state.otaRunning) return;
+     // 页面在后台时不装定时器：隐藏期间不会有人点"保持连接"，装上也只会在恢复时补一次误报；
+     // 隐藏期间设备 240s 自然断，回到前台由 visibilitychange 重新装
+     if (document.visibilityState !== 'visible') return;
+     state.idleTimer = setTimeout(showIdlePrompt, IDLE_WARN_MS);
+   }
+
+   function showIdlePrompt() {
+     state.idleTimer = null;
+     // 到点时若已断开 / 正在 OTA / 页面被隐藏，都不打扰
+     if (!state.device?.gatt.connected || state.otaRunning) return;
+     if (document.visibilityState !== 'visible') return;
+     if (!els.idlePrompt) return;
+     state.idleLeft = IDLE_GRACE_S;
+     els.idleCountdown.textContent = String(state.idleLeft);
+     els.idlePrompt.classList.remove('hidden');
+     els.idlePrompt.classList.add('flex');
+     state.idleTickTimer = setInterval(() => {
+       state.idleLeft -= 1;
+       if (state.idleLeft > 0) {
+         els.idleCountdown.textContent = String(state.idleLeft);
+         return;
+       }
+       // 倒计时归零：收起弹窗，不再续命，等设备 240s 超时自己断
+       state.idleSleepExpected = true;
+       clearIdleWatch();
+       log('Idle prompt timed out — letting the device sleep');
+     }, 1000);
+     log('Idle 3 min — asking whether to keep the link alive');
+   }
+
+   /** 点「Keep connected」：写一次 0xFFE7（固件收到即清零 idle 计时），然后重新计时 */
+   async function idleKeepAlive() {
+     if (!state.device?.gatt.connected || !state.refreshChar) { clearIdleWatch(); return; }
+     els.idleKeepBtn.disabled = true;
+     try {
+       await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Idle keep-alive refresh (0xFFE7)');
+       armIdleWatch();
+       log('Link kept alive (0xFFE7), idle timer restarted');
+     } catch (err) {
+       clearIdleWatch();
+       log(`Keep-alive failed: ${err.message || err}`);
+     } finally {
+       els.idleKeepBtn.disabled = false;
+     }
+   }
+
+   /** 点「Let it sleep」：立即断开，比等 240s 更省电，也让用户所见即所得 */
+   function idleSleepNow() {
+     clearIdleWatch();
+     state.idleSleepExpected = true;
+     try { state.device?.gatt?.disconnect(); } catch (_) {}
+   }
+
+   els.idleKeepBtn?.addEventListener('click', idleKeepAlive);
+   els.idleSleepBtn?.addEventListener('click', idleSleepNow);
+
    function onDisconnected() {
       // 重入保护：gattserverdisconnected 事件 / 轮询 / forceDisconnect / visibilitychange
       // 可能并发触发，第一个进入的路径执行清理，后续直接返回（避免重复日志/重复复位）
@@ -1436,12 +1983,13 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       if (state.characteristic === null && state.device === null) return;
       state.disconnecting = true;
       try {
+        clearIdleWatch();      // 先收起空闲提醒弹窗/定时器，避免断开后还挂着一个"要不要保持连接"
         stopPolling();         // 先停定时器：防止清理期间轮询再跑一拍（断开后 GATT 报错噪音的来源）
         cancelRefreshWait();   // 若 refresh 正在等待测量结果，断连后立即恢复按钮
         state.otaRunning = false;
         setConnectBusy(false);   // 断开完成：解锁 Connect 按钮
         setOtaUiLock(false);
-        setStatus('disconnected');
+        setStatus('disconnected', state.idleSleepExpected ? 'Asleep · tap Connect' : undefined);
         syncBatteryPill();
         state.characteristic = null;   // 中文：显式置空，与 device 双 null 闭合幂等条件
         state.dailyChar = null;
@@ -1458,7 +2006,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         state.calibChar = null;
         state.refreshChar = null;
         state.tempOffsetChar = null;
-        state.tempOffsetX10 = 0;
+        state.tempOffsetX100 = 0;
         state.calibStatusChar = null;
         state.otaChar = null;
         state.otaRunning = false;
@@ -1467,7 +2015,9 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         // 断开后隐藏"已校准"徽标；设备名保留展示（最近一次连接的设备名，不随断开隐藏）
         renderCalibHints(null);
         if (els.devNameStatus) els.devNameStatus.textContent = '';
-        log('Device disconnected');
+        log(state.idleSleepExpected
+          ? 'Device disconnected — idle sleep (firmware 240s timeout)'
+          : 'Device disconnected');
       } finally {
         state.disconnecting = false;
       }
@@ -1968,7 +2518,7 @@ function clearConnectError() {
        if (token !== connectToken) return;   // 期间用户又发起了新连接，丢弃本次
 
        // 阶段2：gatt.connect + 服务/特征发现，由 finishConnect 内部保证 5s 超时
-       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, otaChar, fwVersion } = await BLEProtocol.finishConnect(
+       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, daily30ExtChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
          device,
          (records, hex) => {
            log(`Notification: ${hex}`);
@@ -1996,6 +2546,7 @@ function clearConnectError() {
        state.dailyChar = dailyChar;
        state.hisBlkChar = hisBlkChar;
        state.daily30Char = daily30Char;
+       state.daily30ExtChar = daily30ExtChar;
        state.resetChar = resetChar;
        state.calibChar = calibChar;
        state.refreshChar = refreshChar;
@@ -2047,21 +2598,22 @@ function clearConnectError() {
          }
        }
        startPolling();
+       armIdleWatch();   // 连接就绪：开始 180s 空闲提醒（固件 240s 超时兜底）
 
        // —— 以下为数据加载，串行后台执行，不阻塞按钮 ready ——
        // 读取设备当前温度偏移，同步设置面板滑杆；旧固件无此特征则保持 0 并提示不支持
        if (tempOffsetChar) {
          try {
-           state.tempOffsetX10 = await BLEProtocol.readTempOffset(tempOffsetChar);
+           state.tempOffsetX100 = await BLEProtocol.readTempOffset(tempOffsetChar);
            renderTempOffset();
            els.tempOffsetStatus.textContent = '';
          } catch (err) {
-           state.tempOffsetX10 = 0;
+           state.tempOffsetX100 = 0;
            renderTempOffset();
            log(`Temperature offset read failed: ${err.message || err}`);
          }
        } else {
-         state.tempOffsetX10 = 0;
+         state.tempOffsetX100 = 0;
          renderTempOffset();
          els.tempOffsetStatus.textContent = 'Not supported by this firmware';
        }
@@ -2170,10 +2722,18 @@ function clearConnectError() {
    });
 
    // 从后台回到前台（App 切换、标签页恢复）时校验连接：手机系统可能在后台终止 BLE 连接，
-   // 且 gattserverdisconnected 事件在 WebKit 上可能不补发，这里主动校正 UI
+   // 且 gattserverdisconnected 事件在 WebKit 上可能不补发，这里主动校正 UI。
+   // 切到后台则收起空闲提醒：隐藏期间不会有人点"保持连接" → 不写 0xFFE7 → 设备 240s 自然断，
+   // 这正是"切后台就该省电"想要的结果，不需要额外主动断链（后台定时器还可能被节流，主动断也不可靠）。
    document.addEventListener('visibilitychange', () => {
-     if (document.visibilityState === 'visible' && state.device && !state.device.gatt.connected) {
+     if (document.visibilityState !== 'visible') {
+       clearIdleWatch();
+       return;
+     }
+     if (state.device && !state.device.gatt.connected) {
        onDisconnected();
+     } else if (state.device?.gatt.connected) {
+       armIdleWatch();   // 回前台重新计时（后台那段时间不计入 180s）
      }
    });
 
@@ -2193,11 +2753,23 @@ function clearConnectError() {
      if (!state.device?.gatt.connected) return;
      const msg = 'Clear cached data on this browser AND reset the connected device history? This cannot be undone.';
      if (!window.confirm(msg)) return;
-     clearAllCache();
-     // 向已连接设备下发 Clear/Reset 指令，清空芯片 RAM 历史/日均值
+     // 中文：先让设备清（设备是权威数据源），成功后再清本地。
+     //      旧顺序"先清本地再写设备"在写入超时/失败时会造成"本机空了、设备还在"，
+     //      重连后 0xFFEC 又把旧记录拉回来，用户看到的仍是"清了没用"。
+     let deviceCleared = false;
      if (state.resetChar) {
-       await gattOp(() => BLEProtocol.sendReset(state.resetChar), 'Device reset write (0xFFE5)');
-       log('Device reset command sent (0xFFE5)');
+       try {
+         await gattOp(() => BLEProtocol.sendReset(state.resetChar), 'Device reset write (0xFFE5)');
+         deviceCleared = true;
+         log('Device reset command sent (0xFFE5)');
+       } catch (err) {
+         log(`Device reset failed (0xFFE5): ${err.message || err}`);
+       }
+     }
+     clearAllCache({ markCutoff: deviceCleared });
+     // 失败必须可见：否则本地清空成功、设备纹丝不动，用户以为清干净了
+     if (state.resetChar && !deviceCleared) {
+       els.historyBody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-rose-500">Local cache cleared, but the device did not acknowledge the reset. Reconnect and clear again — device data is still stored.</td></tr>';
      }
    }));
 
@@ -2453,6 +3025,7 @@ The device will measure the current probe state first, then apply the calibratio
       // 每次尝试的确定结果由固件记录在 0xFFE9 第 2 字节：1=干点成功 2=湿点成功
       // 3=拒:湿度未低于20% 4=拒:湿度未高于80% 5=拒:两点过近 6=方向反向 7=测量失败或断链丢弃
       await gattOp(() => BLEProtocol.sendHumCalib(state.calibChar, point), 'Calibration write (0xFFE6)');
+      armIdleWatch();   // 校准请求会触发固件立即测量并清零 idle
       log(`Moisture ${label} calibration command sent (0xFFE6)`);
 
       // 等待设备完成新测量（校准由固件在测量后自动应用或拒绝），再回读 0xFFE9 用结果码判定
@@ -2747,6 +3320,7 @@ The device will measure the current probe state first, then apply the calibratio
         ?? (state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null);
       const waitPromise = waitForLatestMeasurement(prev);
       await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)');
+      armIdleWatch();   // 这次写已经在固件侧清零 idle，提醒重新计时（避免"刚点过为什么还问"）
       log('Refresh command sent (0xFFE7), measuring now');
       const rec = await waitPromise;
       if (rec) {
@@ -2775,7 +3349,7 @@ The device will measure the current probe state first, then apply the calibratio
   // 清空/非法输入时还原为设备当前值。兼容小数逗号（"0,2"）
   els.tempOffsetInput.addEventListener('change', () => {
     const raw = parseFloat(String(els.tempOffsetInput.value).replace(',', '.'));
-    setTempOffsetTicks(Number.isFinite(raw) ? Math.round(raw * 10) : tempOffsetToTicks(state.tempOffsetX10 || 0));
+    setTempOffsetTicks(Number.isFinite(raw) ? Math.round(raw * 10) : tempOffsetToTicks(state.tempOffsetX100 || 0));
   });
 
   els.tempOffsetApplyBtn.addEventListener('click', gattButton('Temperature offset', async () => {
@@ -2787,19 +3361,23 @@ The device will measure the current probe state first, then apply the calibratio
       els.tempOffsetStatus.textContent = 'Connect device to adjust temperature offset';
       return;
     }
-    const x10 = ticksToTempOffset(tempOffsetTicksFromInput());   // ℉ 格四舍五入对齐设备 0.1℃ 网格
+    // ticksToTempOffset 返回设备原值（0.01℃ = x100）；回执文案与日志都按 ℃/℉ 显示，必须 /100，
+    // /10 会把 2.5℃ 显示成 25.0℃（历史 bug）
+    const x100 = ticksToTempOffset(tempOffsetTicksFromInput());   // ℉ 格四舍五入对齐设备 0.01℃ 网格
+    const offsetC = x100 / 100;
     els.tempOffsetApplyBtn.disabled = true;
     els.tempOffsetStatus.textContent = 'Applying temperature offset…';
     try {
-      await gattOp(() => BLEProtocol.sendTempOffset(state.tempOffsetChar, x10), 'Offset write (0xFFE8)');
-      state.tempOffsetX10 = x10;
-      renderTempOffset();   // 回显设备 0.1℃ 网格真实值（℉ 模式滑杆位置可能微调 ≤1 格）
-      els.tempOffsetStatus.textContent = `Temperature offset set to ${fmtTempDelta(x10 / 10)}`;
-      log(`Temperature offset sent (0xFFE8): ${x10 / 10}℃`);
+      await gattOp(() => BLEProtocol.sendTempOffset(state.tempOffsetChar, x100), 'Offset write (0xFFE8)');
+      state.tempOffsetX100 = x100;
+      renderTempOffset();   // 回显设备 0.01℃ 网格真实值（℉ 模式滑杆位置可能微调 ≤1 格）
+      els.tempOffsetStatus.textContent = `Temperature offset set to ${fmtTempDelta(offsetC)}`;
+      log(`Temperature offset sent (0xFFE8): ${offsetC.toFixed(2)}℃ (raw ${x100})`);
       // 立即重测，让 Data 面板尽快反映修正后的温度
       if (state.refreshChar) {
         try { await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)'); } catch (_) {}
       }
+      armIdleWatch();   // 偏移写 + 重测都在固件侧清零了 idle，提醒重新计时
     } finally {
       els.tempOffsetApplyBtn.disabled = !state.device?.gatt.connected || !state.tempOffsetChar;
     }
@@ -2902,6 +3480,7 @@ The device will measure the current probe state first, then apply the calibratio
     state.otaRunning = true;
     state.otaLastFirmware = { firmware, label, version };
     stopPolling(); // OTA 期间暂停轮询，避免 GATT 读写抢占升级链路
+    clearIdleWatch();   // OTA 期间固件强制 latency=0 且自己清零 idle，不要弹"保持连接"打扰升级
     setOtaUiLock(true);
     els.otaProgressWrap.classList.remove("hidden");
     els.otaUpdateNowBtn.disabled = true;
@@ -2994,6 +3573,7 @@ The device will measure the current probe state first, then apply the calibratio
         setOtaUiLock(false);
         setStatus("connected");
         startPolling();
+        armIdleWatch();   // OTA 结束且仍连着：恢复空闲提醒（OTA 期间不打扰）
       } else if (state.otaJustSucceeded) {
         // 中文：断链确认成功路径——onDisconnected 监听先于本 continuation 执行，
         //       可能已把页面强制切回 Data；这里恢复到 Setting 页并重套“保留成功提示”的可见性
@@ -3118,7 +3698,7 @@ The device will measure the current probe state first, then apply the calibratio
 
   // —— 温度偏移取值：待应用值恒为“当前显示单位的 0.1”格数——
   // ℃ 模式：1 格 = 0.1℃（±100 格）；℉ 模式：1 格 = 0.1℉（±180 格，±18℉ = ±10℃）。
-  // 设备存储恒为 0.1℃（s8），℉ 格写入时四舍五入到 0.1℃ 网格（偏差 ≤0.05℉），
+  // 设备存储恒为 0.01℃（int16 小端，±1000），℉ 格写入时四舍五入到 0.01℃ 网格（偏差 ≤0.05℉），
   // 因此 Apply 后按设备真实值回显时显示可能微调 ≤0.1℉。
   function tempOffsetRange() {
     return state.tempUnit === 'F'
@@ -3149,23 +3729,37 @@ The device will measure the current probe state first, then apply the calibratio
   }
 
   function renderTempOffset() {
-    const x10 = state.tempOffsetX10 || 0;
+    const x100 = state.tempOffsetX100 || 0;
     const range = tempOffsetRange();
     // 数字框随单位切换同步量程（℃ ±10.0 / ℉ ±18.0）、步进与单位后缀
     els.tempOffsetInput.min = String(range.min / 10);
     els.tempOffsetInput.max = String(range.max / 10);
     els.tempOffsetInput.step = '0.1';
     if (els.tempOffsetUnitSpan) els.tempOffsetUnitSpan.textContent = tempDeltaSymbol();
-    els.tempOffsetInput.value = (tempOffsetToTicks(x10) / 10).toFixed(1);
+    els.tempOffsetInput.value = (tempOffsetToTicks(x100) / 10).toFixed(1);
   }
 
-  els.trendTabBtn.addEventListener('click', () => switchChartTab('trend'));
-   els.dailyTabBtn.addEventListener('click', () => switchChartTab('daily'));
+  els.trendTabBtn.addEventListener('click', () => switchChartView('trend'));
   els.dailyMetricTempBtn.addEventListener('click', () => setDailyMetric('temp'));
   els.dailyMetricHumBtn.addEventListener('click', () => setDailyMetric('hum'));
   els.dailyMetricBattBtn.addEventListener('click', () => setDailyMetric('batt'));
   els.dailyRange7Btn?.addEventListener('click', () => setDailyRange(7));
   els.dailyRange30Btn?.addEventListener('click', () => setDailyRange(30));
+  // 中文：点日均图任意一天 → 摘要头切换到那天（Apple Health 式）。布局参数由
+  //      drawMultiSeriesChart 存在 canvas._chartLayout 上；click 在手机上就是 tap。
+  els.dailyChart?.addEventListener('click', (e) => {
+    const lay = els.dailyChart._chartLayout;
+    if (!lay || lay.len < 1 || lay.stepX <= 0) return;
+    const rect = els.dailyChart.getBoundingClientRect();
+    if (!rect.width) return;
+    const x = (e.clientX - rect.left) * (els.dailyChart.clientWidth / rect.width);
+    const idx = Math.round((x - lay.padLeft) / lay.stepX);
+    const sel = Math.max(0, Math.min(lay.len - 1, idx));
+    if (state.dailySelIdx !== sel) {
+      state.dailySelIdx = sel;
+      if (state.lastDailyRecords) renderDaily(state.lastDailyRecords);
+    }
+  });
   // 单位切换：点击切换器任意位置（含按钮、灰底间隙、以及当前激活的单位）都翻转单位（°F ↔ °C）。
   // 用户期望“按到上面就切换”——即使当前在 °C，按到 °C 上也切回 °F，故统一 toggle，不做“切到该按钮单位”的区分。
   els.tempUnitToggle?.addEventListener('click', () => {
@@ -3192,6 +3786,7 @@ The device will measure the current probe state first, then apply the calibratio
  
 
    updateDailyMetricButtons();
+   updateChartViewButtons();
   updateTempUnitUI();
   // 启动时恢复本地保存的校准尝试结果（问题2：刷新页面后错误/成功标记仍显示）
   ['dry', 'wet'].forEach((p) => {
