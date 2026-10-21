@@ -1,0 +1,21 @@
+{
+  "name": "soilpulse-e2e",
+  "private": true,
+  "type": "module",
+  "description": "SoilPulse web 端 E2E：用 Chrome CDP BluetoothEmulation 模拟 GATT 外设，驱动真实页面跑完整业务逻辑。不参与打包发布（CI 的 dist 只含 index.html + page/），也不被 index.html 引用。",
+  "scripts": {
+    "test": "node run-all.mjs",
+    "gatt": "node tools/extract-gatt.mjs --check",
+    "connect": "node run-connect.mjs",
+    "reset": "node run-reset.mjs",
+    "disconnect": "node run-disconnect.mjs",
+    "ota": "node run-ota-abort.mjs",
+    "full-link": "node run-full-link.mjs",
+    "offset": "node run-temp-offset.mjs",
+    "idle": "node run-idle.mjs",
+    "preview": "node preview-daily.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.0.0"
+  }
+}
