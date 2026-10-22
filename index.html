@@ -1090,11 +1090,14 @@
           Readings are already saved to this phone, so you can keep browsing the data after it disconnects.
         </p>
       </div>
+      <!-- 按钮主次跟随"默认结果"：倒计时归零 = 让设备睡，所以 Let it sleep 是主按钮（实心、更宽、
+           放左边先被拇指够到），Keep connected 退为次要按钮。默认动作和视觉重量不一致会让用户
+           以为自己必须点实心的那个才不会掉线 -->
       <div class="flex gap-2">
-        <button id="idleKeepBtn" type="button"
-          class="flex-1 px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">Keep connected</button>
         <button id="idleSleepBtn" type="button"
-          class="px-4 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200">Let it sleep</button>
+          class="flex-1 px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-emerald-600 hover:bg-emerald-700">Let it sleep</button>
+        <button id="idleKeepBtn" type="button"
+          class="px-4 py-2 text-sm font-semibold transition rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40">Keep connected</button>
       </div>
     </div>
   </div>

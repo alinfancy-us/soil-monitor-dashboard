@@ -1951,6 +1951,9 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     els.idleCountdown.textContent = String(state.idleLeft);
     els.idlePrompt.classList.remove('hidden');
     els.idlePrompt.classList.add('flex');
+    // 焦点落在主按钮（Let it sleep = 倒计时归零的默认结果）：
+    // 键盘 Enter/空格得到的动作与"不理会"一致，读屏用户也先听到默认选项
+    try { els.idleSleepBtn?.focus({ preventScroll: true }); } catch (_) { /* 老浏览器忽略 */ }
     state.idleTickTimer = setInterval(() => {
       state.idleLeft -= 1;
       if (state.idleLeft > 0) {
