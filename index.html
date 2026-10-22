@@ -1086,8 +1086,8 @@
 
   <!-- 连接空闲提醒（固件 SOIL_CONN_IDLE_TIMEOUT_S=240 的配套 UI）：
        180s 没有续命操作就弹这个，倒计时 30s。点 Keep connected 写一次 0xFFE7 把设备端
-       idle 计时清零并重新计时；点 Let it sleep 或倒计时归零 → web 立即主动断链（状态显示
-       Asleep），设备 240s 超时只兜"页面被切后台/被杀"这类 web 跑不起来的情况。
+       idle 计时清零并重新计时；点 Let it sleep 或倒计时归零 → web 立即主动断链（状态词仍是
+       Disconnected，是否预期内断开只写日志），设备 240s 超时只兜"页面被切后台/被杀"这类 web 跑不起来的情况。
        文案要交代清楚三件事：睡眠省电、断开不影响看数据、数据已经在手机上（否则用户不敢点）。
        参数见 page/js/config.js 的 IDLE_WARN_MS / IDLE_GRACE_S，三处数值须保持 180 < 210 < 240 -->
   <div id="idlePrompt" class="fixed inset-0 z-50 hidden items-end justify-center sm:items-center" style="background: rgba(15, 23, 42, 0.45);">

@@ -8,7 +8,7 @@
  *   1. 到点弹出提醒，倒计时数字在 1~5 之间
  *   2. 点 Keep connected 会写 0xFFE7（0x01），弹窗收起
  *   3. 写完计时确实重置——再等一个提醒周期，弹窗会第二次出现
- *   4. 第二次点 Let it sleep → 立即断开，状态显示 Asleep
+ *   4. 第二次点 Let it sleep → 立即断开，状态词仍是 Disconnected（不再显示 Asleep）
  *   5. 断链后重新连上，第三次不理会：倒计时归零同样立即断开（默认休眠，不把决定权甩给设备超时）
  *
  * 跑法：cd test/e2e && npm run idle
@@ -28,7 +28,9 @@ pipeConsole(page);
 const click = (id) => page.evaluate((i) => document.getElementById(i).click(), id);
 const promptHidden = () => page.$eval('#idlePrompt', (el) => el.classList.contains('hidden'));
 const statusText = () => page.$eval('#statusText', (el) => el.textContent.trim());
-const waitAsleep = (label) => until(async () => (await statusText()) !== 'Connected' && /Asleep/i.test(await statusText()), {
+// 休眠断链后状态词就是默认的 Disconnected（web 断开后并不确定设备是否真睡了，
+// "Asleep" 是替设备下的结论——2026-10-22 按用户要求去掉）
+const waitDisc = (label) => until(async () => (await statusText()) === 'Disconnected', {
   timeout: 6000, label,
 });
 
@@ -57,9 +59,9 @@ try {
   await until(async () => !(await promptHidden()), { timeout: WARN_MS + 6000, label: '第二次提醒' });
   log('第二次弹窗已出现');
 
-  step('点 Let it sleep → 应立即断开，状态显示 Asleep');
+  step('点 Let it sleep → 应立即断开，状态词仍是 Disconnected');
   await click('idleSleepBtn');
-  await waitAsleep('Let it sleep 立即断开');
+  await waitDisc('Let it sleep 立即断开');
   assert(await promptHidden(), '断开后弹窗应已收起');
   log(`Let it sleep 生效：状态「${await statusText()}」`);
 
@@ -70,7 +72,7 @@ try {
   await until(async () => !(await promptHidden()), { timeout: WARN_MS + 6000, label: '第三次提醒' });
   const thirdCount = await page.$eval('#idleCountdown', (el) => Number(el.textContent));
   log(`第三次弹窗，倒计时 ${thirdCount}s —— 这次什么都不点`);
-  await waitAsleep('倒计时归零立即断开');
+  await waitDisc('倒计时归零立即断开');
   assert(await promptHidden(), '倒计时归零断开后弹窗应已收起');
   log(`倒计时归零生效：状态「${await statusText()}」，链路已断`);
 

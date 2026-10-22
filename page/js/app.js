@@ -2205,7 +2205,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
   /** 点「Let it sleep」/ 倒计时归零：立即断开，比等设备 240s 超时更省电，也让用户所见即所得 */
   function idleSleepNow() {
     clearIdleWatch();
-    state.idleSleepExpected = true;   // 归入"预期内休眠断链"：状态显示 Asleep，不当故障
+    state.idleSleepExpected = true;   // 归入"预期内休眠断链"：不当故障处理，状态词仍是 Disconnected
     log('Idle sleep — disconnecting now');
     forceDisconnect('idle sleep');
   }
@@ -2227,7 +2227,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         state.otaRunning = false;
         setConnectBusy(false);   // 断开完成：解锁 Connect 按钮
         setOtaUiLock(false);
-        setStatus('disconnected', state.idleSleepExpected ? 'Asleep · tap Connect' : undefined);
+        // 中文：休眠断链状态词仍显示 Disconnected——web 主动断开后并不知道设备
+        //      是否真睡了（它按自己的节奏进睡眠），"Asleep" 是替设备下的结论，
+        //      描述不准确；是否预期内断开只在日志里区分（下方 log）。
+        setStatus('disconnected');
         syncBatteryPill();
         state.characteristic = null;   // 中文：显式置空，与 device 双 null 闭合幂等条件
         state.dailyChar = null;
