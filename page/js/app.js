@@ -989,8 +989,26 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     const base = cutoff
       ? (state.lastRecords || []).filter((r) => Number(r?.timestamp) > cutoff)
       : state.lastRecords;
+    // 中文：进 sanitize 之前先记下本次传入的原始条数——用来区分两种"渲染后为空"：
+    //      ① 设备本来就没数据；② 设备给了 N 条但时间戳全部无效（未对时）。
+    //      原来两者都被下面的 return 吞掉，界面上什么提示都没有。
+    const incoming = Array.isArray(records) ? records.length : 0;
     records = sanitizeTrendRecords(mergeTrendRecords(base, records));
-    if (!records.length) return;
+    if (!records.length) {
+      // 中文：设备给了数据却一条都过不了 sanitize = 时间戳全为 0 或越界，即设备尚未对时。
+      //      固件侧已用锚点双向推算兜底（锚点前后的记录都能推出真实 epoch），
+      //      这里只剩"整个窗口没有任何一条真实时间戳"的极端情况，必须明确告知用户，
+      //      否则界面停在连接前的样子，看起来像卡住了。
+      updateTrendSummary([]);   // 中文：统一空态文案（此前这句被上面的 return 挡成死代码）
+      if (incoming > 0) {
+        // 中文：文案里不带条数——render 会被通知/轮询以 1~5 条的小批次反复调用，
+        //      每批条数不同会让提示在 "5 record(s)" / "1 record(s)" 之间跳，
+        //      容易让人以为数据在变。真实条数留给日志诊断。
+        els.trendRangeText.textContent = 'Time not synced (device clock not set)';
+        log(`Trend records dropped: ${incoming} record(s) carry no valid timestamp (clock not set)`);
+      }
+      return;
+    }
      state.lastRecords = records;
     saveTrendRecordsCache(records, state.activeDeviceId);
      const latest = records[records.length - 1];
@@ -2671,6 +2689,10 @@ function clearConnectError() {
           const merged = mergeTrendRecords(loadCachedTrendRecords(state.activeDeviceId), devRecords);
           if (merged.length) {
             render(merged);
+          } else {
+            // 中文：设备读回 0 条（或全是无时间戳的记录）时也要让 render 走一遍——
+            //      否则界面停在连接前的样子，既没有提示，也看不出这次到底拉没拉到。
+            render(devRecords);
           }
         } catch (err) {
           log(`24h history fetch failed (fallback to 5-record protocol): ${err.message || err}`);

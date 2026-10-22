@@ -13,6 +13,7 @@
     "full-link": "node run-full-link.mjs",
     "offset": "node run-temp-offset.mjs",
     "idle": "node run-idle.mjs",
+    "unsynced": "node run-unsynced.mjs",
     "preview": "node preview-daily.mjs"
   },
   "dependencies": {
