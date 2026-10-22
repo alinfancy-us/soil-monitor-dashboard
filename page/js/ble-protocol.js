@@ -48,10 +48,18 @@ const BLEProtocol = (() => {
   const HIS_BLK_PACKET_SIZE = HIS_BLK_HDR_SIZE + HIS_BLK_MAX_COUNT * RECORD_SIZE;
   // 拉取全量史的保险上限（144 条 / 20 = 8 次；放宽到 32 次防固件 total 异常时死循环）
   const HIS_BLK_MAX_CHUNKS = 32;
+  // 中文：0xFFEC 的"末页"哨兵 offset（与固件 SOIL_HOURLY_OFFSET_LAST 严格对齐）。
+  //      0xFF 不可能是合法逻辑序号（对外只承诺 24h = 144 条），借它做保留值：
+  //      一次 write+read 就能同时拿到 total 与最新 20 条，省掉"先读第 0 页拿 total"的往返。
+  //      旧固件不认它——会原样回显 offset=0xFF 且 count=0，据此识别并回退全量路径。
+  const HIS_BLK_OFFSET_LAST = 0xff;
 
   /**
    * 解析 0xFFEC 历史块响应包（183 字节）
-   * @returns {{total:number, offset:number, records:Array}}
+   * @returns {{total:number, offset:number, count:number, records:Array}}
+   *          count 是"设备声明的条数"（未按实际解码数改写）——识别旧固件要靠它：
+   *          旧固件对 offset=0xFF 回显 0xFF + count=0，而 records 长度此时也是 0，
+   *          两者一起才能和"总数 0 的新固件空块"区分开。
    */
   function parseHistoryBlockPacket(view) {
     if (!view || view.byteLength < HIS_BLK_PACKET_SIZE) {
@@ -59,7 +67,8 @@ const BLEProtocol = (() => {
     }
     const total = view.getUint8(0);
     const offset = view.getUint8(1);
-    const count = Math.min(view.getUint8(2), HIS_BLK_MAX_COUNT);
+    const declared = view.getUint8(2);
+    const count = Math.min(declared, HIS_BLK_MAX_COUNT);
     const records = [];
     for (let i = 0; i < count; i++) {
       const off = HIS_BLK_HDR_SIZE + i * RECORD_SIZE;
@@ -70,7 +79,7 @@ const BLEProtocol = (() => {
         batt: view.getUint8(off + 8),
       });
     }
-    return { total, offset, records };
+    return { total, offset, count: declared, records };
   }
 
   /**
@@ -150,6 +159,76 @@ const BLEProtocol = (() => {
     // 回调是"乱序到达"的（末页先到），下行消费方按时间合并，
     // 返回值仍统一排成升序，老调用点语义不变
     return all.sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  /**
+   * 只拉"最新一段"历史（末页优先），首屏够用就停——**不再每次连接都全量拉 144 条**。
+   *
+   * 为什么：24h 历史进 Flash 后，一次连接要 8 页 ×（write+read）= 16 个 GATT 事务；
+   * 而用户首屏只看最近 6h（≈36 条，2 页）。旧实现为了"总数"先读第 0 页，再翻 7 页，
+   * 即使只要首屏也要等 16 个事务。
+   *
+   * 现在：请求 offset=0xFF（末页）一次拿到 total + 最新 20 条，再按 needCount 往前补页。
+   * 首屏 2 页 = 4 个事务，剩下的更旧分块由 backfill 在后台慢慢补（见 app.js），
+   * 连接流程不再被 24h 全量数据挡住。
+   *
+   * @param {BluetoothRemoteGATTCharacteristic} blkChar
+   * @param {{needCount?: number, onChunk?: Function}} [opts]
+   *        needCount：至少要拿到多少条（默认 40 = 2 页，覆盖 6h + 一页余量）
+   * @returns {Promise<null|{total:number, records:Array, oldestOffset:number}>}
+   *          null = 固件不支持末页语义（旧固件会把 0xFF 原样回显），调用方回退全量路径
+   */
+  async function fetchHistoryTail(blkChar, { needCount = HIS_BLK_MAX_COUNT * 2, onChunk } = {}) {
+    const head = await readHistoryBlock(blkChar, HIS_BLK_OFFSET_LAST, HIS_BLK_MAX_COUNT);
+    // 中文：旧固件把请求 offset 原样回显（0xFF）+ count=0；新固件回显的是换算后的真实起点
+    if (head.offset === HIS_BLK_OFFSET_LAST && head.count === 0) return null;
+    if (!head.records.length) {
+      onChunk?.([], { total: head.total, fetched: 0, done: true });
+      return { total: head.total, records: [], oldestOffset: 0 };
+    }
+
+    const total = head.total;
+    const records = [...head.records];
+    let oldestOffset = head.offset;       // 已拉到的最旧一条的逻辑序号
+    let fetched = records.length;
+    const want = Math.max(needCount, records.length);
+    onChunk?.(head.records, { total, fetched, done: fetched >= Math.min(total, want) });
+
+    // 中文：末页起点不一定是整页对齐（total 不是 20 的倍数时），所以按"oldestOffset − 一页"
+    //      往前推，而不是按页号乘除——保证各页首尾相接、既不重叠也不留缝。
+    //      start 必须钳到 0：总数不足一页时（如 25 条 → 末页起点 5）减法会得到负数，
+    //      而 offset 是 u8 参数，-15 & 0xFF 会变成 241——读回一个莫名其妙的空块。
+    while (fetched < want && oldestOffset > 0) {
+      const start = Math.max(0, oldestOffset - HIS_BLK_MAX_COUNT);
+      const page = await readHistoryBlock(blkChar, start, Math.min(HIS_BLK_MAX_COUNT, oldestOffset - start));
+      if (!page.records.length) break;    // 设备侧越界/异常：停在已拿到的部分
+      records.push(...page.records);
+      fetched += page.records.length;
+      oldestOffset = start;
+      onChunk?.(page.records, { total, fetched, done: fetched >= Math.min(total, want) });
+    }
+
+    return { total, records: records.sort((a, b) => a.timestamp - b.timestamp), oldestOffset };
+  }
+
+  /**
+   * 往前补一页更旧的历史（后台回填用）：取 [beforeOffset − count, beforeOffset)
+   * @param {BluetoothRemoteGATTCharacteristic} blkChar
+   * @param {{beforeOffset:number, count?:number}} opts
+   * @returns {Promise<{records:Array, oldestOffset:number, total:number}>}
+   *          空 records 表示已经到设备最旧一条（或设备侧越界）
+   */
+  async function fetchHistoryBefore(blkChar, { beforeOffset, count = HIS_BLK_MAX_COUNT } = {}) {
+    const n = Math.min(count, beforeOffset);
+    if (!n) return { records: [], oldestOffset: 0, total: 0 };
+    const start = beforeOffset - n;
+    const blk = await readHistoryBlock(blkChar, start, n);
+    if (!blk.records.length) return { records: [], oldestOffset: 0, total: blk.total };
+    return {
+      records: blk.records,
+      oldestOffset: Math.max(0, beforeOffset - blk.records.length),
+      total: blk.total,
+    };
   }
 
   function parsePacket(view) {
@@ -1185,6 +1264,8 @@ const BLEProtocol = (() => {
     readHistoryBlock,
     fetchFullHistory,
     fetchHistoryNewestFirst,
+    fetchHistoryTail,
+    fetchHistoryBefore,
     readTempOffset,
     sendTempOffset,
     readCalibStatus,

@@ -7,7 +7,8 @@
  *      （iOS/Bluefy ≈200~250ms/次）才第一次有数据上屏，看起来像"连上了但没数据"。
  *
  * 断言的四个点：
- *   A. 分块写顺序 = 0（拿 total）→ 末页 → 往前翻：证明"最新优先"，首屏在第 2 次往返就能出图
+ *   A. 分块写顺序 = 末页哨兵(0xFF) → 前一页(104) → 逐页往回翻到 0：证明"首屏只拉 2 页、
+ *      剩下后台回填"，首帧在第 1 次往返就出图（旧实现固定 8 页 16 事务）
  *   B. 默认窗口 = 6h 且右边界贴着最新一条；可见点数 30~40（≈36 条）
  *   C. 向右拖 → 窗口整体前移（看更早的数据），Latest 胶囊出现，文案跟着变
  *   D. ctrl+滚轮缩小跨度 → 点胶囊/双击回到"最新 + 6h"
@@ -32,6 +33,11 @@ const geom = (page) => page.evaluate(() => {
     visible: l.visible, follow: l.follow, padLeft: l.padLeft, plotW: l.plotW,
   } : null;
 });
+
+/** 0xFFEC 的窗口写序列（data[0] = offset，data[1] = count） */
+const blkOffsets = (device) => device.writes
+  .filter((w) => String(w.uuid).includes('ffec'))
+  .map((w) => w.data[0]);
 
 /** 从画布中心按下并水平拖 dx 像素（正 = 手指向右 = 看更早的数据） */
 async function dragCanvas(page, dx) {
@@ -70,18 +76,24 @@ async function dragCanvas(page, dx) {
     step(`连接假外设（${device.records.length} 条历史，10 分钟间隔）`);
     await connect(page, device);
 
-    // ── A. 分块拉取顺序：最新优先 ──
+    // ── A. 分块拉取顺序：末页优先（一次 write+read 拿到 total + 最新 20 条） ──
     await until(async () => (await geom(page)) !== null, { timeout: 20000, label: '图表首次绘制' });
-    const blkWrites = device.writes
-      .filter((w) => String(w.uuid).includes('ffec'))
-      .map((w) => w.data[0]);   // 写包 = {offset u8, count u8}
+    // 中文：首帧必须在"后台回填"跑完之前就出现——这是"不再等全量 144 条"的核心证据。
+    const writesAtFirstPaint = blkOffsets(device).length;
+    log(`首帧出现时已读 ${writesAtFirstPaint} 个块（全量 8 块）`);
+    assert(writesAtFirstPaint <= 4, `首帧不该等到全量读完，实际已读 ${writesAtFirstPaint} 块`);
+
+    // 等后台回填把 24h 补满（144 条 = 8 页）
+    await until(() => blkOffsets(device).length >= 8, { timeout: 20000, label: '24h 后台回填完成' });
+    const blkWrites = blkOffsets(device);
     log(`0xFFEC 窗口写顺序：${blkWrites.join(' → ')}`);
-    assert(blkWrites.length >= 2, `应至少有 2 次块窗口写，实际 ${blkWrites.length}`);
-    assert(blkWrites[0] === 0, `第一块必须读 offset=0（拿 total），实际 ${blkWrites[0]}`);
-    // 144 条 / 每页 20 → 末页起点 140；第二块必须是末页，而不是正序的 20
-    assert(blkWrites[1] === 140, `第二块应是最新一页 offset=140，实际 ${blkWrites[1]}（说明还是正序拉取）`);
-    assert(blkWrites.slice(2).every((v, i) => v < blkWrites[i + 1]),
+    assert(blkWrites[0] === 0xff, `第一块必须是末页哨兵 offset=0xFF（一次拿到 total + 最新页），实际 ${blkWrites[0]}`);
+    // 末页起点 = total − 一页 = 144 − 20 = 124（不按整页对齐，各页首尾相接即可），再往前一页 = 104
+    const expectSecond = device.records.length - 40;
+    assert(blkWrites[1] === expectSecond, `第二块应是末页前一页 offset=${expectSecond}，实际 ${blkWrites[1]}`);
+    assert(blkWrites.slice(1).every((v, i) => v < blkWrites[i]),
       `末页之后应逐页往前翻（递减），实际 ${blkWrites.join(',')}`);
+    assert(blkWrites[blkWrites.length - 1] === 0, `回填应一直补到 offset=0（设备最旧一条），实际 ${blkWrites[blkWrites.length - 1]}`);
 
     // ── B. 默认窗口 = 最近 6h ──
     let g = await geom(page);

@@ -61,12 +61,21 @@ export function encodePacket(records) {
   return b;
 }
 
-/** 0xFFEC 历史块：total + offset + count + 20×9B */
-export function encodeHistoryBlock(all, offset, count) {
+/**
+ * 0xFFEC 历史块：total + offset + count + 20×9B
+ * @param {object} [opts]
+ * @param {boolean} [opts.lastPage=true] - 是否实现"末页"语义（offset=0xFF）。
+ *        新固件（2026-10-22 起）：0xFF 表示"最后 count 条"，响应回显换算后的真实起点；
+ *        传 false 模拟旧固件——原样回显 0xFF 且 count=0，前端据此回退全量拉取。
+ */
+export function encodeHistoryBlock(all, offset, count, { lastPage = true } = {}) {
   const b = Buffer.alloc(183);
-  const slice = all.slice(offset, offset + Math.min(count, 20));
-  b.writeUInt8(all.length, 0);
-  b.writeUInt8(offset, 1);
+  const total = all.length;
+  let real = offset;
+  if (lastPage && offset === 0xff) real = total > count ? total - count : 0;
+  const slice = all.slice(real, real + Math.min(count, 20));
+  b.writeUInt8(total, 0);
+  b.writeUInt8(real, 1);
   b.writeUInt8(slice.length, 2);
   slice.forEach((r, i) => encodeRecord(r).copy(b, 3 + i * 9));
   return b;
@@ -160,6 +169,10 @@ export class FakeSoilDevice {
     this.tempOffset = 0;
     this.tzMin = opts.tzMin ?? -420;   // 设备时区（0xFFE3/0xFFED/0xFFEE 共用）；默认 PDT，预览可传 480（UTC+8）
     this.window = { offset: 0, count: 20 };     // 0xFFEC 最近一次窗口写
+    // 中文：0xFFEC 是否支持"末页"语义（offset=0xFF）。默认 true = 新固件行为；
+    //      用例传 lastPageWindow:false 可模拟旧固件（原样回显 0xFF + 空块），
+    //      用来覆盖前端的"回退全量拉取"分支。
+    this.lastPageWindow = opts.lastPageWindow !== false;
     this.readAck = Buffer.from([0x08, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     this.writes = [];             // 所有写入留痕（uuid/data/ts）
     this.reads = [];              // 所有读取留痕
@@ -283,7 +296,8 @@ export class FakeSoilDevice {
         out[9] = this.measureSeq & 0xff;
         return out;
       }
-      case UUIDS.HISTORY_BLK_CHAR: return encodeHistoryBlock(this.records, this.window.offset, this.window.count);
+      case UUIDS.HISTORY_BLK_CHAR: return encodeHistoryBlock(this.records, this.window.offset, this.window.count,
+        { lastPage: this.lastPageWindow });
       case UUIDS.DAILY30_CHAR: return encodeDaily30(this.daily, this.tzMin);
       case UUIDS.DAILY30_EXT_CHAR: return encodeDaily30Ext(this.daily, this.tzMin);
       case UUIDS.DAILY_CHAR: return encodeDaily7(this.daily, this.tzMin);

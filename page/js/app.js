@@ -94,6 +94,13 @@
   const TREND_VIEW_SPAN_DEFAULT = 6 * 3600;
   const TREND_VIEW_SPAN_MIN = 30 * 60;
   const TREND_VIEW_SPAN_MAX = 24 * 3600;
+  // 中文：连接时 24h 历史"首屏只拉这么多条"，其余交给后台回填（见 startHistoryBackfill）。
+  //      设备采样周期 600s，默认窗口 6h ≈ 36 条；+4 条余量吸收"最新一条不是刚刚"的空档，
+  //      40 条 → 末页 20 + 前一页 20 = 2 页 = 4 个 GATT 事务（旧实现固定 8 页 16 个）。
+  const HISTORY_TAIL_RECORDS = Math.ceil(TREND_VIEW_SPAN_DEFAULT / 600) + 4;
+  // 中文：后台回填的页间停顿（ms）——每页单独抢一次全局 GATT 锁，中间让出去，
+  //      5s 轮询探活与用户点按才有机会插进来，不至于被 8 页连续读写堵住。
+  const HISTORY_BACKFILL_GAP_MS = 120;
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
   const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
@@ -254,6 +261,11 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      // 中文：24h 图 x 轴可视窗口。endTs=右边界（null 表示跟随最新），
      //      spanSec=窗口跨度，follow=true 时每次重画都把右边界钉在最新一条上。
      trendView: { endTs: null, spanSec: TREND_VIEW_SPAN_DEFAULT, follow: true },
+     // 中文：24h 历史"已拉到哪儿"的回填态（0xFFEC 分块读）。
+     //      oldestOffset = 已拿到的最旧一条的逻辑序号（0 = 已到设备最旧）；
+     //      oldestTs 供"还差多少"诊断用；unsupported = 旧固件不认末页哨兵。
+     //      整对象替换而不是逐字段改：后台回填循环用对象身份判断"这一轮是否还有效"。
+     historyBackfill: { oldestOffset: 0, oldestTs: 0, total: 0, running: false, unsupported: false },
      trendGeom: null,   // 上一帧 24h 图的几何（窗口区间/内边距），手势层与范围文案共用
    };
 
@@ -815,6 +827,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     state.lastRecords = null;
     state.latestShown = null;
     state.lastDailyRecords = null;
+    // 中文：24h 回填态一并复位——换设备/清空后不能沿用上一台的"已拉到第几页"，
+    //      否则后台回填会拿旧的 oldestOffset 去翻新设备的环（张冠李戴）。
+    //      换对象而不是改字段：后台回填循环用对象身份判活（见 startHistoryBackfill）。
+    state.historyBackfill = { oldestOffset: 0, oldestTs: 0, total: 0, running: false, unsupported: false };
     // 中文：可视窗口一并复位——否则换设备/清空后仍停在上一台的"拖到 8 小时前"位置，
     //      新数据进来只会在窗口外，图上一片空白，看起来像清空没成功
     state.trendView = { endTs: null, spanSec: TREND_VIEW_SPAN_DEFAULT, follow: true };
@@ -850,6 +866,59 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     if (dailyRecords.length) {
       renderDaily(dailyRecords);
       log(`Loaded cached daily records: ${dailyRecords.length}`);
+    }
+  }
+
+  // 中文：把设备读回的 24h 记录并进现有数据后整表重画。
+  //      先 merge 缓存再判断空：设备读回 0 条（或全是无时间戳的记录）时也要让 render 走一遍，
+  //      否则界面停在连接前的样子，既没提示也看不出这次到底拉没拉到。
+  function applyHistoryRecords(devRecords) {
+    const merged = mergeTrendRecords(loadCachedTrendRecords(state.activeDeviceId), devRecords || []);
+    render(merged.length ? merged : (devRecords || []));
+  }
+
+  // 中文：后台回填更旧的 24h 分块（0xFFEC）。
+  //      为什么要有它：首屏只拉了末页附近 ~6.7h（4 个 GATT 事务），更早的分块不能等用户
+  //      拖到那儿再现场拉（拖动是连续的，一卡就是几百毫秒）。这里在连接流程返回后
+  //      一页一页往前补，每页单独抢一次全局 GATT 锁、页间让出 120ms，
+  //      5s 轮询探活与用户点按都能插进来。
+  //      停止条件：拉到设备最旧一条（oldestOffset=0）/ 断链 / OTA / 清零（对象被换掉）。
+  //      每页到手就 render：旧数据往左补，最新读数不动（render 的 merge 语义）。
+  async function startHistoryBackfill() {
+    const cov = state.historyBackfill;
+    if (!state.hisBlkChar || cov.unsupported || cov.running || !cov.oldestOffset) return;
+    cov.running = true;
+    let pages = 0;
+    try {
+      // 中文：用对象身份判活——resetDisplay / 重新连接会把 state.historyBackfill 换成新对象，
+      //      这一轮就该停手，否则会拿上一台设备的 oldestOffset 去翻新设备的环
+      while (state.historyBackfill === cov && cov.oldestOffset > 0) {
+        if (state.device?.gatt?.connected !== true || state.otaRunning || state.disconnecting) break;
+        const page = await gattOp(
+          () => BLEProtocol.fetchHistoryBefore(state.hisBlkChar, { beforeOffset: cov.oldestOffset }),
+          'backfill older 24h history (0xFFEC)',
+          8000
+        );
+        if (!page.records.length) {   // 设备侧越界：已经是最旧一条
+          cov.oldestOffset = 0;
+          break;
+        }
+        // 中文：这一页读回来时可能已经发生了 Clear/Factory reset/换设备（resetDisplay 换掉了
+        //      state.historyBackfill）——此时必须丢弃，否则刚清空的界面会被这一页旧数据
+        //      重新 merge 回内存和 localStorage，表现成"清空没生效"。
+        if (state.historyBackfill !== cov) break;
+        cov.oldestOffset = page.oldestOffset;
+        const ts = page.records[0]?.timestamp;
+        if (Number.isFinite(ts) && ts > 0) cov.oldestTs = cov.oldestTs ? Math.min(cov.oldestTs, ts) : ts;
+        pages++;
+        render(page.records);
+        if (cov.oldestOffset > 0) await new Promise((r) => setTimeout(r, HISTORY_BACKFILL_GAP_MS));
+      }
+      log(`24h backfill finished: +${pages} page(s), oldestOffset=${cov.oldestOffset}`);
+    } catch (err) {
+      log(`24h backfill stopped: ${err.message || err}`);
+    } finally {
+      cov.running = false;
     }
   }
 
@@ -2803,42 +2872,70 @@ function clearConnectError() {
         }
       } catch (_) { /* latest 读取失败不影响连接流程 */ }
 
-      // 中文：24h 历史分块拉取（0xFFEC，144 条 = 8 次读）：设备环是权威数据源，
-      //      与本地缓存按 timestamp 合并（设备值覆盖同刻缓存值）后整表重渲染。
+      // 中文：24h 历史分块拉取（0xFFEC）——拆成"首屏 + 后台回填"两步，不再把连接流程
+      //      卡在全量 144 条上：
+      //        ① 首屏：末页 + 前一页（4 个 GATT 事务）拿到最新 ~6.7h，其中末页到手就上屏；
+      //        ② 回填：更旧的分块由 startHistoryBackfill 在后台逐页补，
+      //           用户往左拖时数据通常已经在，不必现场等一次往返。
+      //      旧固件不认末页哨兵（会把 offset=0xFF 原样回显）→ 回退原来的全量最新优先路径。
       //      旧固件无此特征（hisBlkChar 为 null）时跳过，维持 0xFFE1 5 条老协议表现
       if (state.hisBlkChar) {
         try {
-          /* 中文：8 次块读写整体占用全局 GATT 锁——否则 5s 轮询的探活读会插进来，
+          /* 中文：块读整体占用全局 GATT 锁——否则 5s 轮询的探活读会插进来，
            *      安卓上表现为 "GATT operation already in progress" 或块数据错位 */
-          // 中文：最新优先 + 每页到手即画（fetchHistoryNewestFirst）：
-          //      往返次数不变（144 条仍 8 次），但第一次有数据上屏从第 8 次提前到第 2 次。
+          // 中文：最新优先 + 每页到手即画（fetchHistoryTail）：首屏第一帧来自第 1 个事务，
           //      这里把每一页直接喂 render()——它会把该页并进内存/缓存再整表重画，
           //      所以后到的旧页表现为"往左边补历史"，不会把已显示的最新读数顶掉。
           let lastPaint = 0;
-          const devRecords = await gattOp(
-            () => BLEProtocol.fetchHistoryNewestFirst(state.hisBlkChar, {
-              onChunk: (chunk, info) => {
-                if (!chunk.length) return;
-                // 中文：重画按 ~100ms 节流（末页不受限，保证首屏立刻出图）。
-                //      单页回调在 iOS 上可能挤在一起，连着重画只是白占主线程。
-                const now = (window.performance?.now?.() ?? Date.now());
-                if (!info.done && now - lastPaint < 100) return;
-                lastPaint = now;
-                log(`24h history: ${Math.min(info.fetched || 0, info.total || 0)}/${info.total || 0} records`);
-                render(chunk);
-              },
+          const paintChunk = (chunk, info) => {
+            if (!chunk.length) return;
+            // 中文：重画按 ~100ms 节流（末页不受限，保证首屏立刻出图）。
+            //      单页回调在 iOS 上可能挤在一起，连着重画只是白占主线程。
+            const now = (window.performance?.now?.() ?? Date.now());
+            if (!info.done && now - lastPaint < 100) return;
+            lastPaint = now;
+            log(`24h history: ${Math.min(info.fetched || 0, info.total || 0)}/${info.total || 0} records`);
+            render(chunk);
+          };
+
+          const t0 = Date.now();
+          const tail = await gattOp(
+            () => BLEProtocol.fetchHistoryTail(state.hisBlkChar, {
+              needCount: HISTORY_TAIL_RECORDS,
+              onChunk: paintChunk,
             }),
-            'fetch 24h history (0xFFEC)',
-            15000   // 8 块 × (write+read)，Bluefy/iOS 单次往返可达 250ms，5s 不够
+            'fetch 24h history tail (0xFFEC)',
+            10000   // 2 页 × (write+read)；慢平台单次往返可达 250ms，留足余量
           );
-          log(`24h history fetched: ${devRecords.length} record(s)`);
-          const merged = mergeTrendRecords(loadCachedTrendRecords(state.activeDeviceId), devRecords);
-          if (merged.length) {
-            render(merged);
+
+          if (tail) {
+            log(`24h history tail: ${tail.records.length}/${tail.total} record(s) in ${Date.now() - t0}ms (oldestOffset=${tail.oldestOffset})`);
+            applyHistoryRecords(tail.records);
+            state.historyBackfill = {
+              oldestOffset: tail.oldestOffset,
+              oldestTs: tail.records.length ? tail.records[0].timestamp : 0,
+              total: tail.total,
+              running: false,
+              unsupported: false,
+            };
+            // 中文：不 await——连接流程到此结束，剩余分块在后台补，界面立刻可操作
+            void startHistoryBackfill();
           } else {
-            // 中文：设备读回 0 条（或全是无时间戳的记录）时也要让 render 走一遍——
-            //      否则界面停在连接前的样子，既没有提示，也看不出这次到底拉没拉到。
-            render(devRecords);
+            log('0xFFEC last-page window unsupported (old firmware) — falling back to full fetch');
+            const devRecords = await gattOp(
+              () => BLEProtocol.fetchHistoryNewestFirst(state.hisBlkChar, { onChunk: paintChunk }),
+              'fetch 24h history (0xFFEC)',
+              15000   // 8 块 × (write+read)，Bluefy/iOS 单次往返可达 250ms，5s 不够
+            );
+            log(`24h history fetched: ${devRecords.length} record(s)`);
+            applyHistoryRecords(devRecords);
+            state.historyBackfill = {
+              oldestOffset: 0,
+              oldestTs: 0,
+              total: devRecords.length,
+              running: false,
+              unsupported: true,   // 旧固件：不支持按需补页，也不存在"还没拉到"的区间
+            };
           }
         } catch (err) {
           log(`24h history fetch failed (fallback to 5-record protocol): ${err.message || err}`);
