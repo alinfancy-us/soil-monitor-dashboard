@@ -54,6 +54,56 @@ const BLEProtocol = (() => {
   //      旧固件不认它——会原样回显 offset=0xFF 且 count=0，据此识别并回退全量路径。
   const HIS_BLK_OFFSET_LAST = 0xff;
 
+  /* ============================ GATT 全局限速队列 ============================
+   * iOS WebView（Bluefy 等）对 Web BLE 有请求限流：连接后短时间内把历史分块读、
+   * 校准状态、设备名读挤在一起，会抛 "Rate limit exceeded — too many BLE requests"，
+   * 且被限流的是排在后面的无关读——整段初始化一起恶化。
+   * 以前没暴露是因为旧固件 latency 30 把每个事务自然拖到几百毫秒，等于自带节流；
+   * 固件提速后 JS 层必须自己节流。对策两层：
+   *   1) 全部业务特征的 read/write 统一过一条 FIFO 队列，相邻请求保持最小间隔；
+   *   2) 撞限流不报错——按指数退避重试（限流是暂时的，等一下重试就成功）。
+   * 注意：OTA 特征**不包**（performOta 有自己的单包物理节流，过队列会把升级
+   * 拖慢一个数量级）；Notify 回调是设备侧推送，不算请求，天然不受影响。
+   * ========================================================================== */
+  const GATT_MIN_GAP_MS = 100;          // 相邻两次请求完成→下一次发起的最小间隔（≈10 次/秒封顶）
+  const GATT_RATE_RE = /rate limit|too many/i;
+  const GATT_RETRY_MAX = 4;
+  let gattTail = Promise.resolve();
+
+  function gattEnqueue(op) {
+    const run = gattTail.then(async () => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await op();
+        } catch (err) {
+          if (attempt < GATT_RETRY_MAX && GATT_RATE_RE.test(String(err && err.message))) {
+            const wait = 500 * 2 ** attempt;
+            console.warn(`[BLE] rate limited, retry #${attempt + 1} in ${wait}ms`);
+            await sleep(wait);
+            continue;
+          }
+          throw err;
+        }
+      }
+    });
+    // 失败也不能堵死队列：无论成败，下一条请求都在间隔之后发起
+    gattTail = run.then(() => sleep(GATT_MIN_GAP_MS), () => sleep(GATT_MIN_GAP_MS));
+    return run;
+  }
+
+  /** 给特征对象的 read/write 方法原地套上限速队列（幂等，可重复调用） */
+  function gattWrapChar(char) {
+    if (!char || char.__soilPaced) return char;
+    for (const m of ['readValue', 'writeValue', 'writeValueWithResponse', 'writeValueWithoutResponse']) {
+      if (typeof char[m] !== 'function') continue;
+      const orig = char[m].bind(char);
+      char[m] = (...args) => gattEnqueue(() => orig(...args));
+    }
+    char.__soilPaced = true;
+    return char;
+  }
+
+
   /**
    * 解析 0xFFEC 历史块响应包（183 字节）
    * @returns {{total:number, offset:number, count:number, records:Array}}
@@ -491,6 +541,12 @@ const BLEProtocol = (() => {
     ]).then(results => results.map(r => (r.status === 'fulfilled' ? r.value : null)));
 
     const [dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, daily30ExtChar, otaChar, fwVersion] = values;
+
+    // 中文：全部业务特征统一过 GATT 限速队列（iOS WebView 撞限流时自动退避重试）。
+    //      OTA 特征刻意不包——performOta 自己管单包节流，见 gattWrapChar 注释。
+    [dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar,
+      calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, daily30ExtChar,
+    ].forEach(gattWrapChar);
 
     return { device, dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, daily30ExtChar, otaChar, fwVersion };
   }

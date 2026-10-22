@@ -41,7 +41,15 @@ async function setUnit(label) {
 /** 点 Apply，等回执文案出现，返回 { status, echo, wire } */
 async function apply() {
   const before = device.writes.length;
-  await click('tempOffsetApplyBtn');
+  // 先清掉上一轮的回执文案——它恰好也包含 "set to"，会让下面的 until 立刻通过
+  await page.$eval('#tempOffsetStatus', (el) => { el.textContent = ''; });
+  // 上一轮 Apply 的收尾（Refresh 重测）期间按钮短暂 disabled，click 会丢；
+  // 循环重点到这次点击真正产生 0xFFE8 写入（GATT 限速队列后写入落地也会晚 ~100ms）
+  await until(async () => {
+    const disabled = await page.$eval('#tempOffsetApplyBtn', (el) => el.disabled);
+    if (!disabled) await click('tempOffsetApplyBtn');
+    return device.writes.slice(before).some((x) => x.uuid.includes('ffe8'));
+  }, { timeout: 15000, label: '0xFFE8 写入落地' });
   await until(async () => {
     const t = await page.$eval('#tempOffsetStatus', (el) => el.textContent);
     return t.includes('set to') || t.includes('failed');

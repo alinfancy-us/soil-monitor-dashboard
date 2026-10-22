@@ -6,7 +6,7 @@
  * 前置：仓库根目录已起静态服务（默认 http://127.0.0.1:8000），本机装有 Chrome。
  */
 import {
-  openApp, connect, snapshot, pipeConsole, finish, assert, log, step,
+  openApp, connect, snapshot, pipeConsole, finish, assert, log, step, until,
 } from './lib/harness.mjs';
 
 const { browser, page, device } = await openApp({ seed: { history: 144, daily: 30 } });
@@ -36,11 +36,17 @@ try {
   step('断言：24h 历史全量拉取');
   const expectRecords = device.records.length;
   assert(expectRecords >= 100, `假设备历史只有 ${expectRecords} 条，不足 24h`);
+  // 连接后的数据加载（tail/日均/回填）是后台串行流程，温度一上屏就断言会跑在流程前面
+  // （GATT 全局限速队列上线后每条请求多了 ~100ms 间隔，这里必须显式等流程走到）
+  await until(async () => device.writes.some((w) => w.uuid.includes('ffec')),
+    { timeout: 15000, label: '0xFFEC 首个窗口写' });
   const fetchedLog = await page.evaluate(() => window.__lastHistoryCount ?? null);
   log(`外设被读 ${device.reads.length} 次，历史 ${expectRecords} 条已全部取走（窗口写 ${device.writes.filter((w) => w.uuid.includes('ffec')).length} 次）`);
   void fetchedLog;
 
   step('断言：30 天日均走 0xFFED');
+  await until(async () => device.reads.some((r) => r.uuid.includes('ffed')),
+    { timeout: 15000, label: '0xFFED 30 天日均读取' });
   const daily30Read = device.reads.some((r) => r.uuid.includes('ffed'));
   assert(daily30Read, '未读取 0xFFED（30 天日均）');
 
