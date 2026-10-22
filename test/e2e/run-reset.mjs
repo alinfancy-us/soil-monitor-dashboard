@@ -4,7 +4,8 @@
  * 覆盖的回归点（这些都是之前真机上出过问题的）：
  *   1. 设备没应答时不能只清本地（否则重连又被 0xFFEC 拉回来）
  *   2. 清空后画布/内存态必须一起重置（不能留下"设备有 1 条 + 本地 1 条"）
- *   3. 清空水位（clearedAt）要在 0xFFE5 写入成功后立，挡住清空瞬间在途的记录回写
+ *   3. 清空不再写"水位"key（2026-10-22 移除）：语义保持"删干净 + 设备权威"，
+ *      不再按时间戳二次过滤，避免设备里真实存在的数据被静默藏掉
  *   4. 只删数据类 key，不能顺手把 lastDevice / 温度单位等偏好删掉
  *
  * 跑法：npm run reset
@@ -51,13 +52,14 @@ try {
 
   const after = await snapshot(page);
   const dataKeysAfter = after.storageKeys.filter((k) => /^SoilPulse:(trend|daily):/.test(k));
-  const cutoffKey = after.storageKeys.find((k) => /^SoilPulse:clearedAt:/.test(k));
+  const cutoffKeys = after.storageKeys.filter((k) => /clearedAt/.test(k));
   log('清空后：', JSON.stringify({
-    rows: after.historyRows, dataKeys: dataKeysAfter, cutoff: cutoffKey, allKeys: after.storageKeys,
+    rows: after.historyRows, dataKeys: dataKeysAfter, cutoffKeys, allKeys: after.storageKeys,
   }));
 
   assert(dataKeysAfter.length === 0, `仍有数据缓存未删：${dataKeysAfter.join(',')}`);
-  assert(cutoffKey, '未立清空水位 clearedAt（清空瞬间在途记录会被合并回缓存）');
+  // 水位机制已移除：清空只做"删除"，不留下任何时间戳判据
+  assert(cutoffKeys.length === 0, `不应残留/新写清空水位 key：${cutoffKeys.join(',')}`);
 
   step('断言：偏好类 key 不被误删');
   const keep = after.storageKeys.filter((k) => /lastDevice|devName|tempUnit|dailyRange/.test(k));

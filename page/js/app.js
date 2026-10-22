@@ -108,25 +108,15 @@
     return `${CACHE_PREFIX}${type}:v1:${deviceId}`;
   }
 
-  // 清空水位（clear cutoff）：设备被 Clear / Factory reset 后，记下清空时刻（秒）。
-  // 早于此刻的历史记录不可能属于"清空后的设备"——无论它来自 localStorage 缓存、
-  // 还是内存里的 state.lastRecords 残留，一律在这两个入口滤掉。
-  // 为什么光删不够：清空瞬间仍可能有 in-flight 的 0xFFE1 读 / 重连通知触发 render()，
-  // 把刚删掉的旧记录 merge 回来并 saveTrendRecordsCache 写回缓存，下一次打开页面
-  // restoreCachedCharts 又把它们画出来 —— 表现为"重置后设备只有 1 条，页面却显示 2 条"。
-  // 时间戳是唯一能跨会话、跨重连都生效的判据，所以选择记水位而不是依赖"删干净"。
-  const clearedAtKey = (deviceId) => `${CACHE_PREFIX}clearedAt:v1:${deviceId}`;
+  // 中文：这里曾经有一套"清空水位（clearedAt）"机制——Clear / Factory reset 时记下时刻，
+  //      之后凡是早于该时刻的缓存记录一律不画。已于 2026-10-22 移除，理由：
+  //      ① 水位会误伤"设备 flash 里确实还在的数据"（重烧/换设备/测试固件灌数场景下，
+  //         设备直读明明拉到了 30 天，页面却因为水位把它们藏了）；
+  //      ② 它把 Clear 变成"删数据 + 记时间戳 + 到处过滤"三件事，排查成本很高。
+  //      现在回到最朴素的语义：Clear = 删本地缓存 + 清内存 + 让设备自己清，
+  //      清空后重连拉到什么就画什么（设备是数据权威）。历史遗留的 clearedAt key
+  //      在 clearAllCache 里一并删掉（见下方 isDataKey）。
 
-  function setClearCutoff(deviceId) {
-    if (!deviceId) return;
-    try { localStorage.setItem(clearedAtKey(deviceId), String(Math.floor(Date.now() / 1000))); } catch (_) {}
-  }
-
-  function getClearCutoff(deviceId) {
-    if (!deviceId) return 0;
-    try { return Number(localStorage.getItem(clearedAtKey(deviceId))) || 0; } catch (_) { return 0; }
-  }
- 
 // 校准尝试结果 localStorage key：state 初始化（calibAttempt 恢复）在页面加载时就会调用
 // loadCalibAttempts()，此声明必须早于该调用，否则落入 TDZ 被 try/catch 静默吞掉
 const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
@@ -774,18 +764,13 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
   function loadCachedTrendRecords(deviceId) {
     if (!deviceId) return [];
     const cache = readJsonCache(cacheKey('trend', deviceId));
-    const records = sanitizeTrendRecords(cache?.records);
-    const cutoff = getClearCutoff(deviceId);
-    return cutoff ? records.filter((r) => r.timestamp > cutoff) : records;
+    return sanitizeTrendRecords(cache?.records);
   }
 
   function loadCachedDailyRecords(deviceId) {
     if (!deviceId) return [];
     const cache = readJsonCache(cacheKey('daily', deviceId));
-    const records = sanitizeDailyRecords(cache?.records);
-    const cutoff = getClearCutoff(deviceId);
-    // dateEpoch 是"当天 0 点"，保留清空当天及之后的桶（+86400 让清空当天不被误杀）
-    return cutoff ? records.filter((r) => Number(r.dateEpoch) + 86400 > cutoff) : records;
+    return sanitizeDailyRecords(cache?.records);
   }
 
   function saveTrendRecordsCache(records, deviceId) {
@@ -852,35 +837,19 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
   // 不通过 GAP 服务读取设备名
 
   // 加载指定设备（device.id）自己的历史缓存并回显到图表/表格。
-  // 清空水位只在这里滤：localStorage 缓存是"清空前的残留"的唯一藏身处。
-  // 设备直读（readData/readDaily）不过滤——设备是数据权威，flash 没清数据就是真的；
-  // 若连设备直读也滤，重烧/换设备后数据会全部静默消失，日志明明拉到了、页面却空白
-  // （2026-10-22 真机踩坑：Daily read: 30 day(s) 但 30 Days 视图空白）。
+  // 缓存里有什么就画什么：清空动作（Clear / Factory reset）已经把缓存删干净了，
+  // 不需要再按时间戳二次判断"这条是不是清空前的残留"（2026-10-22 移除清空水位）。
   function restoreCachedCharts(deviceId) {
-    const cutoff = getClearCutoff(deviceId);
     const trendRecords = loadCachedTrendRecords(deviceId);
     if (trendRecords.length) {
-      const keptTrend = cutoff
-        ? trendRecords.filter((r) => Number(r?.timestamp) > cutoff)
-        : trendRecords;
-      if (keptTrend.length !== trendRecords.length) {
-        log(`Trend cache filtered ${trendRecords.length - keptTrend.length} record(s) older than clear time`);
-      }
-      if (keptTrend.length) {
-        render(keptTrend);
-        log(`Loaded cached trend records: ${keptTrend.length}`);
-      }
+      render(trendRecords);
+      log(`Loaded cached trend records: ${trendRecords.length}`);
     }
 
     const dailyRecords = loadCachedDailyRecords(deviceId);
     if (dailyRecords.length) {
-      const kept = cutoff
-        ? dailyRecords.filter((r) => Number(r.dateEpoch) + 86400 > cutoff)
-        : dailyRecords;
-      if (kept.length !== dailyRecords.length) {
-        log(`Daily cache filtered ${dailyRecords.length - kept.length} record(s) older than clear time`);
-      }
-      if (kept.length) renderDaily(kept);
+      renderDaily(dailyRecords);
+      log(`Loaded cached daily records: ${dailyRecords.length}`);
     }
   }
 
@@ -889,18 +858,18 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
   //      devName、tempUnit、dailyRange —— 这些是用户偏好，不属于"测量数据"。
   //      历史实现按 CACHE_PREFIX 全删，导致清一次数据就丢掉 lastDevice，
   //      下次打开页面不再回显上次设备，表现为"分设备缓存逻辑消失了"。
-  function clearAllCache({ markCutoff = true } = {}) {
+  function clearAllCache() {
     const isDataKey = (key) => RECORD_KEY_RE.test(key)
       || key.startsWith(`${CACHE_PREFIX}fwVer:`)
-      || key.startsWith(`${CACHE_PREFIX}pendingFw:`);
+      || key.startsWith(`${CACHE_PREFIX}pendingFw:`)
+      // 历史遗留的"清空水位"key（已不再写入，见文件顶部说明）：一并按数据类清掉，
+      // 免得旧版本留在用户手机上的时间戳一直占着 storage
+      || key.startsWith(`${CACHE_PREFIX}clearedAt:`);
     const keys = Object.keys(localStorage).filter(isDataKey);
     keys.forEach((key) => localStorage.removeItem(key));
-    // 只有设备确实被清了才立水位：否则设备里还是老数据，立了水位会把
-    // 重连后 0xFFEC 读回来的真实历史也一起挡掉，等于"假装清干净了"
-    if (markCutoff) setClearCutoff(state.activeDeviceId);
     resetDisplay();
     state.lastNotifiedRec = null;   // 清掉 notify 去重基线，避免重连后拿旧记录做基线
-    log(`Cache cleared: removed ${keys.length} key(s)${markCutoff ? ' + clear cutoff set' : ''}`);
+    log(`Cache cleared: removed ${keys.length} key(s)`);
   }
 
   // Factory reset 联动：设备端数据全部擦除后，网页本地为该设备缓存的数据同步清除——
@@ -921,7 +890,6 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     renderCalibPointUi('dry', 'clear');
     renderCalibPointUi('wet', 'clear');
     clearDeviceNameBadge();
-    setClearCutoff(state.activeDeviceId);   // 立水位：重置前的记录一律不再进 24h 表
     resetDisplay();                 // 清内存（lastRecords/lastDailyRecords/latestShown）+ 重绘空图表/空表格
     state.lastNotifiedRec = null;   // 清掉 notify 去重基线
   }
@@ -1032,12 +1000,9 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    function render(records) {
     // 中文：先并入既有 24h 数据再清洗封顶——轮询(0xFFE1 5 条)/通知带来的增量
     //      直接覆盖 state.lastRecords 会把 24h 缓存缩水成 5 条。
-    //      内存残留若早于"清空水位"则不参与合并：设备被重置后旧记录不得借这一拍复活，
-    //      但本次传入的 records（设备新鲜读出的）不受水位影响。
-    const cutoff = getClearCutoff(state.activeDeviceId);
-    const base = cutoff
-      ? (state.lastRecords || []).filter((r) => Number(r?.timestamp) > cutoff)
-      : state.lastRecords;
+    //      内存侧的旧数据靠 Clear/Reset 里的 resetDisplay() 清，不在这里按时间戳过滤
+    //      （2026-10-22 移除清空水位：过滤会让"设备里确实还在的数据"被静默藏掉）。
+    const base = state.lastRecords;
     // 中文：进 sanitize 之前先记下本次传入的原始条数——用来区分两种"渲染后为空"：
     //      ① 设备本来就没数据；② 设备给了 N 条但时间戳全部无效（未对时）。
     //      原来两者都被下面的 return 吞掉，界面上什么提示都没有。
@@ -1845,9 +1810,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    function renderDaily(records) {
     // 中文：state.lastDailyRecords 存的是"设备给的完整集合"（最多 30 天）——
     //      切 7D/30D 时不用重新读设备，直接在这里截取要画的那一段
-    //      （清空水位过滤只做在缓存恢复入口 restoreCachedCharts——设备是数据权威，
-    //      设备直接读回的记录不能滤，否则重烧/换设备后 30 天全部静默消失，
-    //      日志明明 Daily read: 30 day(s) 页面却空白，用户无从判断原因）
+    //      这里不做任何"按时间戳过滤"：日均记录要么来自设备直读、要么来自缓存，
+    //      两者都是当前该展示的真实数据（清空水位机制已于 2026-10-22 移除）
     records = sanitizeDailyRecords(records);
     state.lastDailyRecords = records;
      const cfg = DAILY_METRICS[state.dailyMetric] || DAILY_METRICS.temp;
@@ -2989,7 +2953,7 @@ function clearConnectError() {
          log(`Device reset failed (0xFFE5): ${err.message || err}`);
        }
      }
-     clearAllCache({ markCutoff: deviceCleared });
+     clearAllCache();
      // 失败必须可见：否则本地清空成功、设备纹丝不动，用户以为清干净了
      if (state.resetChar && !deviceCleared) {
        els.historyBody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-rose-500">Local cache cleared, but the device did not acknowledge the reset. Reconnect and clear again — device data is still stored.</td></tr>';
