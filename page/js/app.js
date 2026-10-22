@@ -65,6 +65,15 @@
      FIRMWARE_MANIFEST_URL,
      TEMP_OFFSET,
 } = SoilPulseConfig;
+  // 中文：两张图（24h 趋势 / 7D·30D 日均）共用的绘图区内边距。
+  //      之前各写一份（24h 上下 16/38、日均上下 8/22），切换 tab 时 X 轴刻度线会跳
+  //      十几像素、绘图区高度也不一样，用户反馈"两个图大小不统一"（2026-10-22）。
+  //      统一后：上沿留最新值标签的空间、下沿留一行时间/日期标签（约 9px + 6px 间隙）；
+  //      左右两侧：24h 是双轴（左温右湿）需要对称，日均单轴右侧只留呼吸位。
+  const CHART_PAD_TOP = 14;
+  const CHART_PAD_BOTTOM = 32;
+  const CHART_PAD_LEFT_COMPACT = 34;
+  const CHART_PAD_RIGHT_SINGLE = 24;   // 单轴视图（日均）右侧：够放末位日期标签即可
   // 中文：趋势图最大记录数 = 24h（10 分钟采样 × 144）。设备环 SOIL_HISTORY_MAX=144，
   //      前端缓存合并后同样按此封顶——更旧的记录由 30 天日均视图（0xFFE3）承担
   const TREND_MAX_RECORDS = 144;
@@ -1126,20 +1135,26 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      const canvas = els.trendChart;
      if (!canvas || !records || !records.length) return;
 
-     const dpr = window.devicePixelRatio || 1;
-     const w = Math.max(280, canvas.clientWidth || canvas.parentElement.clientWidth || 280);
-     const compact = w < 420 || isMobileViewport();
-     const h = compact ? 240 : 228;
-     canvas.width = w * dpr;
-     canvas.height = h * dpr;
-     const ctx = canvas.getContext('2d');
-     ctx.scale(dpr, dpr);
-     ctx.clearRect(0, 0, w, h);
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(280, canvas.clientWidth || canvas.parentElement.clientWidth || 280);
+    const compact = w < 420 || isMobileViewport();
+    // 中文：画布高度取自 CSS（HTML 里两个面板同为 h-72 sm:h-80），不再硬编码 240/228。
+    //      旧写法与 CSS 容器高度对不上，canvas 被 CSS 拉伸缩放 → 线虚、字糊；
+    //      更糟的是两个图各写一份高度，改一处就"两个 tab 的图不一样大"。
+    //      现在 CSS 是唯一尺寸真相，改 HTML 一处即两图同步。
+    const h = Math.max(200, canvas.clientHeight || (compact ? 240 : 228));
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
 
-     const padTop = compact ? 16 : 20;
-     const padBottom = compact ? 38 : 42;
-     const padLeft = compact ? 34 : Math.max(38, w * 0.10);
-     const padRight = compact ? 34 : Math.max(38, w * 0.10);
+    // 中文：内边距与日均图 drawMultiSeriesChart 取同一套（CHART_PAD_*），
+    //      切换 24h / 7D / 30D 时 X 轴刻度线、绘图区上下沿都在同一高度，不会跳。
+    const padTop = CHART_PAD_TOP;
+    const padBottom = CHART_PAD_BOTTOM;
+    const padLeft = compact ? CHART_PAD_LEFT_COMPACT : Math.max(38, w * 0.10);
+    const padRight = padLeft;   // 双轴视图：右侧要给湿度刻度留同样宽度
      const plotW = w - padLeft - padRight;
      const plotH = h - padTop - padBottom;
 
@@ -1342,7 +1357,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     function drawMultiSeriesChart(canvas, series, options = {}) {
       const dpr = window.devicePixelRatio || 1;
       const w = Math.max(280, canvas.clientWidth || canvas.parentElement.clientWidth || 280);
-      const h = options.height || 200;
+      // 中文：高度以 CSS 容器为准（与 24h 图同一条规则），options.height 只作兜底。
+      //      旧代码用调用处硬编码的 240/228，与 CSS 的 h-56/h-60 对不上，画布被
+      //      拉伸 → 线虚字糊，且与 24h 图各算一套高度，两个 tab 图不一样大。
+      const h = Math.max(200, canvas.clientHeight || options.height || 240);
       canvas.width = w * dpr;
       canvas.height = h * dpr;
       const ctx = canvas.getContext('2d');
@@ -1355,15 +1373,13 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       const rightAxis = options.rightAxisIndices || [];
       const dual = rightAxis.length > 0;
 
-      // 中文：内边距按"够放刻度就停"取值——手机绘图区本来就窄，旧的 padLeft 38 /
-      //      padBottom 44 把 1/4 画布留成了空白，数据看着像"没几条"。左侧只留
-      //      10px 字号刻度宽度（"28.3" ≈ 21px + 6px 间隙），底部只留一行日期高度。
-      const padTop = 8;
-      const padBottom = 22;
-      // 中文：左槽只放"刻度数字 + 阈值角标"两列，宽度按 10px 刻度（"44.2" ≈ 21px）
-      //      加 6px 间隙取值；右侧非双轴视图只留 8px 呼吸位
-      const padLeft = Math.max(28, w * 0.07);
-      const padRight = dual ? Math.max(28, w * 0.07) : Math.max(8, w * 0.02);
+      // 中文：与 24h 图 drawChart 共用同一套内边距（CHART_PAD_*）——两张图的 X 轴
+      //      标签基线、绘图区上下沿因此严格同高，切 24h / 7D / 30D 不再跳位。
+      //      左侧只放"刻度数字 + 阈值角标"两列（10px 字号 "28.3" ≈ 21px + 6px 间隙）。
+      const padTop = CHART_PAD_TOP;
+      const padBottom = CHART_PAD_BOTTOM;
+      const padLeft = w < 420 ? CHART_PAD_LEFT_COMPACT : Math.max(38, w * 0.10);
+      const padRight = dual ? padLeft : CHART_PAD_RIGHT_SINGLE;
       const plotW = w - padLeft - padRight;
       const plotH = h - padTop - padBottom;
 
@@ -1875,10 +1891,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      drawMultiSeriesChart(els.dailyChart, [
        { values, color: cfg.color },
      ], {
-       showValueLabels: false,
-       xLabels,
-       height: isMobileViewport() ? 240 : 228,
-       leftAxisRange: cfg.range || undefined,
+      showValueLabels: false,
+      xLabels,
+      // 高度不再在这里指定：与 24h 图一样取自 CSS 容器（见 drawMultiSeriesChart）
+      leftAxisRange: cfg.range || undefined,
        leftAxisBounds: cfg.bounds || undefined,
        leftAxisMinSpan: cfg.minSpan || undefined,
        leftAxisColor: cfg.color,
