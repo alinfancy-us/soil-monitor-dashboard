@@ -187,18 +187,36 @@ try {
   assert(zonePixels.heat > 300, `日均图没画 ≥35℃ 热害区背景（命中 ${zonePixels.heat} 像素）`);
   assert(zonePixels.frost > 300, `日均图没画 ≤2℃ 霜冻区背景（命中 ${zonePixels.frost} 像素）`);
 
-  // 摘要头点选（Apple Health 式）：点图上第一天 → 摘要头日期应离开默认的最新一天
-  const rangeDateBefore = await page.evaluate(() => document.getElementById('dailyRangeDate')?.textContent?.trim());
-  await page.evaluate(() => {
+  // 摘要头点选 + 拖动（Apple Health 式）：pointerdown 在第一天 → 日期离开默认最新一天；
+  // 再拖到中间 → 日期跟着变；拖回第一天 → 回到与首次相同，验证是连续滑选而非一次性跳转
+  const ptr = async (type, dayIdx) => page.evaluate(({ type, dayIdx }) => {
     const c = document.getElementById('dailyChart');
     const lay = c._chartLayout;
     const rect = c.getBoundingClientRect();
-    c.dispatchEvent(new MouseEvent('click', { clientX: rect.left + lay.padLeft, clientY: rect.top + 20, bubbles: true }));
-  });
-  await sleep(250);
-  const selDate = await page.evaluate(() => document.getElementById('dailyRangeDate')?.textContent?.trim());
-  assert(selDate && selDate !== rangeDateBefore, `点选第一天后摘要头日期未切换：${selDate}（原 ${rangeDateBefore}）`);
-  log(`点选第一天：摘要头 ${rangeDateBefore} → ${selDate}`);
+    const x = rect.left + lay.padLeft + dayIdx * lay.stepX;
+    const opts = { clientX: x, clientY: rect.top + 20, bubbles: true, pointerId: 1, pointerType: 'touch', isPrimary: true };
+    c.dispatchEvent(new PointerEvent(type, opts));
+  }, { type, dayIdx });
+  const readRangeDate = () => page.evaluate(() => document.getElementById('dailyRangeDate')?.textContent?.trim());
+
+  const dateDefault = await readRangeDate();
+  await ptr('pointerdown', 0);
+  await ptr('pointerup', 0);
+  await sleep(300);
+  const dateFirst = await readRangeDate();
+  assert(dateFirst && dateFirst !== dateDefault, `点第一天后摘要头日期未切换：${dateFirst}（原 ${dateDefault}）`);
+
+  await ptr('pointerdown', 0);
+  await ptr('pointermove', 8);
+  await sleep(300);
+  const dateDragged = await readRangeDate();
+  assert(dateDragged && dateDragged !== dateFirst, `拖到第 9 天摘要头没跟随：${dateDragged}`);
+  await ptr('pointermove', 0);
+  await sleep(300);
+  const dateBack = await readRangeDate();
+  await ptr('pointerup', 0);
+  assert(dateBack === dateFirst, `拖回第一天没还原：${dateBack}（期望 ${dateFirst}）`);
+  log(`滑选：默认 ${dateDefault} → 第一天 ${dateFirst} → 第 9 天 ${dateDragged} → 拖回 ${dateBack}`);
 
   // 切到湿度/电量：极值只对温度有意义，文案必须收起、风险区背景必须消失
   await page.evaluate(() => document.getElementById('dailyMetricHumBtn').click());

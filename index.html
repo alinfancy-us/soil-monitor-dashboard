@@ -691,7 +691,8 @@
             </div>
           </div>
           <div class="relative h-56 sm:h-60">
-            <canvas id="dailyChart" class="w-full h-full"></canvas>
+            <!-- touch-action:pan-y → 竖着滑仍然是滚动页面，横着滑才是拖竖线选日期 -->
+            <canvas id="dailyChart" class="w-full h-full cursor-pointer" style="touch-action:pan-y"></canvas>
           </div>
           <!-- 空态与范围说明共用同一行位置：有数据时显示"N-day daily average"，
                让用户知道 7 Days / 30 Days 是日均而不是逐条记录 -->
@@ -1078,7 +1079,7 @@
          role="dialog" aria-modal="true" aria-labelledby="idlePromptTitle" aria-describedby="idlePromptDesc">
       <h2 id="idlePromptTitle" class="mb-1 text-base font-semibold text-slate-700">Device will sleep soon</h2>
       <p id="idlePromptDesc" class="mb-4 text-sm leading-6 text-slate-500">
-        No activity for 3 minutes. To save battery the device disconnects in
+        No activity for 3 minutes. To save battery the connection closes in
         <b id="idleCountdown" class="text-emerald-600">30</b>s.
       </p>
       <div class="flex gap-2">

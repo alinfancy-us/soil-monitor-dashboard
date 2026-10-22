@@ -106,6 +106,22 @@ async function run(tag, daily, views, { keepOpen = false } = {}) {
   await connect(page, device);
   for (const v of views) {
     await pick(page, v);
+    // sel：先"按住横滑"到第 sel 天，验证拖动状态下的竖线与摘要头
+    if (Number.isInteger(v.sel)) {
+      await page.evaluate((dayIdx) => {
+        const c = document.getElementById('dailyChart');
+        const lay = c._chartLayout;
+        const rect = c.getBoundingClientRect();
+        const mk = (type, i) => new PointerEvent(type, {
+          clientX: rect.left + lay.padLeft + i * lay.stepX, clientY: rect.top + 20,
+          bubbles: true, pointerId: 1, pointerType: 'touch', isPrimary: true,
+        });
+        c.dispatchEvent(mk('pointerdown', lay.len - 1));
+        c.dispatchEvent(mk('pointermove', dayIdx));
+        c.dispatchEvent(mk('pointerup', dayIdx));
+      }, v.sel);
+      await sleep(250);
+    }
     await shot(page, `soilpulse-preview-${tag}-${v.name}`);
   }
   if (keepOpen) return { browser, page };
@@ -124,6 +140,9 @@ if (LIVE) {
     { name: '7d', unit: 'C', range: 7 },
     { name: '7d-f', unit: 'F', range: 7 },
     { name: 'hum', unit: 'C', range: 7, metric: 'hum' },
+    { name: 'hum30d', unit: 'C', range: 30, metric: 'hum' },
+    { name: '30d-sel', unit: 'C', range: 30, sel: 23 },
+    { name: '30d-sel', unit: 'C', range: 30, sel: 23 },
   ]);
   await run('heat', summerHeat(), [
     { name: '30d', unit: 'C', range: 30 },

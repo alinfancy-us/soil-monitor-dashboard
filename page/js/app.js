@@ -1367,6 +1367,21 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       canvas._chartLayout = { padLeft, plotW, stepX, len };
       const selIdx = Number.isInteger(options.selIdx) ? options.selIdx : len - 1;
 
+      // 中文：选中日竖细线对三种指标都画——温度靠它指出"当前是哪个柱子"，
+      //      湿度/电量（只有单值、没有区间柱）靠它指出"摘要头显示的是哪一天"，
+      //      点选交互的视觉语言保持一致。画在最底层，不遮数据。
+      if (Number.isInteger(options.selIdx) && options.selIdx >= 0 && options.selIdx < len) {
+        const hx = padLeft + options.selIdx * stepX;
+        ctx.save();
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(hx, padTop);
+        ctx.lineTo(hx, padTop + plotH);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       // 中文：min–max 画成 Apple Health 健康数据那种"圆头竖条"——每天一根，
       //      条的两端即当天最低/最高。圆头粗条自带"这是一段范围"的语义，
       //      不需要图例；均值即条的中点，不再叠折线（叠线会和条互相打架）。
@@ -1380,14 +1395,6 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         const xOf = i => padLeft + i * stepX;
 
         ctx.save();
-        if (Number.isInteger(options.selIdx) && options.selIdx >= 0 && options.selIdx < len) {
-          ctx.strokeStyle = '#cbd5e1';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(xOf(options.selIdx), padTop);
-          ctx.lineTo(xOf(options.selIdx), padTop + plotH);
-          ctx.stroke();
-        }
         const { color: barColor } = series[bandIdx >= 0 ? bandIdx : 0] || {};
         ctx.strokeStyle = barColor || '#f59e0b';
         ctx.lineCap = 'round';
@@ -1433,7 +1440,13 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         // 中文：点标记按像素间距决定画法——与 24h 图 drawChart 同一阈值
         //      （间距 < 6 倍标记半径即密）。密集时逐点画圈会连成"毛毛虫"，
         //      只在最末点（最新一天）画一个；稀疏时逐点标记。
-        const markIdx = dense ? [len - 1] : values.map((_, i) => i);
+        // 中文：密集时除了最新一天，选中的那天也要留一个点——否则点选后摘要头在跳，
+        //      图上却找不到对应数据点（竖细线只指明"哪一天"，点才标出"哪个值"）。
+        const denseIdx = [len - 1];
+        if (Number.isInteger(options.selIdx) && options.selIdx >= 0 && options.selIdx < len - 1) {
+          denseIdx.unshift(options.selIdx);
+        }
+        const markIdx = dense ? denseIdx : values.map((_, i) => i);
         markIdx.forEach((i) => {
           const x = padLeft + i * stepX;
           const y = padTop + (1 - (values[i] - lo) / (hi - lo)) * plotH;
@@ -1896,84 +1909,87 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      }
    }
 
-   // —— 连接空闲提醒（与固件 SOIL_CONN_IDLE_TIMEOUT_S=240 配合）——
-   // 设备端：240s 内没有任何读写就主动断链回睡眠（省电，防止连上后忘断开）。
-   // web 端：180s 无续命就弹窗倒计时 30s 问"还要不要连着"，点保持才写 0xFFE7 续命。
-   //        不点、点"休眠"或倒计时归零都**不做任何事**，交给设备 240s 自己断——
-   //        少一条主动断代码路径，也天然覆盖"页面被挂起/被杀"的情况。
-   // 只有**能清零设备 idle 的写操作**（Refresh/Apply/校准/Clear/改名）成功后才重新计时；
-   // 轮询的读不算（设备端也不认读），否则 5s 一次的轮询会让提醒永远不出现。
-   function clearIdleWatch() {
-     if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
-     if (state.idleTickTimer) { clearInterval(state.idleTickTimer); state.idleTickTimer = null; }
-     hideIdlePrompt();
-   }
+  // —— 连接空闲提醒（与固件 SOIL_CONN_IDLE_TIMEOUT_S=240 配合）——
+  // 设备端：240s 内没有任何读写就主动断链回睡眠（省电，防止连上后忘断开）。
+  // web 端：180s 无续命就弹窗倒计时 30s 问"还要不要连着"：
+  //        · 点 Keep connected → 写 0xFFE7 续命，重新计时
+  //        · 点 Let it sleep / 什么都不做让倒计时归零 → **立即断开**
+  //        「问了就得有结果」——弹窗既然带了倒计时，归零就该落地下线，而不是把决定权
+  //        再甩给设备的 240s 超时（那样用户等两分多钟还连着，跟没做这个功能一样）。
+  //        设备侧 240s 仍然保留，覆盖"页面被切后台/被系统杀掉"这类 web 无法执行的情况。
+  // 只有**能清零设备 idle 的写操作**（Refresh/Apply/校准/Clear/改名）成功后才重新计时；
+  // 轮询的读不算（设备端也不认读），否则 5s 一次的轮询会让提醒永远不出现。
+  function clearIdleWatch() {
+    if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
+    if (state.idleTickTimer) { clearInterval(state.idleTickTimer); state.idleTickTimer = null; }
+    hideIdlePrompt();
+  }
 
-   function hideIdlePrompt() {
-     if (els.idlePrompt) els.idlePrompt.classList.add('hidden');
-     if (els.idlePrompt) els.idlePrompt.classList.remove('flex');
-   }
+  function hideIdlePrompt() {
+    if (els.idlePrompt) els.idlePrompt.classList.add('hidden');
+    if (els.idlePrompt) els.idlePrompt.classList.remove('flex');
+  }
 
-   /** 重新开始 180s 计时。必须在"设备侧 idle 被清零"之后调用，否则提醒会早于设备超时。 */
-   function armIdleWatch() {
-     clearIdleWatch();
-     state.idleSleepExpected = false;
-     if (!state.device?.gatt.connected || state.otaRunning) return;
-     // 页面在后台时不装定时器：隐藏期间不会有人点"保持连接"，装上也只会在恢复时补一次误报；
-     // 隐藏期间设备 240s 自然断，回到前台由 visibilitychange 重新装
-     if (document.visibilityState !== 'visible') return;
-     state.idleTimer = setTimeout(showIdlePrompt, IDLE_WARN_MS);
-   }
+  /** 重新开始 180s 计时。必须在"设备侧 idle 被清零"之后调用，否则提醒会早于设备超时。 */
+  function armIdleWatch() {
+    clearIdleWatch();
+    state.idleSleepExpected = false;
+    if (!state.device?.gatt.connected || state.otaRunning) return;
+    // 页面在后台时不装定时器：隐藏期间不会有人点"保持连接"，装上也只会在恢复时补一次误报；
+    // 隐藏期间设备 240s 自然断，回到前台由 visibilitychange 重新装
+    if (document.visibilityState !== 'visible') return;
+    state.idleTimer = setTimeout(showIdlePrompt, IDLE_WARN_MS);
+  }
 
-   function showIdlePrompt() {
-     state.idleTimer = null;
-     // 到点时若已断开 / 正在 OTA / 页面被隐藏，都不打扰
-     if (!state.device?.gatt.connected || state.otaRunning) return;
-     if (document.visibilityState !== 'visible') return;
-     if (!els.idlePrompt) return;
-     state.idleLeft = IDLE_GRACE_S;
-     els.idleCountdown.textContent = String(state.idleLeft);
-     els.idlePrompt.classList.remove('hidden');
-     els.idlePrompt.classList.add('flex');
-     state.idleTickTimer = setInterval(() => {
-       state.idleLeft -= 1;
-       if (state.idleLeft > 0) {
-         els.idleCountdown.textContent = String(state.idleLeft);
-         return;
-       }
-       // 倒计时归零：收起弹窗，不再续命，等设备 240s 超时自己断
-       state.idleSleepExpected = true;
-       clearIdleWatch();
-       log('Idle prompt timed out — letting the device sleep');
-     }, 1000);
-     log('Idle 3 min — asking whether to keep the link alive');
-   }
+  function showIdlePrompt() {
+    state.idleTimer = null;
+    // 到点时若已断开 / 正在 OTA / 页面被隐藏，都不打扰
+    if (!state.device?.gatt.connected || state.otaRunning) return;
+    if (document.visibilityState !== 'visible') return;
+    if (!els.idlePrompt) return;
+    state.idleLeft = IDLE_GRACE_S;
+    els.idleCountdown.textContent = String(state.idleLeft);
+    els.idlePrompt.classList.remove('hidden');
+    els.idlePrompt.classList.add('flex');
+    state.idleTickTimer = setInterval(() => {
+      state.idleLeft -= 1;
+      if (state.idleLeft > 0) {
+        els.idleCountdown.textContent = String(state.idleLeft);
+        return;
+      }
+      // 倒计时归零 = 用户没做选择：按"默认休眠"处理，立即断开（等同点 Let it sleep）
+      log('Idle countdown expired — no response, disconnecting now');
+      idleSleepNow();
+    }, 1000);
+    log('Idle 3 min — asking whether to keep the link alive');
+  }
 
-   /** 点「Keep connected」：写一次 0xFFE7（固件收到即清零 idle 计时），然后重新计时 */
-   async function idleKeepAlive() {
-     if (!state.device?.gatt.connected || !state.refreshChar) { clearIdleWatch(); return; }
-     els.idleKeepBtn.disabled = true;
-     try {
-       await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Idle keep-alive refresh (0xFFE7)');
-       armIdleWatch();
-       log('Link kept alive (0xFFE7), idle timer restarted');
-     } catch (err) {
-       clearIdleWatch();
-       log(`Keep-alive failed: ${err.message || err}`);
-     } finally {
-       els.idleKeepBtn.disabled = false;
-     }
-   }
+  /** 点「Keep connected」：写一次 0xFFE7（固件收到即清零 idle 计时），然后重新计时 */
+  async function idleKeepAlive() {
+    if (!state.device?.gatt.connected || !state.refreshChar) { clearIdleWatch(); return; }
+    els.idleKeepBtn.disabled = true;
+    try {
+      await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Idle keep-alive refresh (0xFFE7)');
+      armIdleWatch();
+      log('Link kept alive (0xFFE7), idle timer restarted');
+    } catch (err) {
+      clearIdleWatch();
+      log(`Keep-alive failed: ${err.message || err}`);
+    } finally {
+      els.idleKeepBtn.disabled = false;
+    }
+  }
 
-   /** 点「Let it sleep」：立即断开，比等 240s 更省电，也让用户所见即所得 */
-   function idleSleepNow() {
-     clearIdleWatch();
-     state.idleSleepExpected = true;
-     try { state.device?.gatt?.disconnect(); } catch (_) {}
-   }
+  /** 点「Let it sleep」/ 倒计时归零：立即断开，比等设备 240s 超时更省电，也让用户所见即所得 */
+  function idleSleepNow() {
+    clearIdleWatch();
+    state.idleSleepExpected = true;   // 归入"预期内休眠断链"：状态显示 Asleep，不当故障
+    log('Idle sleep — disconnecting now');
+    forceDisconnect('idle sleep');
+  }
 
-   els.idleKeepBtn?.addEventListener('click', idleKeepAlive);
-   els.idleSleepBtn?.addEventListener('click', idleSleepNow);
+  els.idleKeepBtn?.addEventListener('click', idleKeepAlive);
+  els.idleSleepBtn?.addEventListener('click', idleSleepNow);
 
    function onDisconnected() {
       // 重入保护：gattserverdisconnected 事件 / 轮询 / forceDisconnect / visibilitychange
@@ -2016,7 +2032,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         renderCalibHints(null);
         if (els.devNameStatus) els.devNameStatus.textContent = '';
         log(state.idleSleepExpected
-          ? 'Device disconnected — idle sleep (firmware 240s timeout)'
+          ? 'Device disconnected — idle sleep'
           : 'Device disconnected');
       } finally {
         state.disconnecting = false;
@@ -2838,9 +2854,10 @@ function clearConnectError() {
   }
 
   // 主动断连 + 复位 UI：浏览器栈半死（gatt.connected 迟迟不变 false、事件不派发）时，
-  // 本地 gatt.disconnect() 强制清理协议栈状态；onDisconnected 幂等，复位全部界面
+  // 本地 gatt.disconnect() 强制清理协议栈状态；onDisconnected 幂等，复位全部界面。
+  // 日志措辞保持中性（"Disconnect"而非"Connection lost"）——这里也会被"用户主动休眠"复用。
   function forceDisconnect(reason) {
-    log(`Connection lost${reason ? ` — ${reason}` : ''}`);
+    log(`Disconnect${reason ? ` — ${reason}` : ''}`);
     try { state.device?.gatt?.disconnect(); } catch (_) { /* 链路已断时可能抛错，忽略 */ }
     onDisconnected();
   }
@@ -3745,21 +3762,56 @@ The device will measure the current probe state first, then apply the calibratio
   els.dailyMetricBattBtn.addEventListener('click', () => setDailyMetric('batt'));
   els.dailyRange7Btn?.addEventListener('click', () => setDailyRange(7));
   els.dailyRange30Btn?.addEventListener('click', () => setDailyRange(30));
-  // 中文：点日均图任意一天 → 摘要头切换到那天（Apple Health 式）。布局参数由
-  //      drawMultiSeriesChart 存在 canvas._chartLayout 上；click 在手机上就是 tap。
-  els.dailyChart?.addEventListener('click', (e) => {
-    const lay = els.dailyChart._chartLayout;
-    if (!lay || lay.len < 1 || lay.stepX <= 0) return;
+  // 中文：点 / 拖动日均图任意一天 → 摘要头切换那天（Apple Health 式滑选）。
+  //      布局参数由 drawMultiSeriesChart 存在 canvas._chartLayout 上。
+  //      用 pointer 事件而不是 click：一根手指按住横着滑，竖线跟着走（左滑右滑都行），
+  //      canvas 上设了 touch-action:pan-y，所以竖着滑仍然是滚动页面、不会误触。
+  let dailyDragging = false;
+  let dailyScrubRaf = 0;
+
+  const dailyIndexAt = (clientX) => {
+    const lay = els.dailyChart?._chartLayout;
+    if (!lay || lay.len < 1 || lay.stepX <= 0) return null;
     const rect = els.dailyChart.getBoundingClientRect();
-    if (!rect.width) return;
-    const x = (e.clientX - rect.left) * (els.dailyChart.clientWidth / rect.width);
+    if (!rect.width) return null;
+    const x = (clientX - rect.left) * (els.dailyChart.clientWidth / rect.width);
     const idx = Math.round((x - lay.padLeft) / lay.stepX);
-    const sel = Math.max(0, Math.min(lay.len - 1, idx));
-    if (state.dailySelIdx !== sel) {
-      state.dailySelIdx = sel;
+    return Math.max(0, Math.min(lay.len - 1, idx));
+  };
+
+  // 中文：拖动时一帧最多重绘一次（pointermove 在手机上可达 120Hz，重绘是全量 canvas 绘制）
+  const scheduleDailyRender = () => {
+    if (dailyScrubRaf) return;
+    dailyScrubRaf = requestAnimationFrame(() => {
+      dailyScrubRaf = 0;
       if (state.lastDailyRecords) renderDaily(state.lastDailyRecords);
-    }
+    });
+  };
+
+  const scrubDaily = (e) => {
+    const sel = dailyIndexAt(e.clientX);
+    if (sel == null || state.dailySelIdx === sel) return;
+    state.dailySelIdx = sel;
+    scheduleDailyRender();
+  };
+
+  els.dailyChart?.addEventListener('pointerdown', (e) => {
+    if (!els.dailyChart._chartLayout) return;
+    dailyDragging = true;
+    try { els.dailyChart.setPointerCapture(e.pointerId); } catch (_) {}
+    scrubDaily(e);
   });
+  els.dailyChart?.addEventListener('pointermove', (e) => {
+    if (dailyDragging) scrubDaily(e);
+  });
+  const endDailyDrag = (e) => {
+    if (!dailyDragging) return;
+    dailyDragging = false;
+    try { els.dailyChart.releasePointerCapture?.(e.pointerId); } catch (_) {}
+  };
+  els.dailyChart?.addEventListener('pointerup', endDailyDrag);
+  els.dailyChart?.addEventListener('pointercancel', endDailyDrag);
+  els.dailyChart?.addEventListener('pointerleave', endDailyDrag);
   // 单位切换：点击切换器任意位置（含按钮、灰底间隙、以及当前激活的单位）都翻转单位（°F ↔ °C）。
   // 用户期望“按到上面就切换”——即使当前在 °C，按到 °C 上也切回 °F，故统一 toggle，不做“切到该按钮单位”的区分。
   els.tempUnitToggle?.addEventListener('click', () => {
