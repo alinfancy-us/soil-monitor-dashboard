@@ -1072,16 +1072,24 @@
 
   <!-- 连接空闲提醒（固件 SOIL_CONN_IDLE_TIMEOUT_S=240 的配套 UI）：
        180s 没有续命操作就弹这个，倒计时 30s。点 Keep connected 写一次 0xFFE7 把设备端
-       idle 计时清零；不点 / 点 Let it sleep / 倒计时归零 → 放弃续命，由设备 240s 自己断链回睡眠。
+       idle 计时清零并重新计时；点 Let it sleep 或倒计时归零 → web 立即主动断链（状态显示
+       Asleep），设备 240s 超时只兜"页面被切后台/被杀"这类 web 跑不起来的情况。
+       文案要交代清楚三件事：睡眠省电、断开不影响看数据、数据已经在手机上（否则用户不敢点）。
        参数见 page/js/config.js 的 IDLE_WARN_MS / IDLE_GRACE_S，三处数值须保持 180 < 210 < 240 -->
   <div id="idlePrompt" class="fixed inset-0 z-50 hidden items-end justify-center sm:items-center" style="background: rgba(15, 23, 42, 0.45);">
     <div class="w-full max-w-md p-5 m-0 bg-white shadow-xl rounded-t-2xl sm:m-4 sm:rounded-2xl"
          role="dialog" aria-modal="true" aria-labelledby="idlePromptTitle" aria-describedby="idlePromptDesc">
       <h2 id="idlePromptTitle" class="mb-1 text-base font-semibold text-slate-700">Device will sleep soon</h2>
-      <p id="idlePromptDesc" class="mb-4 text-sm leading-6 text-slate-500">
-        No activity for 3 minutes. To save battery the connection closes in
-        <b id="idleCountdown" class="text-emerald-600">30</b>s.
-      </p>
+      <div id="idlePromptDesc" class="mb-4">
+        <p class="text-sm leading-6 text-slate-500">
+          No activity for 3 minutes — sleeping saves battery.
+          The connection closes in <b id="idleCountdown" class="text-emerald-600">30</b>s.
+        </p>
+        <p class="mt-1 text-xs leading-5 text-slate-400">
+          <span class="font-bold text-emerald-600">✓</span>
+          Readings are already saved to this phone, so you can keep browsing the data after it disconnects.
+        </p>
+      </div>
       <div class="flex gap-2">
         <button id="idleKeepBtn" type="button"
           class="flex-1 px-4 py-2 text-sm font-semibold text-white transition rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">Keep connected</button>
