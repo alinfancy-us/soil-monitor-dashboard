@@ -52,7 +52,17 @@ async function dragCanvas(page, dx) {
 {
   // 中文：gapFromH/gapToH = 0 → 不做断档，拿到整齐的 144 条（10min × 144 ≈ 23h50m）
   const { browser, page, device } = await openApp({
-    seed: { history: 144, historyOpts: { gapFromH: 0, gapToH: 0 }, daily: 0 },
+    // endAt 固定为"今天 01:30"：默认 6h 窗口 = 昨天 19:30 → 今天 01:30，必然跨天，
+    // 让"Time Range 必须带日期"这条断言不受用例运行时刻影响
+    seed: {
+      history: 144,
+      historyOpts: { gapFromH: 0, gapToH: 0, endAt: (() => {
+        const d = new Date();
+        d.setHours(1, 30, 0, 0);
+        return Math.floor(d.getTime() / 1000);
+      })() },
+      daily: 0,
+    },
   });
   pipeConsole(page);
 
@@ -138,6 +148,28 @@ async function dragCanvas(page, dx) {
     await page.mouse.click(box.x, box.y);   // 300ms 内两下 = 双击
     await until(async () => (await geom(page)).follow === true, { timeout: 5000, label: '双击回最新' });
     log('双击 → 已回到最新一屏');
+
+    // ── E. Time Range 跨天必须带日期 ──
+    //      只显示 "23:18 - 05:18" 会被读成"结束比开始早"，实际是跨到了第二天
+    //      （2026-10-22 用户反馈）。本用例 seed 的末条固定在今天 01:30，所以默认
+    //      6h 窗口必然跨天（昨天 19:30 → 今天 01:30），断言不会因运行时刻而漂。
+    const gDate = await geom(page);
+    const md = await page.evaluate(({ s, e }) => {
+      const pad = (n) => String(n).padStart(2, '0');
+      const d = new Date(s * 1000);
+      const f = new Date(e * 1000);
+      return {
+        sameDay: d.toDateString() === f.toDateString(),
+        mdStart: `${pad(d.getMonth() + 1)}/${pad(d.getDate())}`,
+        mdEnd: `${pad(f.getMonth() + 1)}/${pad(f.getDate())}`,
+      };
+    }, { s: gDate.winStart, e: gDate.winEnd });
+    const textDate = await page.evaluate(rangeText);
+    assert(md.sameDay === false,
+      `本用例应构造跨天窗口，实际 sameDay=${md.sameDay}（${gDate.winStart}~${gDate.winEnd}）`);
+    assert(textDate.includes(md.mdStart) && textDate.includes(md.mdEnd),
+      `跨天时 Time Range 两端都要带日期（${md.mdStart} / ${md.mdEnd}），实际 "${textDate}"`);
+    log(`跨天文案："${textDate}"`);
 
     // ── 手机视口留档（390×844，用来肉眼确认 6h 窗口的真实密度） ──
     await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true });

@@ -1092,6 +1092,17 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
 
   // Data 面板改版后图下 3 个统计块(trend/dailyLatestValue 等)已从 index.html 移除，
   // 本函数仅维护仍存在的 trendRangeText 时间范围文案；勿再引用已删除的元素
+   // 中文：跨天的时间段必须带日期。只写 "21:41 - 03:41" 会被读成"结束比开始早"，
+  //      实际是跨到了第二天（2026-10-22 用户反馈"看不懂、容易误解"）。
+  //      同一天则只在起点标一次日期，避免重复占宽度（手机上这行只有 ~317px）。
+  function formatRangeBound(ts, withDate) {
+    const hm = formatShortTime(ts);
+    if (!withDate || !Number.isFinite(ts) || ts <= 0) return hm;
+    const d = new Date(ts * 1000);
+    const pad2 = (n) => String(n).padStart(2, '0');
+    return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${hm}`;
+  }
+
   function updateTrendSummary(records) {
     if (!records || !records.length) {
       els.trendRangeText.textContent = 'No data available';
@@ -1106,13 +1117,17 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     const latest = records[records.length - 1].timestamp;
     const winStart = (g && Number.isFinite(g.winStart)) ? g.winStart : first;
     const winEnd = (g && Number.isFinite(g.winEnd)) ? g.winEnd : latest;
+    const sameDay = Number.isFinite(winStart) && Number.isFinite(winEnd)
+      && new Date(winStart * 1000).toDateString() === new Date(winEnd * 1000).toDateString();
+    const startTxt = formatRangeBound(winStart, true);
+    const endTxt = formatRangeBound(winEnd, !sameDay);
     if (winStart <= first + 1 && winEnd >= latest - 1) {
-      els.trendRangeText.textContent = `Time Range: ${formatShortTime(first)} - ${formatShortTime(latest)}`;
+      els.trendRangeText.textContent = `Time Range: ${startTxt} - ${endTxt}`;
       return;
     }
     const span = winEnd - winStart;
     const label = span >= 3600 ? `${Math.round(span / 3600)}h` : `${Math.max(1, Math.round(span / 60))}m`;
-    els.trendRangeText.textContent = `Time Range: ${formatShortTime(winStart)} - ${formatShortTime(winEnd)} · ${label}`;
+    els.trendRangeText.textContent = `Time Range: ${startTxt} - ${endTxt} · ${label}`;
   }
 
   // 中文：只有"离开了最新那一屏"才露出 Latest 胶囊——默认不占版面（手机上一行空隙都金贵），
