@@ -1509,15 +1509,26 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       // 中文：选中日竖细线对三种指标都画——温度靠它指出"当前是哪个柱子"，
       //      湿度/电量（只有单值、没有区间柱）靠它指出"摘要头显示的是哪一天"，
       //      点选交互的视觉语言保持一致。画在最底层，不遮数据。
+      //      三个维度区分于坐标轴（用户反馈"像坐标轴"，2026-10-22）：紫色 #7c3aed
+      //      （轴框是灰 #cbd5e1；橙/蓝/绿已被三个指标占用，紫是唯一无主色）、
+      //      虚线（轴框是实线）、上下各内缩 3px 不顶格——默认选中最后一天时
+      //      线正贴绘图区右缘，同色顶格会被当成"右边框/右轴"。底端补一个
+      //      小圆点端帽，一眼看出是"指针"而不是边框。
       if (Number.isInteger(options.selIdx) && options.selIdx >= 0 && options.selIdx < len) {
         const hx = padLeft + options.selIdx * stepX;
         ctx.save();
-        ctx.strokeStyle = '#cbd5e1';
-        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#7c3aed';
+        ctx.setLineDash([3, 3]);
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(hx, padTop);
-        ctx.lineTo(hx, padTop + plotH);
+        ctx.moveTo(hx, padTop + 3);
+        ctx.lineTo(hx, padTop + plotH - 3);
         ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.arc(hx, padTop + plotH - 3, 2, 0, Math.PI * 2);
+        ctx.fillStyle = '#7c3aed';
+        ctx.fill();
         ctx.restore();
       }
 
