@@ -661,9 +661,18 @@
               <span style="display:inline-block;width:12px;height:3px;border-radius:9999px;background:#0ea5e9"></span>
               Moisture
             </span>
+            <!-- 横滑的发现性提示：手势本身没有视觉入口，用一行灰字说明，避免"图怎么不动" -->
+            <span class="inline-flex items-center gap-1" style="margin:0 8px;color:#cbd5e1">swipe ← → to pan</span>
           </div>
           <div class="relative h-56 sm:h-60">
-            <canvas id="trendChart" class="w-full h-full"></canvas>
+            <!-- touch-action:pan-y → 竖着滑仍然是滚动页面，横着滑才是拖 x 轴看更早/更晚的数据
+                 （144 条铺满 24h 在手机上每条只摊到 1.6px，所以图只画"可视窗口"里这一段） -->
+            <canvas id="trendChart" class="w-full h-full" style="touch-action:pan-y;cursor:grab"></canvas>
+            <!-- 离开了最新一屏才出现（app.js syncTrendLatestChip）；
+                 样式走内联而不是 tailwind 类，避免依赖 tailwind.css 是否重新构建过 -->
+            <button id="trendLatestBtn" type="button" aria-label="Jump to latest readings"
+              class="hidden"
+              style="position:absolute;right:2px;top:0;padding:3px 8px;border-radius:9999px;font-size:10px;font-weight:600;line-height:1.3;color:#047857;background:rgba(255,255,255,.93);border:1px solid #a7f3d0;box-shadow:0 1px 2px rgba(15,23,42,.08)">Latest →</button>
           </div>
           <p id="trendRangeText" class="mt-2 text-xs text-center text-slate-400">No data available</p>
         </div>

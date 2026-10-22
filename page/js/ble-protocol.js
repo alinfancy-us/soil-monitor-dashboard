@@ -112,6 +112,46 @@ const BLEProtocol = (() => {
     return all;
   }
 
+  /**
+   * 从 0xFFEC 拉 24h 历史，**从最新一页往回翻**，每页到手立刻回调。
+   *
+   * 为什么不复用 fetchFullHistory：它从 offset=0（环内最旧）开始往新翻，
+   * 而用户最先要看的是最近几小时——那在最后一页。144 条 = 8 次 write+read 往返
+   * （Bluefy/iOS 单次 200~250ms），正序要等满 8 次（≈1.6~2s）才第一次有数据上屏，
+   * 这段时间界面停在旧图/空图上，看起来像"连上了但没数据"。
+   *
+   * 这里：offset=0 读一次拿 total（这一页反正也要读，不浪费，但不回调——它是最旧的
+   * 20 条，先画它会停在 24 小时前）→ 直接跳到最后一页往回翻。总往返次数与正序相同
+   * （144 条仍是 8 次），但"第一次有数据"的时刻从第 8 次往返提前到第 2 次（≈400ms）。
+   *
+   * @param {BluetoothRemoteGATTCharacteristic} blkChar
+   * @param {{onChunk?: (records:Array, info:{total:number, fetched:number, done:boolean}) => void}} [opts]
+   *        onChunk 每页回调一次：records 是这一页的记录（页内时间升序，不是累计）
+   * @returns {Promise<Array>} 全部记录，按时间升序
+   */
+  async function fetchHistoryNewestFirst(blkChar, { onChunk } = {}) {
+    const head = await readHistoryBlock(blkChar, 0, HIS_BLK_MAX_COUNT);
+    const total = Math.min(head.total, HIS_BLK_MAX_COUNT * HIS_BLK_MAX_CHUNKS);
+    const all = [...head.records];
+    let fetched = head.records.length;
+    // 中文：这一页是**最旧**的 20 条，不回调——第一帧就画它，图会停在 24 小时前那段，
+    //      和"先看最新"正好相反。只有总数就这一页（total ≤ 20，没有尾页可翻）时才回调。
+    const onlyPage = fetched >= total;
+    if (onlyPage) onChunk?.(head.records, { total, fetched, done: true });
+    // 最后一页的起点按整页对齐：144 → 140（末页只有 4 条），20 → 0（无末页，跳出）
+    for (let start = Math.floor((total - 1) / HIS_BLK_MAX_COUNT) * HIS_BLK_MAX_COUNT;
+      start > 0; start -= HIS_BLK_MAX_COUNT) {
+      const blk = await readHistoryBlock(blkChar, start, HIS_BLK_MAX_COUNT);
+      if (!blk.records.length) break;     // 设备侧窗口越界：放手，别在坏数据上死循环
+      all.push(...blk.records);
+      fetched += blk.records.length;
+      onChunk?.(blk.records, { total, fetched, done: fetched >= total });
+    }
+    // 回调是"乱序到达"的（末页先到），下行消费方按时间合并，
+    // 返回值仍统一排成升序，老调用点语义不变
+    return all.sort((a, b) => a.timestamp - b.timestamp);
+  }
+
   function parsePacket(view) {
     if (view.byteLength < PACKET_SIZE) {
       throw new Error(`Invalid packet length: ${view.byteLength} (expected ${PACKET_SIZE})`);
@@ -1144,6 +1184,7 @@ const BLEProtocol = (() => {
     parseHistoryBlockPacket,
     readHistoryBlock,
     fetchFullHistory,
+    fetchHistoryNewestFirst,
     readTempOffset,
     sendTempOffset,
     readCalibStatus,

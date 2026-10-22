@@ -74,6 +74,12 @@
   // 记录的换算时间戳可能漂移 1~2 秒；按 timestamp 精确去重会漏判，缓存里就会堆出
   // 成对的"近似重复"并挤掉真正的历史。10 分钟采样间隔下 2 秒容差不会误合并相邻样本。
   const TREND_MERGE_TOLERANCE_S = 2;
+  // 中文：24h 图的可视窗口跨度（秒）。144 条铺满一屏在手机上每条只摊到 1.6px，
+  //      点挤成毛毛虫、最近几小时看不出走势——所以只画窗口内这一段，默认 6h（≈36 条）。
+  //      缩放范围 30min ~ 24h：小于 30min 画不出趋势、大于 24h 没有数据可看。
+  const TREND_VIEW_SPAN_DEFAULT = 6 * 3600;
+  const TREND_VIEW_SPAN_MIN = 30 * 60;
+  const TREND_VIEW_SPAN_MAX = 24 * 3600;
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
   const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
@@ -164,6 +170,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      historyBody: document.getElementById('historyBody'),
      trendChart: document.getElementById('trendChart'),
     trendRangeText: document.getElementById('trendRangeText'),
+     trendLatestBtn: document.getElementById('trendLatestBtn'),
      trendTabBtn: document.getElementById('trendTabBtn'),
      trendTabPanel: document.getElementById('trendTabPanel'),
      dailyTabPanel: document.getElementById('dailyTabPanel'),
@@ -240,6 +247,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      latestNotifySubscribed: false, // latest 特征 notify 是否已订阅成功（失败回退轮询读）
      dailyMetric: 'temp',
      tempUnit: 'F',
+     // 中文：24h 图 x 轴可视窗口。endTs=右边界（null 表示跟随最新），
+     //      spanSec=窗口跨度，follow=true 时每次重画都把右边界钉在最新一条上。
+     trendView: { endTs: null, spanSec: TREND_VIEW_SPAN_DEFAULT, follow: true },
+     trendGeom: null,   // 上一帧 24h 图的几何（窗口区间/内边距），手势层与范围文案共用
    };
 
    // 温度单位偏好：默认华氏（°F，美国常用），可在温度卡片切换摄氏（°C），持久化到本地
@@ -805,6 +816,12 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     state.lastRecords = null;
     state.latestShown = null;
     state.lastDailyRecords = null;
+    // 中文：可视窗口一并复位——否则换设备/清空后仍停在上一台的"拖到 8 小时前"位置，
+    //      新数据进来只会在窗口外，图上一片空白，看起来像清空没成功
+    state.trendView = { endTs: null, spanSec: TREND_VIEW_SPAN_DEFAULT, follow: true };
+    state.trendGeom = null;
+    if (els.trendChart) els.trendChart._trendLayout = null;
+    syncTrendLatestChip();
     els.tempValue.textContent = '--';
     els.humValue.textContent = '--';
     els.battValue.textContent = '--';
@@ -1039,27 +1056,54 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        .reverse()
        .join('');
  
-     updateTrendSummary(records);
-     drawChart(records);
+    // 中文：先画图、再写范围文案——文案要显示"可视窗口"区间，而窗口几何是 drawChart
+    //      算出来写进 state.trendGeom 的。反过来（先写文案）在页面刚加载/重载时会拿到
+    //      null 几何，退化成"首末记录"文案，与图上真实画出的 6h 窗口对不上。
+    drawChart(records);
+    updateTrendSummary(records);
    }
 
-   // Data 面板改版后图下 3 个统计块(trend/dailyLatestValue 等)已从 index.html 移除，
-   // 本函数仅维护仍存在的 trendRangeText 时间范围文案；勿再引用已删除的元素
-   function updateTrendSummary(records) {
-     if (!records || !records.length) {
-       els.trendRangeText.textContent = 'No data available';
-       return;
-     }
+  // Data 面板改版后图下 3 个统计块(trend/dailyLatestValue 等)已从 index.html 移除，
+  // 本函数仅维护仍存在的 trendRangeText 时间范围文案；勿再引用已删除的元素
+  function updateTrendSummary(records) {
+    if (!records || !records.length) {
+      els.trendRangeText.textContent = 'No data available';
+      return;
+    }
 
-     const latest = records[records.length - 1];
-     const first = records[0];
-     els.trendRangeText.textContent = `Time Range: ${formatShortTime(first.timestamp)} - ${formatShortTime(latest.timestamp)}`;
-   }
+    // 中文：范围文案跟着**可视窗口**走。窗口化之后若仍显示首末记录，用户会以为
+    //      图上铺的是 24h，其实只画了 6h（拖到中间时差得更多）。
+    //      窗口盖住全部数据时退化成原来的写法，不带跨度后缀。
+    const g = state.trendGeom;
+    const first = records[0].timestamp;
+    const latest = records[records.length - 1].timestamp;
+    const winStart = (g && Number.isFinite(g.winStart)) ? g.winStart : first;
+    const winEnd = (g && Number.isFinite(g.winEnd)) ? g.winEnd : latest;
+    if (winStart <= first + 1 && winEnd >= latest - 1) {
+      els.trendRangeText.textContent = `Time Range: ${formatShortTime(first)} - ${formatShortTime(latest)}`;
+      return;
+    }
+    const span = winEnd - winStart;
+    const label = span >= 3600 ? `${Math.round(span / 3600)}h` : `${Math.max(1, Math.round(span / 60))}m`;
+    els.trendRangeText.textContent = `Time Range: ${formatShortTime(winStart)} - ${formatShortTime(winEnd)} · ${label}`;
+  }
+
+  // 中文：只有"离开了最新那一屏"才露出 Latest 胶囊——默认不占版面（手机上一行空隙都金贵），
+  //      拖走或缩放之后才出现；点它回到"最新 + 默认 6h"。
+  function syncTrendLatestChip() {
+    if (!els.trendLatestBtn) return;
+    const v = state.trendView;
+    const show = !v.follow || v.spanSec !== TREND_VIEW_SPAN_DEFAULT;
+    els.trendLatestBtn.classList.toggle('hidden', !show);
+  }
  
-   /**
-    * 趋势图（5条历史记录）：温度(左轴,℃) + 湿度(右轴,%，固定0~100)。
-    * 为避免遮挡，关键数值放在图下统计区，不在曲线上堆叠标签。
-    */
+  /**
+   * 24h 趋势图：温度(左轴) + 湿度(右轴,%，固定 0~100)。
+   * 为避免遮挡，关键数值放在图下统计区，不在曲线上堆叠标签。
+   *
+   * x 轴是**可视窗口**（state.trendView）而不是全部 144 条：默认只画最近 6h，
+   * 左右拖动看更早的数据，手势见下方的 pointer/wheel 绑定。
+   */
    function drawChart(records) {
      const canvas = els.trendChart;
      if (!canvas || !records || !records.length) return;
@@ -1081,9 +1125,56 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      const plotW = w - padLeft - padRight;
      const plotH = h - padTop - padBottom;
 
+     // ── 可视窗口（x 轴范围）──
+     // 中文：144 条 × 10min 铺满 24h 时，手机 ~230px 的绘图区里每条只摊到 1.6px，
+     //      点全挤成一条毛毛虫、最近几小时的走势反而看不清。改成"只画窗口内这一段"，
+     //      默认 6h（≈36 条，每条 ~6px），手指左右拖平移（手势见下方 pointer/wheel 绑定）。
+     const n = records.length;
+     const dataFirst = records[0].timestamp;
+     const dataLast = records[n - 1].timestamp;
+     const dataSpan = Math.max(1, dataLast - dataFirst);
+     const view = state.trendView;
+     if (view.follow || !Number.isFinite(view.endTs)) view.endTs = dataLast;
+     // 窗口比数据还宽时收缩到数据跨度：只有 3 条记录的新设备不该被摊到 6 小时宽
+     const spanSec = Math.round(Math.min(view.spanSec, Math.max(dataSpan * 1.1, 120)));
+     // 右边界钳在 [最早一条 + span, 最新一条]：拖到头就停，不会拖出纯空白区
+     const minEnd = Math.min(dataFirst + spanSec, dataLast);
+     // 中文：取整到秒——拖动时是 px→秒 的浮点换算，留小数会让窗口边界与记录时间戳
+     //      永远差 0.1s，比较"是否回到最新"之类的 ±1s 判据变得很脆
+     const endTs = Math.round(Math.min(Math.max(view.endTs, minEnd), dataLast));
+     const winStart = endTs - spanSec;
+     view.endTs = endTs;
+
+     // 窗口内可见的记录（visStart..visEnd 为下标半开区间）；整段落在断档里时退回最近一条
+     let visStart = 0;
+     while (visStart < n && records[visStart].timestamp < winStart) visStart++;
+     let visEnd = visStart;
+     while (visEnd < n && records[visEnd].timestamp <= endTs) visEnd++;
+     if (visEnd === visStart) {
+       let best = 0, bestD = Infinity;
+       for (let i = 0; i < n; i++) {
+         const d = Math.min(Math.abs(records[i].timestamp - winStart), Math.abs(records[i].timestamp - endTs));
+         if (d < bestD) { bestD = d; best = i; }
+       }
+       visStart = best;
+       visEnd = best + 1;
+     }
+     // 绘制范围两侧各带一个窗口外的点：线段能画到边界之外，裁剪后不会在边缘突然断头
+     const drawStart = Math.max(0, visStart - 1);
+     const drawEnd = Math.min(n, visEnd + 1);
+
      const temps = records.map(r => tempVal(r.temp));
      const hums = records.map(r => r.hum);
-     const tRange = niceRange(Math.min(...temps), Math.max(...temps));
+     // 中文：纵轴量程只按**窗口内**的点算。用全量 min/max 时，窗口里只有一条平线
+     //      也会被 24h 的极值压扁成一条直线——和"看不清"是同一个问题。
+     const visTemps = temps.slice(visStart, visEnd);
+     let tRange = niceRange(Math.min(...visTemps), Math.max(...visTemps));
+     // 中文：最小可视跨度。夜间 6h 土壤温度可能只摆动 0.4℃，按 20% 留白放大后
+     //      0.01℃ 的量化噪声会被画成锯齿；至少给 1.5（当前温度单位）保留真实起伏。
+     if (tRange.hi - tRange.lo < 1.5) {
+       const mid = (tRange.lo + tRange.hi) / 2;
+       tRange = { lo: mid - 0.75, hi: mid + 0.75 };
+     }
      const hLo = 0;
      const hHi = 100;
 
@@ -1091,47 +1182,26 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      drawYAxisTicks(ctx, tRange.lo, tRange.hi, padTop, plotH, padLeft - 6, 'right', '#f59e0b', v => v.toFixed(1));
      drawYAxisTicks(ctx, hLo, hHi, padTop, plotH, w - padRight + 6, 'left', '#0ea5e9', v => v.toFixed(0));
 
-     if (records.length < 2) {
-       const x = padLeft + plotW / 2;
-       const yT = padTop + (1 - (temps[0] - tRange.lo) / (tRange.hi - tRange.lo)) * plotH;
-       const yH = padTop + (1 - (hums[0] - hLo) / (hHi - hLo)) * plotH;
-       ctx.beginPath();
-       ctx.arc(x, yT, compact ? 4 : 5, 0, Math.PI * 2);
-       ctx.fillStyle = '#fff';
-       ctx.fill();
-       ctx.lineWidth = 2;
-       ctx.strokeStyle = '#f59e0b';
-       ctx.stroke();
-       ctx.beginPath();
-       ctx.arc(x, yH, compact ? 4 : 5, 0, Math.PI * 2);
-       ctx.fillStyle = '#fff';
-       ctx.fill();
-       ctx.strokeStyle = '#0ea5e9';
-       ctx.stroke();
-       return;
-     }
+    // 中文：X 轴按真实时间定位，且映射的是**可视窗口**而不是首末记录：
+    //      旧实现 xOf = (ts - t0) / (t1 - t0) 一屏铺满全部 24h，采样均匀时看着还行，
+    //      但设备重启 / 清空 / 深睡造成几小时断档时，断档会被画成和正常 10 分钟间隔一样宽，
+    //      点越多越假；而窗口映射下断档自然表现为空白，且能靠拖动看清局部。
+    const xOf = (ts) => padLeft + ((ts - winStart) / spanSec) * plotW;
 
-     // 中文：X 轴按真实时间定位。旧实现是 i * stepX（等距索引），坐标与时间无关——
-     //      设备重启 / 清空 / 深睡造成几小时断档时，断档会被画成和正常 10 分钟间隔一样宽，
-     //      点越多越假（144 条时一条直线铺满，完全看不出哪段没数据）。
-     //      采样均匀时两法视觉一致，有断档时只有时间轴才说得清"哪里缺数据"。
-     const n = records.length;
-     const t0 = records[0].timestamp;
-     const t1 = records[n - 1].timestamp;
-     const span = Math.max(1, t1 - t0);
-     const xOf = (ts) => padLeft + ((ts - t0) / span) * plotW;
-
-     // 断档判定：超过"中位采样间隔 ×3"且至少 30 分钟才断线，避免正常抖动把曲线切碎
-     const deltas = [];
-     for (let i = 1; i < n; i++) deltas.push(records[i].timestamp - records[i - 1].timestamp);
-     const sortedDeltas = [...deltas].sort((a, b) => a - b);
-     const medDelta = sortedDeltas.length ? sortedDeltas[Math.floor(sortedDeltas.length / 2)] : 0;
-     const gapLimit = Math.max(medDelta * 3, 1800);
-     const segs = [[0]];
-     for (let i = 1; i < n; i++) {
-       if (records[i].timestamp - records[i - 1].timestamp > gapLimit) segs.push([i]);
-       else segs[segs.length - 1].push(i);
-     }
+    // 断档判定：超过"中位采样间隔 ×3"且至少 30 分钟才断线，避免正常抖动把曲线切碎。
+    // 中位间隔只统计绘制范围内的点——否则全量里的断档会把中位数抬高，窗口内的小断档被吞掉
+    const deltas = [];
+    for (let i = drawStart + 1; i < drawEnd; i++) {
+      deltas.push(records[i].timestamp - records[i - 1].timestamp);
+    }
+    const sortedDeltas = [...deltas].sort((a, b) => a - b);
+    const medDelta = sortedDeltas.length ? sortedDeltas[Math.floor(sortedDeltas.length / 2)] : 0;
+    const gapLimit = Math.max(medDelta * 3, 1800);
+    const segs = [[drawStart]];
+    for (let i = drawStart + 1; i < drawEnd; i++) {
+      if (records[i].timestamp - records[i - 1].timestamp > gapLimit) segs.push([i]);
+      else segs[segs.length - 1].push(i);
+    }
 
      const plotSeries = (vals, color, lo, hi, fillArea) => {
        segs.forEach((seg) => {
@@ -1166,14 +1236,14 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
 
         // 中文：数据点标记按"像素间距"决定画法。点密集（间距 < ~3 倍标记直径）时
         //      逐点画圈会互相重叠成"毛毛虫"，段边界标记也会在图中间冒出圆圈，
-        //      此时整条曲线只在最末点（最新读数）画一个标记；稀疏或单点段逐点标记。
+        //      此时整条曲线只在窗口内最新那个点上画一个标记；稀疏或单点段逐点标记。
         const markerR = compact ? 3.2 : 4;
         const xFirst = xOf(records[seg[0]].timestamp);
         const xLast = xOf(records[seg[seg.length - 1]].timestamp);
         const spacing = seg.length > 1 ? (xLast - xFirst) / (seg.length - 1) : Infinity;
         const dense = spacing < markerR * 6;
-        const lastIdx = records.length - 1;
-        const markIdx = dense ? (seg.includes(lastIdx) ? [lastIdx] : []) : seg;
+        // 中文：密集时不在段内画标记，统一由下面的 markFocusPoint 补画（不受裁剪影响）
+        const markIdx = dense ? [] : seg;
         markIdx.forEach((i) => {
           const x = xOf(records[i].timestamp);
           const y = padTop + (1 - (vals[i] - lo) / (hi - lo)) * plotH;
@@ -1188,30 +1258,63 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        });
      };
 
+     // 中文：曲线/面积全部裁到绘图区内。窗口化之后，两侧各有一个"窗口外的点"用来
+     //      让线段延伸到边界，不裁剪的话它会画到左右刻度槽里（压在 Y 轴数字上）。
+     ctx.save();
+     ctx.beginPath();
+     ctx.rect(padLeft, padTop, plotW, plotH);
+     ctx.clip();
      plotSeries(hums, '#0ea5e9', hLo, hHi, true);
      plotSeries(temps, '#f59e0b', tRange.lo, tRange.hi, false);
+     ctx.restore();
 
-     // 中文：X 轴刻度改为"本地整点刻度"，不再按记录索引抽样。
-     //      旧实现按 i % skip 抽标签，跳过的记录数与真实时间无关，
-     //      所以点一多标签就和曲线对不上（用户看到的"超过 5 条就对不齐"）。
+     // 中文：窗口内最新点的标记补画在裁剪区外。它经常正好贴着绘图区右边界
+     //      （默认视图就是"贴着最新一条"），裁剪会把圆切掉一半，看着像断头；
+     //      标记只有 3~4px，越界一点点也压不到刻度数字。
+     const markFocusPoint = (i, vals, color, lo, hi) => {
+       const x = xOf(records[i].timestamp);
+       const y = padTop + (1 - (vals[i] - lo) / (hi - lo)) * plotH;
+       ctx.beginPath();
+       ctx.arc(x, y, compact ? 3.2 : 4, 0, Math.PI * 2);
+       ctx.fillStyle = '#fff';
+       ctx.fill();
+       ctx.lineWidth = compact ? 2 : 2.2;
+       ctx.strokeStyle = color;
+       ctx.stroke();
+     };
+     markFocusPoint(visEnd - 1, hums, '#0ea5e9', hLo, hHi);
+     markFocusPoint(visEnd - 1, temps, '#f59e0b', tRange.lo, tRange.hi);
+
+     // 中文：X 轴刻度用"本地整点刻度"，且在**窗口内**生成。
+     //      旧实现按 i % skip 抽标签，跳过的记录数与真实时间无关，点一多标签就和曲线对不上。
      ctx.fillStyle = '#94a3b8';
      ctx.font = compact ? '8.5px sans-serif' : '9px sans-serif';
      ctx.textBaseline = 'top';
      const labelY = padTop + plotH + 6;
      const maxTicks = Math.max(2, Math.floor(plotW / (compact ? 62 : 76)));
-     const stepH = [1, 2, 3, 4, 6, 12, 24].find((hh) => span / (hh * 3600) <= maxTicks) || 24;
+     const stepH = [1, 2, 3, 4, 6, 12].find((hh) => spanSec / (hh * 3600) <= maxTicks) || 12;
      const ticks = [];
-     for (let tick = Math.floor(t0 / 3600) * 3600; tick <= t1; tick += 3600) {
-       if (tick < t0) continue;
+     for (let tick = Math.ceil(winStart / 3600) * 3600; tick <= endTs; tick += 3600) {
        if (new Date(tick * 1000).getHours() % stepH !== 0) continue;
        ticks.push(tick);
      }
-     // 跨度不足一个刻度（刚连上只有两三条）：退化为首尾标注，避免只剩一个孤立标签
-     if (ticks.length < 2) { ticks.length = 0; ticks.push(t0, t1); }
-     ticks.forEach((ts, k) => {
-       ctx.textAlign = k === 0 ? 'left' : (k === ticks.length - 1 ? 'right' : 'center');
-       ctx.fillText(formatShortTime(ts), padLeft + ((ts - t0) / span) * plotW, labelY);
+     // 窗口不足一个整点刻度：退化为首尾标注，避免整条轴只剩一个孤立标签
+     if (ticks.length < 2) { ticks.length = 0; ticks.push(winStart, endTs); }
+     ticks.forEach((ts) => {
+       const x = xOf(ts);
+       // 中文：贴边的标签往内对齐，否则"15:00"会被绘图区右边界切掉半个字
+       ctx.textAlign = (x - padLeft) < 16 ? 'left' : ((padLeft + plotW - x) < 16 ? 'right' : 'center');
+       ctx.fillText(formatShortTime(ts), x, labelY);
      });
+
+     // 中文：把本帧的几何留给手势层与测试（拖动的像素→秒换算、断言窗口区间都用它）
+     canvas._trendLayout = {
+       winStart, winEnd: endTs, spanSec, endTs,
+       padLeft, plotW, dataFirst, dataLast,
+       follow: view.follow, visible: visEnd - visStart,
+     };
+     state.trendGeom = canvas._trendLayout;
+     syncTrendLatestChip();
    }
 
     /**
@@ -2678,9 +2781,23 @@ function clearConnectError() {
         try {
           /* 中文：8 次块读写整体占用全局 GATT 锁——否则 5s 轮询的探活读会插进来，
            *      安卓上表现为 "GATT operation already in progress" 或块数据错位 */
+          // 中文：最新优先 + 每页到手即画（fetchHistoryNewestFirst）：
+          //      往返次数不变（144 条仍 8 次），但第一次有数据上屏从第 8 次提前到第 2 次。
+          //      这里把每一页直接喂 render()——它会把该页并进内存/缓存再整表重画，
+          //      所以后到的旧页表现为"往左边补历史"，不会把已显示的最新读数顶掉。
+          let lastPaint = 0;
           const devRecords = await gattOp(
-            () => BLEProtocol.fetchFullHistory(state.hisBlkChar, (fetched, total) => {
-              log(`24h history: ${Math.min(fetched, total)}/${total} records`);
+            () => BLEProtocol.fetchHistoryNewestFirst(state.hisBlkChar, {
+              onChunk: (chunk, info) => {
+                if (!chunk.length) return;
+                // 中文：重画按 ~100ms 节流（末页不受限，保证首屏立刻出图）。
+                //      单页回调在 iOS 上可能挤在一起，连着重画只是白占主线程。
+                const now = (window.performance?.now?.() ?? Date.now());
+                if (!info.done && now - lastPaint < 100) return;
+                lastPaint = now;
+                log(`24h history: ${Math.min(info.fetched || 0, info.total || 0)}/${info.total || 0} records`);
+                render(chunk);
+              },
             }),
             'fetch 24h history (0xFFEC)',
             15000   // 8 块 × (write+read)，Bluefy/iOS 单次往返可达 250ms，5s 不够
@@ -3837,6 +3954,147 @@ The device will measure the current probe state first, then apply the calibratio
   els.dailyChart?.addEventListener('pointerup', endDailyDrag);
   els.dailyChart?.addEventListener('pointercancel', endDailyDrag);
   els.dailyChart?.addEventListener('pointerleave', endDailyDrag);
+
+  // ────────── 24h 图 x 轴平移 / 缩放 ──────────
+  // 中文：canvas 上设了 touch-action:pan-y（见 index.html），所以竖着滑仍然是滚页面，
+  //      横着滑才平移图。重绘按帧合并：pointermove 在手机上可达 120Hz，而 drawChart
+  //      是整块 canvas 重绘，逐事件重画会白占主线程。
+  let trendRaf = 0;
+  const scheduleTrendRedraw = () => {
+    if (trendRaf) return;
+    trendRaf = requestAnimationFrame(() => {
+      trendRaf = 0;
+      if (!state.lastRecords || els.trendTabPanel.classList.contains('hidden')) return;
+      drawChart(state.lastRecords);
+      updateTrendSummary(state.lastRecords);
+    });
+  };
+
+  const trendLayout = () => els.trendChart?._trendLayout || null;
+
+  const trendRelX = (clientX) => {
+    const rect = els.trendChart.getBoundingClientRect();
+    return rect.width ? (clientX - rect.left) * (els.trendChart.clientWidth / rect.width) : 0;
+  };
+
+  // 中文：设置窗口右边界/跨度。follow 不传时按"右边界是否贴到最新一条"自动判定——
+  //      贴到就算回到跟随态，此后新记录进来自动跟着走（不必再点 Latest）。
+  function setTrendWindow({ endTs, spanSec } = {}) {
+    const v = state.trendView;
+    if (Number.isFinite(spanSec)) {
+      v.spanSec = Math.round(Math.min(TREND_VIEW_SPAN_MAX, Math.max(TREND_VIEW_SPAN_MIN, spanSec)));
+    }
+    if (Number.isFinite(endTs)) v.endTs = Math.round(endTs);
+    const lay = trendLayout();
+    if (lay) v.follow = Math.abs(v.endTs - lay.dataLast) <= 2;
+    scheduleTrendRedraw();
+  }
+
+  // 中文：回到"最新 + 默认 6h"。双击/双触、点 Latest 胶囊都走这里。
+  function resetTrendView() {
+    const lay = trendLayout();
+    const v = state.trendView;
+    v.spanSec = TREND_VIEW_SPAN_DEFAULT;
+    v.follow = true;
+    v.endTs = lay ? lay.dataLast : null;
+    scheduleTrendRedraw();
+  }
+
+  const trendPointers = new Map();   // pointerId → 最近一次坐标（双指缩放要两个点）
+  let trendDrag = null;              // { pointerId, x0, end0 }
+  let trendPinch = null;             // { dist0, span0, frac, anchorTs }
+  let trendLastTap = { t: 0, x: 0, y: 0 };
+
+  els.trendChart?.addEventListener('pointerdown', (e) => {
+    const lay = trendLayout();
+    if (!lay) return;
+    trendPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { els.trendChart.setPointerCapture(e.pointerId); } catch (_) {}
+    if (trendPointers.size >= 2) {
+      // 双指 → 缩放：只认前两个点，第三根手指忽略
+      const [a, b] = [...trendPointers.values()];
+      const rect = els.trendChart.getBoundingClientRect();
+      const midX = (a.x + b.x) / 2 - rect.left;
+      const frac = Math.min(1, Math.max(0, (midX - lay.padLeft) / lay.plotW));
+      trendPinch = {
+        dist0: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+        span0: lay.spanSec,
+        frac,
+        // 锚点 = 双指中点此刻对应的时刻：缩放时它不动，画面才不会往一边跑
+        anchorTs: lay.winStart + frac * lay.spanSec,
+      };
+      trendDrag = null;
+      return;
+    }
+    trendDrag = { pointerId: e.pointerId, x0: e.clientX, end0: lay.endTs, moved: 0 };
+  });
+
+  els.trendChart?.addEventListener('pointermove', (e) => {
+    const lay = trendLayout();
+    if (!lay) return;
+    if (trendPointers.has(e.pointerId)) trendPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (trendPinch && trendPointers.size >= 2) {
+      const [a, b] = [...trendPointers.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      const span = Math.round(Math.min(TREND_VIEW_SPAN_MAX,
+        Math.max(TREND_VIEW_SPAN_MIN, trendPinch.span0 * (trendPinch.dist0 / dist))));
+      state.trendView.spanSec = span;
+      state.trendView.endTs = Math.round(trendPinch.anchorTs + (1 - trendPinch.frac) * span);
+      state.trendView.follow = false;
+      scheduleTrendRedraw();
+      return;
+    }
+
+    if (!trendDrag || trendDrag.pointerId !== e.pointerId) return;
+    const dx = e.clientX - trendDrag.x0;
+    trendDrag.moved = Math.max(trendDrag.moved, Math.abs(dx));
+    // 手指往左拖 = 往更早的数据看（dx<0 → endTs 变小）
+    setTrendWindow({ endTs: trendDrag.end0 - dx * (lay.spanSec / lay.plotW) });
+  });
+
+  const endTrendPointer = (e) => {
+    const drag = trendDrag && trendDrag.pointerId === e.pointerId ? trendDrag : null;
+    trendPointers.delete(e.pointerId);
+    if (trendPointers.size < 2) trendPinch = null;
+    if (drag) trendDrag = null;
+    try { els.trendChart.releasePointerCapture?.(e.pointerId); } catch (_) {}
+
+    // 双击/双触回到最新：300ms 内第二次抬手、且两次都没怎么移动（拖动结束不算）
+    if (drag && drag.moved > 12) return;
+    const now = Date.now();
+    const near = Math.hypot(e.clientX - trendLastTap.x, e.clientY - trendLastTap.y) < 24;
+    if (now - trendLastTap.t < 300 && near) {
+      trendLastTap = { t: 0, x: 0, y: 0 };
+      resetTrendView();
+      return;
+    }
+    trendLastTap = { t: now, x: e.clientX, y: e.clientY };
+  };
+  els.trendChart?.addEventListener('pointerup', endTrendPointer);
+  els.trendChart?.addEventListener('pointercancel', endTrendPointer);
+
+  // 中文：桌面端 ctrl/⌘ + 滚轮缩放（触控板捏合同样落在这里）；不按时放手，
+  //      让页面正常滚动——图表占了大半屏，抢滚轮会把页面卡死在一张图上。
+  els.trendChart?.addEventListener('wheel', (e) => {
+    const lay = trendLayout();
+    if (!lay || !(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const frac = Math.min(1, Math.max(0, (trendRelX(e.clientX) - lay.padLeft) / lay.plotW));
+    const anchorTs = lay.winStart + frac * lay.spanSec;
+    const span = Math.round(Math.min(TREND_VIEW_SPAN_MAX,
+      Math.max(TREND_VIEW_SPAN_MIN, lay.spanSec * (e.deltaY > 0 ? 1.15 : 1 / 1.15))));
+    state.trendView.spanSec = span;
+    state.trendView.endTs = Math.round(anchorTs + (1 - frac) * span);
+    state.trendView.follow = false;
+    scheduleTrendRedraw();
+  }, { passive: false });
+
+  els.trendLatestBtn?.addEventListener('click', (e) => {
+    e.preventDefault();
+    resetTrendView();
+  });
+
   // 单位切换：点击切换器任意位置（含按钮、灰底间隙、以及当前激活的单位）都翻转单位（°F ↔ °C）。
   // 用户期望“按到上面就切换”——即使当前在 °C，按到 °C 上也切回 °F，故统一 toggle，不做“切到该按钮单位”的区分。
   els.tempUnitToggle?.addEventListener('click', () => {
