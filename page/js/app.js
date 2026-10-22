@@ -838,17 +838,35 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
   // 不通过 GAP 服务读取设备名
 
   // 加载指定设备（device.id）自己的历史缓存并回显到图表/表格。
+  // 清空水位只在这里滤：localStorage 缓存是"清空前的残留"的唯一藏身处。
+  // 设备直读（readData/readDaily）不过滤——设备是数据权威，flash 没清数据就是真的；
+  // 若连设备直读也滤，重烧/换设备后数据会全部静默消失，日志明明拉到了、页面却空白
+  // （2026-10-22 真机踩坑：Daily read: 30 day(s) 但 30 Days 视图空白）。
   function restoreCachedCharts(deviceId) {
+    const cutoff = getClearCutoff(deviceId);
     const trendRecords = loadCachedTrendRecords(deviceId);
     if (trendRecords.length) {
-      render(trendRecords);
-      log(`Loaded cached trend records: ${trendRecords.length}`);
+      const keptTrend = cutoff
+        ? trendRecords.filter((r) => Number(r?.timestamp) > cutoff)
+        : trendRecords;
+      if (keptTrend.length !== trendRecords.length) {
+        log(`Trend cache filtered ${trendRecords.length - keptTrend.length} record(s) older than clear time`);
+      }
+      if (keptTrend.length) {
+        render(keptTrend);
+        log(`Loaded cached trend records: ${keptTrend.length}`);
+      }
     }
 
     const dailyRecords = loadCachedDailyRecords(deviceId);
     if (dailyRecords.length) {
-      renderDaily(dailyRecords);
-      log(`Loaded cached daily records: ${dailyRecords.length}`);
+      const kept = cutoff
+        ? dailyRecords.filter((r) => Number(r.dateEpoch) + 86400 > cutoff)
+        : dailyRecords;
+      if (kept.length !== dailyRecords.length) {
+        log(`Daily cache filtered ${dailyRecords.length - kept.length} record(s) older than clear time`);
+      }
+      if (kept.length) renderDaily(kept);
     }
   }
 
@@ -1780,10 +1798,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    function renderDaily(records) {
     // 中文：state.lastDailyRecords 存的是"设备给的完整集合"（最多 30 天）——
     //      切 7D/30D 时不用重新读设备，直接在这里截取要画的那一段
+    //      （清空水位过滤只做在缓存恢复入口 restoreCachedCharts——设备是数据权威，
+    //      设备直接读回的记录不能滤，否则重烧/换设备后 30 天全部静默消失，
+    //      日志明明 Daily read: 30 day(s) 页面却空白，用户无从判断原因）
     records = sanitizeDailyRecords(records);
-    // 清空水位之后：早于清空日的日均桶不再展示（设备已擦除，这些只可能是缓存残留）
-    const dailyCutoff = getClearCutoff(state.activeDeviceId);
-    if (dailyCutoff) records = records.filter((r) => Number(r.dateEpoch) + 86400 > dailyCutoff);
     state.lastDailyRecords = records;
      const cfg = DAILY_METRICS[state.dailyMetric] || DAILY_METRICS.temp;
      updateDailyMetricButtons();
