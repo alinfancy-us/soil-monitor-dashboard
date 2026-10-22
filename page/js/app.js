@@ -68,12 +68,17 @@
   // 中文：两张图（24h 趋势 / 7D·30D 日均）共用的绘图区内边距。
   //      之前各写一份（24h 上下 16/38、日均上下 8/22），切换 tab 时 X 轴刻度线会跳
   //      十几像素、绘图区高度也不一样，用户反馈"两个图大小不统一"（2026-10-22）。
-  //      统一后：上沿留最新值标签的空间、下沿留一行时间/日期标签（约 9px + 6px 间隙）；
-  //      左右两侧：24h 是双轴（左温右湿）需要对称，日均单轴右侧只留呼吸位。
-  const CHART_PAD_TOP = 14;
-  const CHART_PAD_BOTTOM = 32;
-  const CHART_PAD_LEFT_COMPACT = 34;
-  const CHART_PAD_RIGHT_SINGLE = 24;   // 单轴视图（日均）右侧：够放末位日期标签即可
+  //      统一后：上沿留最新值标签的空间、下沿留一行时间/日期标签（约 9px + 6px 间隙）。
+  //      左右两侧是"够放刻度就停"：手机上 10px 字号的刻度 "28.3" 实测约 21px，
+  //      26px = 数字宽 21 + 5px 间隙；24h 是双轴（左温右湿）左右同宽，
+  //      日均单轴右侧只需让末位日期标签（居中对齐）探出一半，14px 足够。
+  //      （2026-10-22 再调：图高回到 224/240 后横向变挤，左右各从 34/24 收到 26/14，
+  //        390px 视口下 24h 双轴绘图区净宽 236→252px，日均单轴 246→264px）
+  const CHART_PAD_TOP = 12;
+  const CHART_PAD_BOTTOM = 26;
+  const CHART_PAD_LEFT_COMPACT = 26;
+  const CHART_PAD_LEFT_WIDE = 34;      // 宽屏（≥420px）：刻度字号不变但留一点呼吸位
+  const CHART_PAD_RIGHT_SINGLE = 14;   // 单轴视图（日均）右侧：够放末位日期标签即可
   // 中文：趋势图最大记录数 = 24h（10 分钟采样 × 144）。设备环 SOIL_HISTORY_MAX=144，
   //      前端缓存合并后同样按此封顶——更旧的记录由 30 天日均视图（0xFFE3）承担
   const TREND_MAX_RECORDS = 144;
@@ -1153,9 +1158,9 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     const dpr = window.devicePixelRatio || 1;
     const w = Math.max(280, canvas.clientWidth || canvas.parentElement.clientWidth || 280);
     const compact = w < 420 || isMobileViewport();
-    // 中文：画布高度取自 CSS（HTML 里两个面板同为 h-72 sm:h-80），不再硬编码 240/228。
-    //      旧写法与 CSS 容器高度对不上，canvas 被 CSS 拉伸缩放 → 线虚、字糊；
-    //      更糟的是两个图各写一份高度，改一处就"两个 tab 的图不一样大"。
+    // 中文：画布高度取自 CSS（HTML 里两个面板同为 h-56 sm:h-60 = 224/240px），
+    //      不再硬编码 240/228——旧写法与 CSS 容器高度对不上，canvas 被 CSS 拉伸缩放
+    //      → 线虚、字糊；更糟的是两个图各写一份高度，改一处就"两个 tab 图不一样大"。
     //      现在 CSS 是唯一尺寸真相，改 HTML 一处即两图同步。
     const h = Math.max(200, canvas.clientHeight || (compact ? 240 : 228));
     canvas.width = w * dpr;
@@ -1168,7 +1173,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     //      切换 24h / 7D / 30D 时 X 轴刻度线、绘图区上下沿都在同一高度，不会跳。
     const padTop = CHART_PAD_TOP;
     const padBottom = CHART_PAD_BOTTOM;
-    const padLeft = compact ? CHART_PAD_LEFT_COMPACT : Math.max(38, w * 0.10);
+    const padLeft = compact ? CHART_PAD_LEFT_COMPACT : CHART_PAD_LEFT_WIDE;
     const padRight = padLeft;   // 双轴视图：右侧要给湿度刻度留同样宽度
      const plotW = w - padLeft - padRight;
      const plotH = h - padTop - padBottom;
@@ -1390,10 +1395,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
 
       // 中文：与 24h 图 drawChart 共用同一套内边距（CHART_PAD_*）——两张图的 X 轴
       //      标签基线、绘图区上下沿因此严格同高，切 24h / 7D / 30D 不再跳位。
-      //      左侧只放"刻度数字 + 阈值角标"两列（10px 字号 "28.3" ≈ 21px + 6px 间隙）。
+      //      左侧只放"刻度数字 + 阈值角标"两列（10px 字号 "28.3" ≈ 21px + 5px 间隙）。
       const padTop = CHART_PAD_TOP;
       const padBottom = CHART_PAD_BOTTOM;
-      const padLeft = w < 420 ? CHART_PAD_LEFT_COMPACT : Math.max(38, w * 0.10);
+      const padLeft = w < 420 ? CHART_PAD_LEFT_COMPACT : CHART_PAD_LEFT_WIDE;
       const padRight = dual ? padLeft : CHART_PAD_RIGHT_SINGLE;
       const plotW = w - padLeft - padRight;
       const plotH = h - padTop - padBottom;

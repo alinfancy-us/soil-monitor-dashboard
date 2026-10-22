@@ -21,20 +21,6 @@
       color-scheme: light;
       --surface: rgba(255, 255, 255, 0.94);
       --line: #e2e8e5;
-      /* 图表画布高度：24h 与 7D/30D 两个面板共用同一个值，保证切 tab 时图形不跳。
-         写在自定义 style 而不是 Tailwind 工具类——tailwind.css 是构建期产物，
-         新增 h-72/h-80 需要重跑 build_css.sh 并换缓存戳才会生效；
-         canvas 内部尺寸由 app.js 读 clientHeight 推导，所以改这一处即两图同步。 */
-      --chart-h: 18rem;
-    }
-
-    /* 桌面端可视面积宽裕，图表再高一档 */
-    @media (min-width: 640px) {
-      :root { --chart-h: 20rem; }
-    }
-
-    .chart-box {
-      height: var(--chart-h);
     }
 
     /* 全页双击缩放兜底：touch-action 生效值沿命中元素向上逐级求交集，body/button 已声明
@@ -678,10 +664,11 @@
             <!-- 横滑的发现性提示：手势本身没有视觉入口，用一行灰字说明，避免"图怎么不动" -->
             <span class="inline-flex items-center gap-1" style="margin:0 8px;color:#cbd5e1">swipe ← → to pan</span>
           </div>
-          <!-- 高度与日均面板的容器必须一致（同为 h-72 sm:h-80）：两图共用这一处 CSS 作为
-               唯一尺寸真相，canvas 内部尺寸由 clientHeight 推导（app.js），不再各写一份。
-               原 h-56/h-60 在手机上只占屏幕 ~26%，读数挤、横滑窗口也短；现提到 288/320 -->
-          <div class="relative chart-box">
+          <!-- 高度与日均面板的容器必须一致（同为 h-56 sm:h-60 = 224/240px）：两图共用这一处
+               尺寸，canvas 内部尺寸由 app.js 读 clientHeight 推导，不再各写一份硬编码高度。
+               曾短暂提到 288/320（--chart-h），实测手机上整页被图顶得太满、读数反而难定位，
+               故回退到原来的 224/240；横向空间改从"减小左右内边距"上找（见 CHART_PAD_*） -->
+          <div class="relative h-56 sm:h-60">
             <!-- touch-action:pan-y → 竖着滑仍然是滚动页面，横着滑才是拖 x 轴看更早/更晚的数据
                  （144 条铺满 24h 在手机上每条只摊到 1.6px，所以图只画"可视窗口"里这一段） -->
             <canvas id="trendChart" class="w-full h-full" style="touch-action:pan-y;cursor:grab"></canvas>
@@ -716,7 +703,8 @@
               <span id="dailyRangeDate" class="text-[11px] text-slate-400 whitespace-nowrap"></span>
             </div>
           </div>
-          <div class="relative chart-box">
+          <!-- 高度与 24h 面板严格同值（h-56 sm:h-60）：切 tab 时两个图大小一致、刻度线不跳 -->
+          <div class="relative h-56 sm:h-60">
             <!-- touch-action:pan-y → 竖着滑仍然是滚动页面，横着滑才是拖竖线选日期 -->
             <canvas id="dailyChart" class="w-full h-full cursor-pointer" style="touch-action:pan-y"></canvas>
           </div>
