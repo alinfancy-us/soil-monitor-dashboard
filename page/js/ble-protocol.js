@@ -553,23 +553,31 @@ const BLEProtocol = (() => {
     // 建连初期还在省电档（有效间隔 ~465ms）时，光特征发现就能耗掉 5 秒以上。
     // getCharacteristics() 是 Web Bluetooth 标准 API，返回每个特征的 properties，
     // 正好够建 uuid → characteristic 表；缺特征也从"抛异常"变成"查不到 = null"。
-    let discovered;
+    // 中文：回退发现：逐个 getCharacteristic(uuid)（12 次 ATT 往返，慢但兼容性最好）。
+    //      触发条件不只是"API 不存在"——Bluefy/beacio 实测 getCharacteristics() 可能
+    //      返回空数组（或抛错），一样要回退，否则 0xFFE1/0xFFE2 拿不到直接 INCOMPATIBLE_SERVICE
+    const perUuidDiscover = async () => (await Promise.all(SERVICE_CHARS.map(async ({ uuid }) => {
+      try { return await service.getCharacteristic(uuid); } catch (_) { return null; }
+    }))).filter(Boolean);
+
+    let discovered = null;
     if (typeof service.getCharacteristics === 'function') {
       try {
-        discovered = await service.getCharacteristics();
+        const oneShot = await service.getCharacteristics();
+        if (Array.isArray(oneShot) && oneShot.length > 0) {
+          discovered = oneShot;
+          console.info('[BLE] service chars discovered (one-shot):', oneShot.length);
+        } else {
+          console.warn('[BLE] getCharacteristics() returned empty — per-UUID fallback');
+        }
       } catch (err) {
-        try { device.gatt?.disconnect(); } catch (_) { /* 已断开则忽略 */ }
-        const e = new Error('INCOMPATIBLE_SERVICE');
-        e.cause = err;
-        throw e;
+        // 中文：一次性发现失败不再致命——退回逐个发现，Bluefy 等实现不全的平台仍可正常连接
+        console.warn('[BLE] getCharacteristics() failed — per-UUID fallback:', err && err.name);
       }
     } else {
-      // 极旧实现没有 getCharacteristics()：退回逐个取（只影响性能，不影响功能）
       console.warn('[BLE] service.getCharacteristics() unavailable — per-UUID fallback');
-      discovered = (await Promise.all(SERVICE_CHARS.map(async ({ uuid }) => {
-        try { return await service.getCharacteristic(uuid); } catch (_) { return null; }
-      }))).filter(Boolean);
     }
+    if (!discovered) discovered = await perUuidDiscover();
 
     // 规范里 characteristic.uuid 已是小写 128 位字符串，这里仍统一折叠一次防平台差异
     const byUuid = new Map(discovered.map((c) => [String(c.uuid).toLowerCase(), c]));
