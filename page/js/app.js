@@ -1291,6 +1291,20 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     }
 
      const plotSeries = (vals, color, lo, hi, fillArea) => {
+       // 中文：整库只有一条记录（刚 Clear / 新设备第一条采样）时，画不出"线"，
+       //      旧的落点只是一个空心小圆，用户反馈"温度是一个点不是长条"。
+       //      改成横贯绘图区的"保持线"：值不变时这条线就是它的全部历史，
+       //      真实采样时刻仍由下方 markFocusPoint 的圆点标出。
+       if (n === 1) {
+         const y = padTop + (1 - (vals[0] - lo) / (hi - lo)) * plotH;
+         ctx.beginPath();
+         ctx.strokeStyle = color;
+         ctx.lineWidth = compact ? 2.2 : 2.5;
+         ctx.lineCap = 'round';
+         ctx.moveTo(padLeft, y);
+         ctx.lineTo(padLeft + plotW, y);
+         ctx.stroke();
+       }
        segs.forEach((seg) => {
          // 面积填充按段闭合：断档两侧各自成块，不跨断档拉直线
          if (fillArea && seg.length > 1) {
@@ -1557,11 +1571,12 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       // 中文：只有一天数据（Clear 后 / 刚上电）时，温度仍要画"当日区间竖条"。
       //      旧实现在这里直接画圆点后 return，把 min–max 圆头竖条整段跳过了，
       //      于是"温度只有一个点"，与多天视图的语义（条的高低端 = 当日最低/最高）
-      //      对不上；湿度/电量是单值系列，本来就没有区间，保持圆点。
+      //      对不上；湿度/电量是单值系列，画横贯绘图区的"保持线"+正中圆点。
       //      竖条画在绘图区正中；当日 min==max 时条没有长度，补到 MIN_BAR_PX
       //      让它仍是一条圆头短条，而不是退化成一个点。
       if (len < 2) {
         const x = padLeft + plotW / 2;
+        let barDrawn = false;
         if (options.band && bandIdx >= 0) {
           const useRight = rightAxis.includes(bandIdx);
           const lo = useRight ? rightLo : leftLo;
@@ -1588,14 +1603,26 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
             ctx.lineTo(x, yBot);
             ctx.stroke();
             ctx.restore();
+            barDrawn = true;
           }
         }
         series.forEach(({ values, color }, idx) => {
-          if (idx === bandIdx) return;   // 区间竖条已表达该系列，不再叠圆点
+          // 区间竖条已表达该系列时不再叠圆点；band 存在但极值无效（barDrawn=false）
+          // 时不能跟着跳过——旧代码这里会让温度整段消失，一个像素都不画。
+          if (idx === bandIdx && barDrawn) return;
           const useRight = rightAxis.includes(idx);
           const lo = useRight ? rightLo : leftLo;
           const hi = useRight ? rightHi : leftHi;
           const y = padTop + (1 - (values[0] - lo) / (hi - lo)) * plotH;
+          // 中文：单值系列（湿度/电量）与 24h 图同一套语言——横贯绘图区的
+          //      "保持线"表达"这一段里值没变过"，圆点只落在该天正中的位置上，
+          //      不再是一条孤零零的点。
+          ctx.beginPath();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2.2;
+          ctx.moveTo(padLeft, y);
+          ctx.lineTo(padLeft + plotW, y);
+          ctx.stroke();
           ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2);
           ctx.fillStyle = '#fff'; ctx.fill();
           ctx.lineWidth = 2; ctx.strokeStyle = color; ctx.stroke();
