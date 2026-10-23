@@ -129,8 +129,10 @@
 const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
 
    const els = {
-     statusDot: document.getElementById('statusDot'),
-     statusText: document.getElementById('statusText'),
+    statusDot: document.getElementById('statusDot'),
+    statusText: document.getElementById('statusText'),
+    pageLock: document.getElementById('pageLock'),
+    pageLockText: document.getElementById('pageLockText'),
      connectBtn: document.getElementById('connectBtn'),
      clearCacheBtn: document.getElementById('clearCacheBtn'),
     calibDryBtn: document.getElementById('calibDryBtn'),
@@ -3526,6 +3528,9 @@ The device will measure the current probe state first, then apply the calibratio
     const token = ++connectToken;
     state.silentReconnecting = true;   // 让 updateSettingsAccess 在断开瞬间不要强制切回 Data 页
     setConnectBusy(true);
+    // 全屏锁：重连期间特征已置空，任何按钮点击都会落空/报错，索性整页禁点并给出明确进度
+    els.pageLockText.textContent = 'Refreshing Bluetooth name…';
+    els.pageLock.classList.remove('hidden');
     log('Silent reconnect: refreshing system GAP name cache…');
     device.gatt.disconnect();                       // 触发 onDisconnected 幂等清理（图表保留）
     await new Promise((r) => setTimeout(r, 800));   // 等设备进入 30s 重连广播窗口 + GAP 名落盘
@@ -3578,6 +3583,7 @@ The device will measure the current probe state first, then apply the calibratio
       log('Silent reconnect failed: ' + (err.message || err));
     } finally {
       state.silentReconnecting = false;
+      els.pageLock.classList.add('hidden');
     }
   }
 

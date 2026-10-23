@@ -13,7 +13,7 @@
   <!-- 中文：Tailwind 已改为构建期编译的静态 CSS（见 tailwind.config.js / build_css.sh），
        不再依赖 cdn.tailwindcss.com 运行时脚本；类名变更后须重跑 ./build_css.sh 并递增版本号。
        本链接的 ?v= 与下方三个业务脚本一致，CI 打包时会统一替换为发布版本号（见 .github/workflows） -->
-  <link rel="stylesheet" href="page/css/tailwind.css?v=1.5.9-r6">
+  <link rel="stylesheet" href="page/css/tailwind.css?v=1.5.9-r7">
   <!-- 中文：beacio 引导已自研（见 app.js probeBeacioReady / beacioGotoOnboarding），
        不再加载官方 beacio.js，避免与自研握手双轨、stub 干扰 requestDevice -->
   <style>
@@ -1116,12 +1116,21 @@
     </div>
   </div>
 
+  <!-- 全屏操作锁：静默重连等"页面不可交互"的关键窗口期覆盖整页，杜绝半可用状态下
+       的误点（点了也会因特征已置空而报错）。z-50 压过所有面板；点击被遮罩自身拦截 -->
+  <div id="pageLock" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40">
+    <div class="flex flex-col items-center gap-3 px-6 py-5 rounded-2xl bg-white shadow-xl">
+      <div class="w-8 h-8 rounded-full border-4 border-emerald-600 border-t-transparent animate-spin"></div>
+      <p id="pageLockText" class="text-sm font-medium text-slate-700">Please wait…</p>
+    </div>
+  </div>
+
   <!-- 引入业务模块脚本：?v= 版本号用于缓存破坏（cache busting）。
        四处（tailwind.css 链接 + 三个业务脚本）统一使用同一版本号，CI 打包时自动从
        git tag / commit 哈希同步替换（含 CSS 链接），本地开发请四处一并递增，
        否则浏览器会继续运行旧版 CSS/JS -->
-  <script src="page/js/config.js?v=1.5.9-r6"></script>
-  <script src="page/js/ble-protocol.js?v=1.5.9-r6"></script>
-  <script src="page/js/app.js?v=1.5.9-r6"></script>
+  <script src="page/js/config.js?v=1.5.9-r7"></script>
+  <script src="page/js/ble-protocol.js?v=1.5.9-r7"></script>
+  <script src="page/js/app.js?v=1.5.9-r7"></script>
 </body>
 </html>
