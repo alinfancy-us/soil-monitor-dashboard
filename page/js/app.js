@@ -1554,9 +1554,44 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         drawYAxisTicks(ctx, rightLo, rightHi, padTop, plotH, w - padRight + 6, 'left', rightColor, rightFmt);
       }
 
+      // 中文：只有一天数据（Clear 后 / 刚上电）时，温度仍要画"当日区间竖条"。
+      //      旧实现在这里直接画圆点后 return，把 min–max 圆头竖条整段跳过了，
+      //      于是"温度只有一个点"，与多天视图的语义（条的高低端 = 当日最低/最高）
+      //      对不上；湿度/电量是单值系列，本来就没有区间，保持圆点。
+      //      竖条画在绘图区正中；当日 min==max 时条没有长度，补到 MIN_BAR_PX
+      //      让它仍是一条圆头短条，而不是退化成一个点。
       if (len < 2) {
         const x = padLeft + plotW / 2;
+        if (options.band && bandIdx >= 0) {
+          const useRight = rightAxis.includes(bandIdx);
+          const lo = useRight ? rightLo : leftLo;
+          const hi = useRight ? rightHi : leftHi;
+          const yOf = v => padTop + (1 - (v - lo) / (hi - lo)) * plotH;
+          const bLo = options.band.lo?.[0];
+          const bHi = options.band.hi?.[0];
+          if (Number.isFinite(bLo) && Number.isFinite(bHi)) {
+            let yTop = Math.min(yOf(bHi), yOf(bLo));
+            let yBot = Math.max(yOf(bHi), yOf(bLo));
+            const MIN_BAR_PX = 8;
+            if (yBot - yTop < MIN_BAR_PX) {
+              const mid = (yTop + yBot) / 2;
+              yTop = mid - MIN_BAR_PX / 2;
+              yBot = mid + MIN_BAR_PX / 2;
+            }
+            const { color: barColor } = series[bandIdx] || {};
+            ctx.save();
+            ctx.strokeStyle = barColor || '#f59e0b';
+            ctx.lineCap = 'round';
+            ctx.lineWidth = 7;     // 与多天视图的条宽上限一致（stepX 大时封顶 7）
+            ctx.beginPath();
+            ctx.moveTo(x, yTop);
+            ctx.lineTo(x, yBot);
+            ctx.stroke();
+            ctx.restore();
+          }
+        }
         series.forEach(({ values, color }, idx) => {
+          if (idx === bandIdx) return;   // 区间竖条已表达该系列，不再叠圆点
           const useRight = rightAxis.includes(idx);
           const lo = useRight ? rightLo : leftLo;
           const hi = useRight ? rightHi : leftHi;
