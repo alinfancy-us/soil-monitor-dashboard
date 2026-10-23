@@ -3033,8 +3033,10 @@ function clearConnectError() {
          // 连接后身份校验失败：主服务 UUID 不对，或该服务下缺 0xFFE1/0xFFE2 这类底座特征。
          // 多见于兜底的名字过滤放过了一台同名设备（或固件服务表与网页不匹配），
          // 与"信号差/初始化失败"是两回事，必须让用户重新挑设备而不是反复重试。
-         showConnectError('This is not a SoilPulse sensor, or its firmware is incompatible (service/characteristic mismatch). Tap Connect and pick your sensor again.');
-         log(`Service mismatch after connect — not a SoilPulse device or incompatible firmware (${errMsg})`);
+         // err.detail 由 ble-protocol 填入失败阶段与底层错误（平台差异诊断用），直接透出到红字
+         const detail = err && err.detail ? ` [${err.detail}]` : '';
+         showConnectError('This is not a SoilPulse sensor, or its firmware is incompatible (service/characteristic mismatch). Tap Connect and pick your sensor again.' + detail);
+         log(`Service mismatch after connect — not a SoilPulse device or incompatible firmware (${errMsg}${detail})`);
        } else if (/cancel|chooser/i.test(errMsg) || /NotFoundError|AbortError/i.test(err && err.name)) {
          log('Connection chooser dismissed by user (not an error)');
        } else if (!devicePicked) {

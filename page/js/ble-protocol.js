@@ -542,10 +542,22 @@ const BLEProtocol = (() => {
     try {
       service = await server.getPrimaryService(UUIDS.SERVICE);
     } catch (err) {
-      try { device.gatt?.disconnect(); } catch (_) { /* 已断开则忽略 */ }
-      const e = new Error('NOT_SOILPULSE');
-      e.cause = err;
-      throw e;
+      // 中文：Bluefy/beacio 等实现对 128 位 UUID 的精确查找可能失灵——退化为
+      //      getPrimaryServices() 拉全表后手工按 UUID 匹配（多一次遍历，仅在兜底时发生）
+      try {
+        const all = await server.getPrimaryServices();
+        service = all.find((s) => String(s.uuid).toLowerCase() === String(UUIDS.SERVICE).toLowerCase()) || null;
+        if (service) {
+          console.warn('[BLE] getPrimaryService() missed — matched via getPrimaryServices():',
+            all.map((s) => s.uuid).join(', '));
+        }
+      } catch (_) { /* 兜底也失败，走下面的 NOT_SOILPULSE */ }
+      if (!service) {
+        try { device.gatt?.disconnect(); } catch (_) { /* 已断开则忽略 */ }
+        const e = new Error('NOT_SOILPULSE');
+        e.detail = `getPrimaryService ${err && err.name}: ${err && err.message}`;
+        throw e;
+      }
     }
 
     // —— 一次性发现本服务下全部特征（一次 Read By Type 遍历，通常 2~4 个 ATT 往返）——
@@ -588,7 +600,9 @@ const BLEProtocol = (() => {
     const timeChar = pick(UUIDS.TIME_CHAR);
     if (!dataChar || !timeChar) {
       try { device.gatt?.disconnect(); } catch (_) { /* 已断开则忽略 */ }
-      throw new Error('INCOMPATIBLE_SERVICE');
+      const e = new Error('INCOMPATIBLE_SERVICE');
+      e.detail = `chars discovered=${discovered.length}, missing [${!dataChar ? '0xFFE1 ' : ''}${!timeChar ? '0xFFE2' : ''}], have [${discovered.map((c) => c.uuid.slice(-8)).join(',') || 'none'}]`;
+      throw e;
     }
 
     // OTA / DIS 在另外两个服务下，必须单独发现；与后面的对时、订阅并行跑，
