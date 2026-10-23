@@ -534,6 +534,17 @@ const BLEProtocol = (() => {
    * 由 finishConnectInner 在 gatt.connect() 成功后调用（带 INIT_TIMEOUT_MS 超时）。
    */
   async function initAfterConnect(server, device, onNotification) {
+    // 中文：UUID 归一化——不同平台返回格式不一：标准实现给小写完整 128 位
+    //      （"0000ffe1-0000-1000-8000-00805f9b34fb"），Bluefy/beacio 实测给 16 位短格式
+    //      （"FFE1"）。比较前统一折叠成 32 位十六进制串（4 位/8 位按 Bluetooth Base
+    //      UUID "0000xxxx-0000-1000-8000-00805f9b34fb" 展开），两边就能对上。
+    const normUuid = (u) => {
+      let s = String(u).toLowerCase().replace(/[^0-9a-f]/g, '');
+      if (s.length === 4) s = '0000' + s + '00001000800000805f9b34fb';
+      else if (s.length === 8) s = s + '00001000800000805f9b34fb';
+      return s;
+    };
+
     // 身份校验（UUID 过滤后的第二道闸）：主服务必须是我们那个 128 位 UUID。
     // 正常情况下 filters 已经挡住了非本设备；但兜底的 namePrefix 仍可能放进一台
     // "名字像 SoilPulse、实际不是"的设备（或老固件换了服务表）。这种失败是 NotFoundError，
@@ -543,10 +554,10 @@ const BLEProtocol = (() => {
       service = await server.getPrimaryService(UUIDS.SERVICE);
     } catch (err) {
       // 中文：Bluefy/beacio 等实现对 128 位 UUID 的精确查找可能失灵——退化为
-      //      getPrimaryServices() 拉全表后手工按 UUID 匹配（多一次遍历，仅在兜底时发生）
+      //      getPrimaryServices() 拉全表后手工按归一化 UUID 匹配（多一次遍历，仅兜底时发生）
       try {
         const all = await server.getPrimaryServices();
-        service = all.find((s) => String(s.uuid).toLowerCase() === String(UUIDS.SERVICE).toLowerCase()) || null;
+        service = all.find((s) => normUuid(s.uuid) === normUuid(UUIDS.SERVICE)) || null;
         if (service) {
           console.warn('[BLE] getPrimaryService() missed — matched via getPrimaryServices():',
             all.map((s) => s.uuid).join(', '));
@@ -591,9 +602,10 @@ const BLEProtocol = (() => {
     }
     if (!discovered) discovered = await perUuidDiscover();
 
-    // 规范里 characteristic.uuid 已是小写 128 位字符串，这里仍统一折叠一次防平台差异
-    const byUuid = new Map(discovered.map((c) => [String(c.uuid).toLowerCase(), c]));
-    const pick = (uuid) => byUuid.get(String(uuid).toLowerCase()) || null;
+    // 规范里 characteristic.uuid 已是小写 128 位字符串，但仍需归一化：
+    // Bluefy/beacio 返回 16 位短格式（"FFE1"），不展开就和 config 的完整 UUID 永远匹配不上
+    const byUuid = new Map(discovered.map((c) => [normUuid(c.uuid), c]));
+    const pick = (uuid) => byUuid.get(normUuid(uuid)) || null;
 
     // 0xFFE1 / 0xFFE2 是协议底座（对时 + 通知），缺任一个都说明服务表不对
     const dataChar = pick(UUIDS.DATA_CHAR);
@@ -660,7 +672,7 @@ const BLEProtocol = (() => {
     const daily30Char = pick(UUIDS.DAILY30_CHAR);          // 30 天日均（0xFFED，无则只用 7 天）
     const daily30ExtChar = pick(UUIDS.DAILY30_EXT_CHAR);   // 30 天极值（0xFFEE，无则无极值标记）
 
-    const absent = SERVICE_CHARS.filter(({ uuid }) => !byUuid.has(String(uuid).toLowerCase())).map(({ name }) => name);
+    const absent = SERVICE_CHARS.filter(({ uuid }) => !byUuid.has(normUuid(uuid))).map(({ name }) => name);
     console.info(`[BLE] service chars discovered: ${byUuid.size}${absent.length ? ` | absent: ${absent.join(', ')}` : ''}`);
 
     const [otaChar, fwVersion] = await extrasP;
