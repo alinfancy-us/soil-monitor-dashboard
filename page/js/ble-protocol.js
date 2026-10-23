@@ -428,26 +428,42 @@ const BLEProtocol = (() => {
   }
 
   /**
+   * 设备过滤条件（requestDevice 的 filters 是**数组 OR**语义：任意一项命中就出现在选择器里）。
+   *
+   *   ① 主判据 — 128 位主服务 UUID（UUIDS.SERVICE，须与固件 bth_soil_sensor.h 的
+   *      SOIL_SERVICE_UUID128 一致）。固件把它放在**扫描响应包**的
+   *      Complete List of 128-bit Service UUIDs 段（app.c soil_app_build_scan_rsp）：
+   *      主广播包塞不下“UUID 段 + BTHome 数据”，所以 UUID 与 BTHome 分两包发。
+   *      浏览器做主动扫描，匹配 filters 时用的是「广播包 + 扫描响应包」的合并数据，
+   *      所以只写 services 就能命中（iOS/CoreBluetooth 同样由系统合并两包）。
+   *      它也是连接后 getPrimaryService 用的同一个 UUID —— "能被搜到" ⇔ "确实是本设备"。
+   *
+   *   ② 兜底 — 名字前缀（SoilPulseConfig.DEVICE_NAME）。只为尚未刷新固件、广播里
+   *      没有 128 位 UUID 的老设备保留。全部设备升级后可删掉这项，收紧成纯 UUID 过滤。
+   *
+   * ⚠ 两项必须**并列**在数组里。写进同一个对象会变成 AND（UUID 且名字都要满足），
+   *   反而把老设备（无 UUID）和新设备（名字其实也在响应包里）一起筛窄。
+   */
+  function buildDeviceFilters() {
+    const filters = [{ services: [UUIDS.SERVICE] }];
+    if (DEVICE_NAME) filters.push({ namePrefix: DEVICE_NAME });
+    return filters;
+  }
+
+  /**
    * 阶段1：仅弹出设备选择器（不设超时——用户挑设备时长不受限）。
    * @returns {Promise<BluetoothDevice>}
    */
   async function requestSoilDevice() {
-    // 按服务 UUID 过滤设备（随机 128 位，与设备名无关），UUIDS.SERVICE 须与固件
-    // app_config.h 的 SOIL_SERVICE_UUID128 一致。UUID 位于扫描响应包的
-    // Complete List of 128-bit Service UUIDs 段（见 app.c soil_app_build_scan_rsp）：
-    // UUID 与 BTHome 各发一条独立空口包，Web Bluetooth 匹配的是广播包+扫描响应包
-    // 的合并数据；主广播包的 BTHome 数据供 HA 等被动扫描器使用。
-    // namePrefix 为过渡期兜底：兼容尚未刷新固件（无 128 位 UUID 广播）的旧设备；
-    // 全部设备刷新固件后可移除该 filter，恢复按 UUID 精确识别
     // optionalServices 必须包含 DIS_SERVICE(0x180A)：Web Bluetooth 只允许访问
     // 此处声明过的服务，Chrome（安卓/桌面）会严格执行——漏声明时连接后读 DIS
     // 0x2A26 固件版本直接抛 SecurityError，版本徽章永远显示 unknown 并误报升级
+    const filters = buildDeviceFilters();
+    console.info('[BLE] requestDevice filters:', JSON.stringify(filters));
     return navigator.bluetooth.requestDevice({
-  filters: [{
-  namePrefix: 'SoilPulse'
-}],
-  optionalServices: [UUIDS.OTA_SERVICE, UUIDS.SERVICE, UUIDS.DIS_SERVICE]
-});
+      filters,
+      optionalServices: [UUIDS.OTA_SERVICE, UUIDS.SERVICE, UUIDS.DIS_SERVICE],
+    });
   }
 
   /**
@@ -479,7 +495,19 @@ const BLEProtocol = (() => {
    * 由 finishConnectInner 在 gatt.connect() 成功后调用（带 INIT_TIMEOUT_MS 超时）。
    */
   async function initAfterConnect(server, device, onNotification) {
-    const service = await server.getPrimaryService(UUIDS.SERVICE);
+    // 身份校验（UUID 过滤后的第二道闸）：主服务必须是我们那个 128 位 UUID。
+    // 正常情况下 filters 已经挡住了非本设备；但兜底的 namePrefix 仍可能放进一台
+    // "名字像 SoilPulse、实际不是"的设备（或老固件换了服务表）。这种失败是 NotFoundError，
+    // 直接冒泡出去会被上层当成"信号差/连接失败"，所以换成明确标签，UI 好给可行动提示。
+    let service;
+    try {
+      service = await server.getPrimaryService(UUIDS.SERVICE);
+    } catch (err) {
+      try { device.gatt?.disconnect(); } catch (_) { /* 已断开则忽略 */ }
+      const e = new Error('NOT_SOILPULSE');
+      e.cause = err;
+      throw e;
+    }
     const dataChar = await service.getCharacteristic(UUIDS.DATA_CHAR);
     const timeChar = await service.getCharacteristic(UUIDS.TIME_CHAR);
 
@@ -1307,6 +1335,7 @@ const BLEProtocol = (() => {
     parseDaily30Packet,
     parseDaily30ExtPacket,
     hexDump,
+    buildDeviceFilters,
     requestSoilDevice,
     finishConnect,
     connectDevice,

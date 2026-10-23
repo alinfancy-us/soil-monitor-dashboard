@@ -9,9 +9,11 @@ const SoilPulseConfig = (() => {
   // 页面底部会显示该值，便于现场确认浏览器实际加载的是哪一版前端（排查缓存问题）
   const PAGE_VERSION = '1.5.9';
 
-  // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致（固件改名须保留此前缀）。
-  // 它参与 requestDevice 的过滤（与 services UUID 同一 filter 内 AND 匹配），
-  // 用于排除周围其他同样广播 SoilPulse 服务的设备；固件改名后须同步更新此处，否则网页搜不到设备
+  // 设备广播名前缀，须与固件 app_config.h 的 BLE_DEVICE_NAME 保持一致。
+  // 注意：固件里蓝牙名恒为编译期常量（网页改名只写 0xFFEA，不进广播），所以名字只能标识
+  // “属于 SoilPulse 系列”，区分不了具体是哪一台——身份判据是下面的 UUIDS.SERVICE。
+  // 本值现在只作为 requestDevice 的**兜底** filter（见 ble-protocol.js buildDeviceFilters）：
+  // 救尚未刷新固件、广播里没有 128 位 UUID 的老设备。固件改名后仍需同步此处，否则老设备搜不到。
   const DEVICE_NAME = 'SoilPulse';
 
   // GATT UUID：使用 128 位完整小写字符串，防止 Bluefy/iOS 序列化失败

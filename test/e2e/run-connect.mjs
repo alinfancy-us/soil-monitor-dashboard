@@ -13,6 +13,22 @@ const { browser, page, device } = await openApp({ seed: { history: 144, daily: 3
 pipeConsole(page);
 
 try {
+  step('断言：设备过滤以主服务 UUID 为主判据');
+  // 过滤条件写在 ble-protocol.js 的 buildDeviceFilters()，这里直接读它的输出，
+  // 保证「选择器按 128 位主服务 UUID 匹配（来自扫描响应包）+ 名字前缀兜底」不会被改回纯名字过滤
+  const filters = await page.evaluate(() =>
+    (typeof BLEProtocol !== 'undefined' ? BLEProtocol.buildDeviceFilters() : null));
+  assert(Array.isArray(filters) && filters.length >= 1, '取不到 requestDevice 的 filters');
+  const uuidFilter = filters.find((f) => Array.isArray(f.services));
+  assert(uuidFilter && uuidFilter.services[0] === '749b53b7-2662-4658-9fb4-e47241816727',
+    `首个 filter 应为主服务 UUID，实际 ${JSON.stringify(filters)}`);
+  const nameFallback = filters.find((f) => typeof f.namePrefix === 'string');
+  assert(nameFallback && nameFallback.namePrefix === 'SoilPulse',
+    `缺少名字兜底 filter（老固件），实际 ${JSON.stringify(filters)}`);
+  // 同一对象内 services + namePrefix 会被浏览器按 AND 解释（更窄），必须分开并列
+  assert(!(uuidFilter.namePrefix), 'services 与 namePrefix 不能写在同一个 filter 对象里');
+  log('filters：', JSON.stringify(filters));
+
   step('连接假外设');
   await connect(page, device);
 
