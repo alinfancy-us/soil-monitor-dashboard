@@ -461,10 +461,26 @@ const BLEProtocol = (() => {
     // 0x2A26 固件版本直接抛 SecurityError，版本徽章永远显示 unknown 并误报升级
     const filters = buildDeviceFilters();
     console.info('[BLE] requestDevice filters:', JSON.stringify(filters));
-    return navigator.bluetooth.requestDevice({
+    const device = await navigator.bluetooth.requestDevice({
       filters,
       optionalServices: [UUIDS.OTA_SERVICE, UUIDS.SERVICE, UUIDS.DIS_SERVICE],
     });
+    // 中文：诊断日志——选择器返回的 device.name 是平台「广播包+扫描响应包」合并后的名字
+    //      （优先扫描响应 0x09 Complete Local Name）。固件改扫描响应名后若这里仍显示旧名，
+    //      说明系统蓝牙缓存未刷新或固件组包没生效，而不是 web 层的问题
+    console.info('[BLE] chooser returned device:', device.id, 'name =', JSON.stringify(device.name));
+    // 原始广播监听：advertisementreceived 事件直接携带空口包里的名字与 UUID，
+    // 不经过选择器渲染，是验证「扫描响应包名字是否改成目标值」的最直接证据
+    if (typeof device.watchAdvertisements === 'function') {
+      device.addEventListener('advertisementreceived', (e) => {
+        console.info('[BLE] advertisementreceived: name =', JSON.stringify(e.name),
+          '| uuids =', JSON.stringify(e.uuids || []));
+      });
+      device.watchAdvertisements().catch(() => { /* 平台不支持时静默，不影响连接 */ });
+    } else {
+      console.info('[BLE] watchAdvertisements() not supported on this platform');
+    }
+    return device;
   }
 
   /**
