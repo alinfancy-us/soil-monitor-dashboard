@@ -430,23 +430,24 @@ const BLEProtocol = (() => {
   /**
    * 设备过滤条件（requestDevice 的 filters 是**数组 OR**语义：任意一项命中就出现在选择器里）。
    *
-   *   ① 主判据 — 128 位主服务 UUID（UUIDS.SERVICE，须与固件 bth_soil_sensor.h 的
-   *      SOIL_SERVICE_UUID128 一致）。固件把它放在**扫描响应包**的
-   *      Complete List of 128-bit Service UUIDs 段（app.c soil_app_build_scan_rsp）：
-   *      主广播包塞不下“UUID 段 + BTHome 数据”，所以 UUID 与 BTHome 分两包发。
-   *      浏览器做主动扫描，匹配 filters 时用的是「广播包 + 扫描响应包」的合并数据，
-   *      所以只写 services 就能命中（iOS/CoreBluetooth 同样由系统合并两包）。
-   *      它也是连接后 getPrimaryService 用的同一个 UUID —— "能被搜到" ⇔ "确实是本设备"。
+   * 现行方案：**纯 UUID 过滤**，只认 128 位主服务 UUID（UUIDS.SERVICE，须与固件
+   *   bth_soil_sensor.h / app_config.h 的 SOIL_SERVICE_UUID128 一致）。
+   *   固件把它放在**扫描响应包**的 Complete List of 128-bit Service UUIDs 段
+   *   （app.c soil_app_build_scan_rsp）：主广播包塞不下“UUID 段 + BTHome 数据”，
+   *   所以 UUID 与 BTHome 分两包发。浏览器做主动扫描，匹配 filters 时用的是
+   *   「广播包 + 扫描响应包」的合并数据，所以只写 services 就能命中
+   *   （iOS/CoreBluetooth 同样由系统合并两包）。
+   *   这个 UUID 也是连接后 getPrimaryService 用的同一个 —— "能被搜到" ⇔ "确实是本设备"。
    *
-   *   ② 兜底 — 名字前缀（SoilPulseConfig.DEVICE_NAME）。只为尚未刷新固件、广播里
-   *      没有 128 位 UUID 的老设备保留。全部设备升级后可删掉这项，收紧成纯 UUID 过滤。
-   *
-   * ⚠ 两项必须**并列**在数组里。写进同一个对象会变成 AND（UUID 且名字都要满足），
-   *   反而把老设备（无 UUID）和新设备（名字其实也在响应包里）一起筛窄。
+   * ⚠ 老固件兼容：早期固件的扫描响应里没有 UUID 段，纯 UUID 过滤会搜不到它们。
+   *   需要兼容时把下面 FILTER_NAME_FALLBACK 改成 true，即追加名字前缀 filter
+   *   （两项必须**并列**在数组里：写进同一对象会变成 AND，把两边都筛窄）。
    */
+  const FILTER_NAME_FALLBACK = false;
+
   function buildDeviceFilters() {
     const filters = [{ services: [UUIDS.SERVICE] }];
-    if (DEVICE_NAME) filters.push({ namePrefix: DEVICE_NAME });
+    if (FILTER_NAME_FALLBACK && DEVICE_NAME) filters.push({ namePrefix: DEVICE_NAME });
     return filters;
   }
 
