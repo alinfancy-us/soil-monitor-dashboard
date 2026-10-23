@@ -3508,6 +3508,76 @@ The device will measure the current probe state first, then apply the calibratio
   }
 
   els.devNameInput.addEventListener('input', updateDevNameByteCount);
+
+  /**
+   * 改名后的静默重连：让系统蓝牙缓存立即刷新为新名。
+   *
+   * 背景：Windows 把连接过的设备 GAP 名(0x2A00) 缓存进系统，选择器优先显示缓存名，
+   * 且只在"建立连接"时读取——改名发生在连接中途，当前连接不会刷新它，导致
+   * 改名后第一次重扫仍显示旧名（安卓/iOS 缓存策略不同，恰好掩盖）。
+   *
+   * 做法：断开 → 用已授权的 device 对象直接 gatt.connect()（不弹选择器）→ 重跑
+   * 初始化。这次新连接建立时 Windows 读到新 GAP 名，缓存当场刷新。
+   * 图表数据保留在内存（device.id 未变，不走 restoreCachedCharts）。
+   */
+  async function silentReconnectForGapName() {
+    const device = state.device;
+    if (!device?.gatt?.connected || state.otaRunning || state.disconnecting) return;
+    const token = ++connectToken;
+    setConnectBusy(true);
+    log('Silent reconnect: refreshing system GAP name cache…');
+    device.gatt.disconnect();                       // 触发 onDisconnected 幂等清理（图表保留）
+    await new Promise((r) => setTimeout(r, 800));   // 等设备进入 30s 重连广播窗口 + GAP 名落盘
+    try {
+      const chars = await BLEProtocol.finishConnect(device,
+        (records) => render(records),
+        onDisconnected);
+      if (token !== connectToken) {                 // 迟到成功：丢弃并断开，防状态错乱
+        try { device.gatt.disconnect(); } catch (_) { /* 已断开则忽略 */ }
+        return;
+      }
+      state.device = device;
+      state.characteristic = chars.dataChar;
+      state.dailyChar = chars.dailyChar;
+      state.hisBlkChar = chars.hisBlkChar;
+      state.daily30Char = chars.daily30Char;
+      state.daily30ExtChar = chars.daily30ExtChar;
+      state.resetChar = chars.resetChar;
+      state.calibChar = chars.calibChar;
+      state.refreshChar = chars.refreshChar;
+      state.latestChar = chars.latestChar;
+      state.tempOffsetChar = chars.tempOffsetChar;
+      state.calibStatusChar = chars.calibStatusChar;
+      state.devNameChar = chars.devNameChar;
+      state.otaChar = chars.otaChar;
+      state.fwVersion = chars.fwVersion || getCachedFwVersion(device.id);
+      if (chars.fwVersion) setCachedFwVersion(device.id, chars.fwVersion);
+      setStatus('connected');
+      state.otaJustSucceeded = false;
+      clearConnectError();
+      setConnectBusy(false);
+      state.latestNotifySubscribed = false;
+      state.lastNotifiedRec = null;
+      if (chars.latestChar) {
+        try {
+          await gattOp(() => chars.latestChar.startNotifications(), 'subscribe latest notify (0xFFEB)');
+          chars.latestChar.addEventListener('characteristicvaluechanged', onLatestNotified);
+          state.latestNotifySubscribed = true;
+        } catch (err) {
+          state.latestNotifySubscribed = false;
+          log('Latest notify subscribe failed after silent reconnect: ' + err.message);
+        }
+      }
+      startPolling();
+      armIdleWatch();
+      if (els.devNameStatus) els.devNameStatus.textContent = 'Name saved — Bluetooth list name refreshed.';
+      log('Silent reconnect done — system GAP name cache refreshed.');
+    } catch (err) {
+      // 断开后重连失败：保持 onDisconnected 已清理的断开状态，用户手动 Connect 即可
+      log('Silent reconnect failed: ' + (err.message || err));
+    }
+  }
+
   els.devNameSaveBtn.addEventListener('click', gattButton('Device name save', async () => {
     if (state.otaRunning) {
       els.devNameStatus.textContent = 'Ignored: OTA update is running';
@@ -3524,8 +3594,11 @@ The device will measure the current probe state first, then apply the calibratio
       const res = await gattOp(() => BLEProtocol.sendDeviceName(state.devNameChar, name), 'Device name write (0xFFEA)');
       if (res.ok) {
         showDeviceNameBadge(name);
-        els.devNameStatus.textContent = 'Name saved — shown in this dashboard only (Bluetooth name unchanged).';
+        els.devNameStatus.textContent = 'Name saved — refreshing Bluetooth name (silent reconnect)…';
         log(`Device name saved: ${name}`);
+        // 固件在当轮主循环把新名写进扫描响应包与 GAP 名(0x2A00)；静默重连一次
+        // 让 Windows 等系统的设备名缓存立即刷新（否则下次扫描仍显示旧名）
+        silentReconnectForGapName();
       } else {
         els.devNameStatus.textContent = `Save failed: ${res.message}`;
       }
