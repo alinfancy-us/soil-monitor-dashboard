@@ -469,12 +469,30 @@ const BLEProtocol = (() => {
     //      （优先扫描响应 0x09 Complete Local Name）。固件改扫描响应名后若这里仍显示旧名，
     //      说明系统蓝牙缓存未刷新或固件组包没生效，而不是 web 层的问题
     console.info('[BLE] chooser returned device:', device.id, 'name =', JSON.stringify(device.name));
-    // 原始广播监听：advertisementreceived 事件直接携带空口包里的名字与 UUID，
-    // 不经过选择器渲染，是验证「扫描响应包名字是否改成目标值」的最直接证据
+    // 原始广播监听：advertisementreceived 事件把「广播包 + 扫描响应包」合并后解析成字段，
+    // 不经过选择器渲染，是验证空口内容（名字 / UUID / BTHome 数值）最直接的证据。
+    // 字段归属：name(0x09 完整名) / uuids(128 位段) 来自扫描响应；serviceData(0xFCD2 BTHome)
+    // 来自主广播包 —— 同一条日志同时出现，就证明平台确实做了合并
+    const hexOfView = (dv) => {
+      if (!dv) return '';
+      const u8 = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      return Array.from(u8, (b) => b.toString(16).padStart(2, '0')).join(' ');
+    };
     if (typeof device.watchAdvertisements === 'function') {
       device.addEventListener('advertisementreceived', (e) => {
+        const svc = {};
+        if (e.serviceData) {
+          for (const [uuid, dv] of e.serviceData) svc[uuid] = hexOfView(dv);
+        }
+        const mfg = {};
+        if (e.manufacturerData) {
+          for (const [id, dv] of e.manufacturerData) mfg[id] = hexOfView(dv);
+        }
         console.info('[BLE] advertisementreceived: name =', JSON.stringify(e.name),
-          '| uuids =', JSON.stringify(e.uuids || []));
+          '| uuids =', JSON.stringify(e.uuids || []),
+          '| serviceData =', JSON.stringify(svc),
+          '| manufacturerData =', JSON.stringify(mfg),
+          '| rssi =', e.rssi);
       });
       device.watchAdvertisements().catch(() => { /* 平台不支持时静默，不影响连接 */ });
     } else {
