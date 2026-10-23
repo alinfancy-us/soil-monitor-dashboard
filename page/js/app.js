@@ -3029,12 +3029,12 @@ function clearConnectError() {
          // 阶段2b：已连上但服务发现/时间同步/订阅初始化超时——多为射频信号差或慢平台
          showConnectError('Connected, but setup timed out — weak signal? Move closer and reconnect');
          log('Post-connect setup timed out after 20s');
-       } else if (errMsg.includes('NOT_SOILPULSE')) {
-         // 连接后身份校验失败：主服务 UUID 不是本项目的 128 位 UUID。
-         // 多见于兜底的名字过滤放过了一台同名设备（或老固件换了服务表），
-         // 与“信号差/初始化失败”是两回事，必须让用户重新挑设备而不是反复重试。
-         showConnectError('This is not a SoilPulse sensor (service UUID mismatch). Tap Connect and pick your sensor again.');
-         log('Service UUID mismatch after connect — not a SoilPulse device');
+       } else if (errMsg.includes('NOT_SOILPULSE') || errMsg.includes('INCOMPATIBLE_SERVICE')) {
+         // 连接后身份校验失败：主服务 UUID 不对，或该服务下缺 0xFFE1/0xFFE2 这类底座特征。
+         // 多见于兜底的名字过滤放过了一台同名设备（或固件服务表与网页不匹配），
+         // 与"信号差/初始化失败"是两回事，必须让用户重新挑设备而不是反复重试。
+         showConnectError('This is not a SoilPulse sensor, or its firmware is incompatible (service/characteristic mismatch). Tap Connect and pick your sensor again.');
+         log(`Service mismatch after connect — not a SoilPulse device or incompatible firmware (${errMsg})`);
        } else if (/cancel|chooser/i.test(errMsg) || /NotFoundError|AbortError/i.test(err && err.name)) {
          log('Connection chooser dismissed by user (not an error)');
        } else if (!devicePicked) {

@@ -492,6 +492,28 @@ const BLEProtocol = (() => {
   }
 
   /**
+   * 主服务下全部业务特征（name 仅用于日志与缺失汇总，uuid 才是判据）。
+   *
+   * 正常路径**不**逐个请求这些 UUID —— 用 service.getCharacteristics() 一次拿全表；
+   * 这张表只在"平台没实现 getCharacteristics()"时做回退发现，以及算缺失清单。
+   */
+  const SERVICE_CHARS = [
+    { name: '0xFFE1 data',        uuid: UUIDS.DATA_CHAR },
+    { name: '0xFFE2 time',        uuid: UUIDS.TIME_CHAR },
+    { name: '0xFFE3 daily',       uuid: UUIDS.DAILY_CHAR },
+    { name: '0xFFE5 reset',       uuid: UUIDS.RESET_CHAR },
+    { name: '0xFFE6 calib',       uuid: UUIDS.CALIB_CHAR },
+    { name: '0xFFE7 refresh',     uuid: UUIDS.REFRESH_CHAR },
+    { name: '0xFFE8 tempOffset',  uuid: UUIDS.TEMP_OFFSET_CHAR },
+    { name: '0xFFE9 calibStatus', uuid: UUIDS.CALIB_STATUS_CHAR },
+    { name: '0xFFEA devName',     uuid: UUIDS.DEV_NAME_CHAR },
+    { name: '0xFFEB latest',      uuid: UUIDS.LATEST_CHAR },
+    { name: '0xFFEC historyBlk',  uuid: UUIDS.HISTORY_BLK_CHAR },
+    { name: '0xFFED daily30',     uuid: UUIDS.DAILY30_CHAR },
+    { name: '0xFFEE daily30Ext',  uuid: UUIDS.DAILY30_EXT_CHAR },
+  ];
+
+  /**
    * 阶段2b 主体：服务/特征发现 + 时间同步 + 订阅 Notify + 非关键特征并行发现。
    * 由 finishConnectInner 在 gatt.connect() 成功后调用（带 INIT_TIMEOUT_MS 超时）。
    */
@@ -509,8 +531,61 @@ const BLEProtocol = (() => {
       e.cause = err;
       throw e;
     }
-    const dataChar = await service.getCharacteristic(UUIDS.DATA_CHAR);
-    const timeChar = await service.getCharacteristic(UUIDS.TIME_CHAR);
+
+    // —— 一次性发现本服务下全部特征（一次 Read By Type 遍历，通常 2~4 个 ATT 往返）——
+    // 旧写法是 12 次 service.getCharacteristic(uuid)：每个 UUID 一次 ATT 往返，
+    // 建连初期还在省电档（有效间隔 ~465ms）时，光特征发现就能耗掉 5 秒以上。
+    // getCharacteristics() 是 Web Bluetooth 标准 API，返回每个特征的 properties，
+    // 正好够建 uuid → characteristic 表；缺特征也从"抛异常"变成"查不到 = null"。
+    let discovered;
+    if (typeof service.getCharacteristics === 'function') {
+      try {
+        discovered = await service.getCharacteristics();
+      } catch (err) {
+        try { device.gatt?.disconnect(); } catch (_) { /* 已断开则忽略 */ }
+        const e = new Error('INCOMPATIBLE_SERVICE');
+        e.cause = err;
+        throw e;
+      }
+    } else {
+      // 极旧实现没有 getCharacteristics()：退回逐个取（只影响性能，不影响功能）
+      console.warn('[BLE] service.getCharacteristics() unavailable — per-UUID fallback');
+      discovered = (await Promise.all(SERVICE_CHARS.map(async ({ uuid }) => {
+        try { return await service.getCharacteristic(uuid); } catch (_) { return null; }
+      }))).filter(Boolean);
+    }
+
+    // 规范里 characteristic.uuid 已是小写 128 位字符串，这里仍统一折叠一次防平台差异
+    const byUuid = new Map(discovered.map((c) => [String(c.uuid).toLowerCase(), c]));
+    const pick = (uuid) => byUuid.get(String(uuid).toLowerCase()) || null;
+
+    // 0xFFE1 / 0xFFE2 是协议底座（对时 + 通知），缺任一个都说明服务表不对
+    const dataChar = pick(UUIDS.DATA_CHAR);
+    const timeChar = pick(UUIDS.TIME_CHAR);
+    if (!dataChar || !timeChar) {
+      try { device.gatt?.disconnect(); } catch (_) { /* 已断开则忽略 */ }
+      throw new Error('INCOMPATIBLE_SERVICE');
+    }
+
+    // OTA / DIS 在另外两个服务下，必须单独发现；与后面的对时、订阅并行跑，
+    // 不让这三件事在 JS 层互相排队（浏览器内部本来就会串行化 ATT）
+    const extrasP = Promise.all([
+      // Telink OTA 升级特征（128bit UUID，仅 BLE_OTA_SERVER_ENABLE=1 的固件才有）
+      (async () => {
+        try {
+          const otaService = await server.getPrimaryService(UUIDS.OTA_SERVICE);
+          return await otaService.getCharacteristic(UUIDS.OTA_CHAR);
+        } catch (_) { return null; }
+      })(),
+      // 标准 DIS 固件版本（Firmware Revision String），连接后用于新版本检测
+      (async () => {
+        try {
+          const dis = await server.getPrimaryService(UUIDS.DIS_SERVICE);
+          const fwRevChar = await dis.getCharacteristic(UUIDS.DIS_FW_REV_CHAR);
+          return new TextDecoder().decode(await fwRevChar.readValue()).split(String.fromCharCode(0))[0].trim();
+        } catch (_) { return null; }
+      })(),
+    ]);
 
     // 同步时间戳 + 时区（6 字节 = epoch u32 LE + 时区偏移 s16 LE）。
     // tz 取 getTimezoneOffset()：UTC 以西为正（北京时间 UTC+8 = -480），
@@ -532,44 +607,25 @@ const BLEProtocol = (() => {
       await dataChar.startNotifications();
     }
 
-    // 非关键特征并行发现（互不依赖，异常彼此隔离）：
-    // 浏览器内部仍会队列化 ATT 请求，但消除了 JS 层逐条 await 的调度停顿；
-    // 配合固件建连期快速连接参数（latency 0），整个初始化可压缩到 1~2 秒内完成
-    const getChar = async (uuid) => {
-      try { return await service.getCharacteristic(uuid); }
-      catch (e) { console.warn(`[BLE] characteristic ${uuid} not available:`, e); return null; }
-    };
+    // 可选特征直接查表：旧固件没有的就是 null（不再逐个发 ATT 请求等 NotFoundError）。
+    // 缺失情况统一汇总成一条 info，替掉原来十几条 "characteristic 0xffea not available"
+    // 的告警噪音（那些本来就不是错误）
+    const dailyChar = pick(UUIDS.DAILY_CHAR);              // 7 天日均（0xFFE3）
+    const resetChar = pick(UUIDS.RESET_CHAR);              // 清空指令（0xFFE5）
+    const calibChar = pick(UUIDS.CALIB_CHAR);              // 湿度校准（0xFFE6）
+    const refreshChar = pick(UUIDS.REFRESH_CHAR);          // 立即测量（0xFFE7）
+    const tempOffsetChar = pick(UUIDS.TEMP_OFFSET_CHAR);   // 温度偏移（0xFFE8）
+    const calibStatusChar = pick(UUIDS.CALIB_STATUS_CHAR); // 校准状态（0xFFE9）
+    const devNameChar = pick(UUIDS.DEV_NAME_CHAR);         // 网页展示名（0xFFEA）
+    const latestChar = pick(UUIDS.LATEST_CHAR);            // 最新测量（0xFFEB，无则轮询兜底）
+    const hisBlkChar = pick(UUIDS.HISTORY_BLK_CHAR);       // 24h 分块（0xFFEC，无则回退 0xFFE1）
+    const daily30Char = pick(UUIDS.DAILY30_CHAR);          // 30 天日均（0xFFED，无则只用 7 天）
+    const daily30ExtChar = pick(UUIDS.DAILY30_EXT_CHAR);   // 30 天极值（0xFFEE，无则无极值标记）
 
-    const values = await Promise.allSettled([
-      getChar(UUIDS.DAILY_CHAR),
-      getChar(UUIDS.RESET_CHAR),
-      getChar(UUIDS.CALIB_CHAR),
-      getChar(UUIDS.REFRESH_CHAR),
-      getChar(UUIDS.TEMP_OFFSET_CHAR),
-      getChar(UUIDS.CALIB_STATUS_CHAR),
-      getChar(UUIDS.DEV_NAME_CHAR),
-      // 最新一次测量记录（9 字节，布局同历史记录；旧固件无此特征时为 null）
-      getChar(UUIDS.LATEST_CHAR),
-      // 24h 历史分块读特征（0xFFEC，旧固件无此特征时为 null → 回退 0xFFE1 老协议）
-      getChar(UUIDS.HISTORY_BLK_CHAR),
-      // 30 天日均紧凑包（0xFFED，旧固件无此特征时为 null → 只用 0xFFE3 的 7 天）
-      getChar(UUIDS.DAILY30_CHAR),
-      // 30 天温度极值包（0xFFEE，旧固件无此特征时为 null → 日均图无极值标记）
-      getChar(UUIDS.DAILY30_EXT_CHAR),
-      // Telink OTA 升级特征（128bit UUID，仅 BLE_OTA_SERVER_ENABLE=1 的固件才有）
-      (async () => {
-        const otaService = await server.getPrimaryService(UUIDS.OTA_SERVICE);
-        return otaService.getCharacteristic(UUIDS.OTA_CHAR);
-      })(),
-      // 标准 DIS 固件版本（Firmware Revision String），连接后用于新版本检测
-      (async () => {
-        const dis = await server.getPrimaryService(UUIDS.DIS_SERVICE);
-        const fwRevChar = await dis.getCharacteristic(UUIDS.DIS_FW_REV_CHAR);
-        return new TextDecoder().decode(await fwRevChar.readValue()).split(String.fromCharCode(0))[0].trim();
-      })(),
-    ]).then(results => results.map(r => (r.status === 'fulfilled' ? r.value : null)));
+    const absent = SERVICE_CHARS.filter(({ uuid }) => !byUuid.has(String(uuid).toLowerCase())).map(({ name }) => name);
+    console.info(`[BLE] service chars discovered: ${byUuid.size}${absent.length ? ` | absent: ${absent.join(', ')}` : ''}`);
 
-    const [dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, daily30ExtChar, otaChar, fwVersion] = values;
+    const [otaChar, fwVersion] = await extrasP;
 
     // 中文：全部业务特征统一过 GATT 限速队列（iOS WebView 撞限流时自动退避重试）。
     //      OTA 特征刻意不包——performOta 自己管单包节流，见 gattWrapChar 注释。
