@@ -384,8 +384,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      if (connected) state.otaJustSucceeded = false;   // 重新连接：成功提示展示期结束
      els.mainTabSettingBtn.disabled = !connected;
      els.settingLockedHint.classList.toggle('hidden', connected || state.otaJustSucceeded);
-     els.settingContent.classList.toggle('hidden', !connected && !state.otaJustSucceeded);
-     if (!connected && !state.otaJustSucceeded && !els.mainTabSettingPanel.classList.contains('hidden')) {
+     els.settingContent.classList.toggle('hidden', !connected && !state.otaJustSucceeded && !state.silentReconnecting);
+     if (!connected && !state.otaJustSucceeded && !state.silentReconnecting && !els.mainTabSettingPanel.classList.contains('hidden')) {
        switchMainTab('data');
      }
      els.tempOffsetInput.disabled = !connected || !state.tempOffsetChar;
@@ -3524,6 +3524,7 @@ The device will measure the current probe state first, then apply the calibratio
     const device = state.device;
     if (!device?.gatt?.connected || state.otaRunning || state.disconnecting) return;
     const token = ++connectToken;
+    state.silentReconnecting = true;   // 让 updateSettingsAccess 在断开瞬间不要强制切回 Data 页
     setConnectBusy(true);
     log('Silent reconnect: refreshing system GAP name cache…');
     device.gatt.disconnect();                       // 触发 onDisconnected 幂等清理（图表保留）
@@ -3575,6 +3576,8 @@ The device will measure the current probe state first, then apply the calibratio
     } catch (err) {
       // 断开后重连失败：保持 onDisconnected 已清理的断开状态，用户手动 Connect 即可
       log('Silent reconnect failed: ' + (err.message || err));
+    } finally {
+      state.silentReconnecting = false;
     }
   }
 
