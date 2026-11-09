@@ -1,7 +1,49 @@
+/* 【fix23】全局异常捕获：闪退/异常现场持久化到 localStorage，崩溃后下次加载可查。
+ * 覆盖 window error + unhandledrejection，记录 OTA 阶段（ble-protocol.js 写 window.__otaStage）。
+ * 环形保留最近 6 条防膨胀。必须置于一切业务代码之前注册。 */
+(function () {
+  'use strict';
+  if (window.__soilCrashLogInstalled) return;
+  window.__soilCrashLogInstalled = true;
+  var KEY = 'soilpulse_crash_log_v1';
+  function nowStage() {
+    try { return window.__otaStage || 'idle'; } catch (e) { return '?'; }
+  }
+  function ringPush(rec) {
+    try {
+      var arr;
+      try { arr = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { arr = []; }
+      if (!Array.isArray(arr)) arr = [];
+      arr.push(rec);
+      if (arr.length > 6) arr = arr.slice(-6);
+      localStorage.setItem(KEY, JSON.stringify(arr));
+    } catch (e) { /* localStorage 不可用（隐私模式等）时静默 */ }
+  }
+  window.addEventListener('error', function (ev) {
+    var rec = { t: Date.now(), type: 'error', msg: String(ev && ev.message || ''), src: ev && ev.filename || '', line: (ev && ev.lineno) || 0, stage: nowStage() };
+    ringPush(rec);
+    console.error('[CrashLog]', rec);
+  });
+  window.addEventListener('unhandledrejection', function (ev) {
+    var r = ev && ev.reason;
+    var msg = '';
+    try { msg = (r && (r.message || (r.stack && String(r.stack).split('\n')[0]) || r.toString())) || String(r); } catch (e) { msg = String(r); }
+    var rec = { t: Date.now(), type: 'unhandledrejection', msg: String(msg).slice(0, 500), stage: nowStage() };
+    ringPush(rec);
+    console.error('[CrashLog]', rec);
+  });
+  try {
+    var arr = JSON.parse(localStorage.getItem(KEY) || '[]');
+    if (Array.isArray(arr) && arr.length) {
+      console.warn('[CrashLog] 上次会话闪退/异常记录 ' + arr.length + ' 条：', arr);
+    }
+  } catch (e) { /* ignore */ }
+})();
+
 /**
  * SoilPulse Dashboard Application UI Manager
  */
- (() => {
+ (async () => {
    'use strict';
 
    // 页面加载完成后才启用 Connect 按钮（HTML 初始为 disabled，避免加载过程中被误点）
@@ -16,29 +58,81 @@
      DEV_NAME_MAX_BYTES,
      DEVICE_NAME,
      DEBUG_ENABLED, POLL_ENABLED, POLL_INTERVAL,
+     IDLE_WARN_MS, IDLE_GRACE_S,
      DASHBOARD_URL, BLUEFY_APPSTORE_URL, BLUEFY_DEEPLINK, BEACIO_APPSTORE_URL,
      DAILY_EPOCH_MIN_VALID, DAILY_EPOCH_MAX_VALID, TREND_EPOCH_MAX_VALID,
      CACHE_PREFIX, CACHE_MAX_ITEM_BYTES, CACHE_MAX_TOTAL_BYTES,
      FIRMWARE_MANIFEST_URL,
      TEMP_OFFSET,
 } = SoilPulseConfig;
+  // 中文：两张图（24h 趋势 / 7D·30D 日均）共用的绘图区内边距。
+  //      之前各写一份（24h 上下 16/38、日均上下 8/22），切换 tab 时 X 轴刻度线会跳
+  //      十几像素、绘图区高度也不一样，用户反馈"两个图大小不统一"（2026-10-22）。
+  //      统一后：上沿留最新值标签的空间、下沿留一行时间/日期标签（约 9px + 6px 间隙）。
+  //      左右两侧是"够放刻度就停"：手机上 10px 字号的刻度 "28.3" 实测约 21px，
+  //      26px = 数字宽 21 + 5px 间隙；24h 是双轴（左温右湿）左右同宽，
+  //      日均单轴右侧只需让末位日期标签（居中对齐）探出一半，14px 足够。
+  //      （2026-10-22 再调：图高回到 224/240 后横向变挤，左右各从 34/24 收到 26/14，
+  //        390px 视口下 24h 双轴绘图区净宽 236→252px，日均单轴 246→264px）
+  const CHART_PAD_TOP = 12;
+  const CHART_PAD_BOTTOM = 26;
+  const CHART_PAD_LEFT_COMPACT = 26;
+  const CHART_PAD_LEFT_WIDE = 34;      // 宽屏（≥420px）：刻度字号不变但留一点呼吸位
+  const CHART_PAD_RIGHT_SINGLE = 14;   // 单轴视图（日均）右侧：够放末位日期标签即可
+  // 中文：趋势图最大记录数 = 24h（10 分钟采样 × 144）。设备环 SOIL_HISTORY_MAX=144，
+  //      前端缓存合并后同样按此封顶——更旧的记录由 30 天日均视图（0xFFE3）承担
+  const TREND_MAX_RECORDS = 144;
+  // 日均值本地最多留 30 条（0xFFED 一次能读 30 天）；画图按 state.dailyRange 再截
+  const DAILY_MAX_RECORDS = 30;
+  // 合并去重容差（秒）。设备每次连接都会用手机时间重新对时，对时基准刷新后同一采样
+  // 记录的换算时间戳可能漂移 1~2 秒；按 timestamp 精确去重会漏判，缓存里就会堆出
+  // 成对的"近似重复"并挤掉真正的历史。10 分钟采样间隔下 2 秒容差不会误合并相邻样本。
+  const TREND_MERGE_TOLERANCE_S = 2;
+  // 中文：24h 图的可视窗口跨度（秒）。144 条铺满一屏在手机上每条只摊到 1.6px，
+  //      点挤成毛毛虫、最近几小时看不出走势——所以只画窗口内这一段，默认 6h（≈36 条）。
+  //      缩放范围 30min ~ 24h：小于 30min 画不出趋势、大于 24h 没有数据可看。
+  const TREND_VIEW_SPAN_DEFAULT = 6 * 3600;
+  const TREND_VIEW_SPAN_MIN = 30 * 60;
+  const TREND_VIEW_SPAN_MAX = 24 * 3600;
+  // 中文：连接时 24h 历史"首屏只拉这么多条"，其余交给后台回填（见 startHistoryBackfill）。
+  //      设备采样周期 600s，默认窗口 6h ≈ 36 条；+4 条余量吸收"最新一条不是刚刚"的空档，
+  //      40 条 → 末页 20 + 前一页 20 = 2 页 = 4 个 GATT 事务（旧实现固定 8 页 16 个）。
+  const HISTORY_TAIL_RECORDS = Math.ceil(TREND_VIEW_SPAN_DEFAULT / 600) + 4;
+  // 中文：后台回填的页间停顿（ms）——每页单独抢一次全局 GATT 锁，中间让出去，
+  //      5s 轮询探活与用户点按才有机会插进来，不至于被 8 页连续读写堵住。
+  const HISTORY_BACKFILL_GAP_MS = 120;
   // 缓存 key 按设备唯一标识（device.id，Web Bluetooth 分配，浏览器内可视为等价 MAC）分区，
   // 避免连接不同土壤检测器时数据互相覆盖。lastDevice 指针用于刷新页面后自动回显上次设备的数据。
   const LAST_DEVICE_KEY = `${CACHE_PREFIX}lastDevice:v1`;
   const DEVICE_NAME_KEY = `${CACHE_PREFIX}devName:v1`;   // 最近一次连接的设备展示名（断开连接后仍展示）
+  // 上一轮 OTA 已写入、但尚未经设备回报版本验证的记录（见 verifyPendingFwUpdate）。
+  // 与 fwVer 缓存分开存：fwVer 只放"设备亲口报出的版本"，绝不放"我们希望它变成的版本"
+  const PENDING_FW_TTL_MS = 7 * 24 * 3600 * 1000;   // 7 天未验证自动作废，避免陈旧记录长期误导
+  const pendingFwKey = (deviceId) => `${CACHE_PREFIX}pendingFw:v1:${deviceId}`;   // 按设备分 key，互不覆盖
   const RECORD_KEY_RE = /^SoilPulse:(trend|daily):v1:/;  // 注意：与 CACHE_PREFIX='SoilPulse:' 大小写一致，否则容量清理匹配不到任何 key
 
   function cacheKey(type, deviceId) {
     return `${CACHE_PREFIX}${type}:v1:${deviceId}`;
   }
- 
+
+  // 中文：这里曾经有一套"清空水位（clearedAt）"机制——Clear / Factory reset 时记下时刻，
+  //      之后凡是早于该时刻的缓存记录一律不画。已于 2026-10-22 移除，理由：
+  //      ① 水位会误伤"设备 flash 里确实还在的数据"（重烧/换设备/测试固件灌数场景下，
+  //         设备直读明明拉到了 30 天，页面却因为水位把它们藏了）；
+  //      ② 它把 Clear 变成"删数据 + 记时间戳 + 到处过滤"三件事，排查成本很高。
+  //      现在回到最朴素的语义：Clear = 删本地缓存 + 清内存 + 让设备自己清，
+  //      清空后重连拉到什么就画什么（设备是数据权威）。历史遗留的 clearedAt key
+  //      在 clearAllCache 里一并删掉（见下方 isDataKey）。
+
 // 校准尝试结果 localStorage key：state 初始化（calibAttempt 恢复）在页面加载时就会调用
 // loadCalibAttempts()，此声明必须早于该调用，否则落入 TDZ 被 try/catch 静默吞掉
 const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
 
    const els = {
-     statusDot: document.getElementById('statusDot'),
-     statusText: document.getElementById('statusText'),
+    statusDot: document.getElementById('statusDot'),
+    statusText: document.getElementById('statusText'),
+    pageLock: document.getElementById('pageLock'),
+    pageLockText: document.getElementById('pageLockText'),
      connectBtn: document.getElementById('connectBtn'),
      clearCacheBtn: document.getElementById('clearCacheBtn'),
     calibDryBtn: document.getElementById('calibDryBtn'),
@@ -75,6 +169,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     tempOffsetScaleMax: document.getElementById('tempOffsetScaleMax'),
     factoryResetBtn: document.getElementById('factoryResetBtn'),
     factoryResetStatus: document.getElementById('factoryResetStatus'),
+    idlePrompt: document.getElementById('idlePrompt'),
+    idleCountdown: document.getElementById('idleCountdown'),
+    idleKeepBtn: document.getElementById('idleKeepBtn'),
+    idleSleepBtn: document.getElementById('idleSleepBtn'),
      tempValue: document.getElementById('tempValue'),
      tempUnitLabel: document.getElementById('tempUnitLabel'),
      tempUnitToggle: document.getElementById('tempUnitToggle'),
@@ -85,20 +183,29 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      historyBody: document.getElementById('historyBody'),
      trendChart: document.getElementById('trendChart'),
     trendRangeText: document.getElementById('trendRangeText'),
+     trendLatestBtn: document.getElementById('trendLatestBtn'),
      trendTabBtn: document.getElementById('trendTabBtn'),
      trendTabPanel: document.getElementById('trendTabPanel'),
-     dailyTabBtn: document.getElementById('dailyTabBtn'),
      dailyTabPanel: document.getElementById('dailyTabPanel'),
     dailyMetricTempBtn: document.getElementById('dailyMetricTempBtn'),
     dailyMetricHumBtn: document.getElementById('dailyMetricHumBtn'),
     dailyMetricBattBtn: document.getElementById('dailyMetricBattBtn'),
+    dailyRange7Btn: document.getElementById('dailyRange7Btn'),
+    dailyRange30Btn: document.getElementById('dailyRange30Btn'),
+    dailyEmpty: document.getElementById('dailyEmpty'),
+    dailyNote: document.getElementById('dailyNote'),
+    dailyExtNote: document.getElementById('dailyExtNote'),
+    dailyRangeCard: document.getElementById('dailyRangeCard'),
+    dailyRangeLabel: document.getElementById('dailyRangeLabel'),
+    dailyRangeValue: document.getElementById('dailyRangeValue'),
+    dailyRangeUnit: document.getElementById('dailyRangeUnit'),
+    dailyRangeDate: document.getElementById('dailyRangeDate'),
      modal: document.getElementById('compatibilityModal'),
      modalIcon: document.getElementById('modalIcon'),
      modalTitle: document.getElementById('modalTitle'),
      modalMessage: document.getElementById('modalMessage'),
      modalActionBtn: document.getElementById('modalActionBtn'),
      dailyChart: document.getElementById('dailyChart'),
-     dailyEmpty: document.getElementById('dailyEmpty'),
      mainTabDataBtn: document.getElementById('mainTabDataBtn'),
      mainTabGuideBtn: document.getElementById('mainTabGuideBtn'),
      mainTabSettingBtn: document.getElementById('mainTabSettingBtn'),
@@ -118,19 +225,27 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      activeDeviceId: null,
      characteristic: null,
      dailyChar: null,
+     daily30Char: null,
+     daily30ExtChar: null,   // 0xFFEE 30 天温度极值（相对均值的 0.1℃ 偏移），按 dateEpoch join 到 0xFFED
+     dailyRange: 7,   // 日均图显示天数：7 或 30（0xFFED 有数据时才能选 30）
      resetChar: null,
     calibChar: null,
     refreshChar: null,
     latestChar: null,
     latestShown: null,   // "Latest measurement" 卡片当前展示的记录（时间戳水位），防止被更旧的历史数据覆盖
     tempOffsetChar: null,
-    tempOffsetX10: 0,
+    tempOffsetX100: 0,   // 设备 0xFFE8 原值：小端 int16，单位 0.01℃（±1000 = ±10.00℃），不是 0.1℃
     calibStatusChar: null,
     calibSaved: null,
     devNameChar: null,
     otaChar: null,
     otaRunning: false,
     otaLastFirmware: null,
+    otaJustSucceeded: false,   // 中文：OTA 刚成功（设备重启断链）——断链清理时保留 Setting 页展示成功提示
+    idleTimer: null,           // 180s 无续命 → 弹"保持连接"提醒
+    idleTickTimer: null,       // 弹窗里的 30s 倒计时
+    idleLeft: 0,
+    idleSleepExpected: false,  // 预期内的休眠断链（倒计时归零 / 用户点 Let it sleep）——用于区分"省电断开"与"真故障"
     fwVersion: null,
     fwUpdate: null,
      pollTimer: null,
@@ -145,11 +260,22 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      latestNotifySubscribed: false, // latest 特征 notify 是否已订阅成功（失败回退轮询读）
      dailyMetric: 'temp',
      tempUnit: 'F',
+     // 中文：24h 图 x 轴可视窗口。endTs=右边界（null 表示跟随最新），
+     //      spanSec=窗口跨度，follow=true 时每次重画都把右边界钉在最新一条上。
+     trendView: { endTs: null, spanSec: TREND_VIEW_SPAN_DEFAULT, follow: true },
+     // 中文：24h 历史"已拉到哪儿"的回填态（0xFFEC 分块读）。
+     //      oldestOffset = 已拿到的最旧一条的逻辑序号（0 = 已到设备最旧）；
+     //      oldestTs 供"还差多少"诊断用；unsupported = 旧固件不认末页哨兵。
+     //      整对象替换而不是逐字段改：后台回填循环用对象身份判断"这一轮是否还有效"。
+     historyBackfill: { oldestOffset: 0, oldestTs: 0, total: 0, running: false, unsupported: false },
+     trendGeom: null,   // 上一帧 24h 图的几何（窗口区间/内边距），手势层与范围文案共用
    };
 
    // 温度单位偏好：默认华氏（°F，美国常用），可在温度卡片切换摄氏（°C），持久化到本地
    try {
      state.tempUnit = localStorage.getItem(`${CACHE_PREFIX}tempUnit:v1`) === 'C' ? 'C' : 'F';
+     // 日均图显示范围偏好（7D / 30D）；真到渲染时还会再校验固件是否支持 0xFFED
+     state.dailyRange = localStorage.getItem(`${CACHE_PREFIX}dailyRange:v1`) === '30' ? 30 : 7;
      // 启动时恢复最近一次连接的设备展示名（未连接也展示，见 showDeviceNameBadge）
      showDeviceNameBadge(localStorage.getItem(DEVICE_NAME_KEY) || '');
    } catch (_) {
@@ -165,11 +291,24 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    function tempDeltaSymbol() { return state.tempUnit === 'F' ? '°F' : '℃'; }
    function fmtTempDelta(deltaC, decimals = 1) { return `${tempDeltaVal(deltaC).toFixed(decimals)} ${tempDeltaSymbol()}`; }
 
+   // 温度极值风险阈值（℃ 为内部真值，绘制/文案时再经 tempVal 换到当前显示单位）：
+   //   霜冻：日最低 ≤ 2℃ —— 这是"土壤温度"不是气温，≤2℃ 时根区已临近冰点，
+   //         浅根/幼苗开始受害。别用 5℃：温带春秋季常态夜温就常在 3~5℃，
+   //         阈值太宽会让大半年天天亮蓝点，标记失去信息量
+   //   热害：日最高 ≥ 35℃ —— 常见作物光合开始受阻、土壤表层失水陡增
+   const DAILY_FROST_C = 2;
+   const DAILY_HEAT_C = 35;
+
+
    const DAILY_METRICS = {
      temp: {
        key: 'temp',
        title: 'Temperature',
        color: '#f59e0b',
+       // 按钮"卡片切换"样式：选中=线色填充白字（-600 深一档保证对比度），未选=同色浅底。
+       // 与顶部 24h/7D/30D 的中性灰分段控件拉开层次，且按钮颜色即图线颜色的映射
+       onCls: 'bg-amber-600 text-white shadow-sm',
+       offCls: 'bg-amber-50 text-amber-700 hover:bg-amber-100',
        formatValue: v => `${v.toFixed(1)}${tempUnitSymbol()}`,
        axisFormatter: v => v.toFixed(1),
        range: null,
@@ -179,6 +318,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        key: 'hum',
        title: 'Moisture',
        color: '#0ea5e9',
+       onCls: 'bg-sky-600 text-white shadow-sm',
+       offCls: 'bg-sky-50 text-sky-700 hover:bg-sky-100',
        formatValue: v => `${v.toFixed(1)}%`,
        axisFormatter: v => v.toFixed(0),
        range: [0, 100],
@@ -188,9 +329,17 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        key: 'battPercent',
        title: 'Battery',
        color: '#10b981',
+       onCls: 'bg-emerald-600 text-white shadow-sm',
+       offCls: 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100',
        formatValue: v => `${v.toFixed(0)}%`,
        axisFormatter: v => v.toFixed(0),
-       range: [0, 100],
+       // 中文：电量不要再固定 0~100 轴。2 节干电池满量程 1000mV 对应 100%，
+       //      30 天通常只掉 1~3%，钉死在 0~100 上会画成一条水平线，看不出变化；
+       //      改自动量程（niceRange 会留 20% 余量），边界夹在 0~100，最小跨度 4%
+       //      以免把 1% 的量化台阶放大成断崖。
+       range: null,
+       bounds: [0, 100],
+       minSpan: 4,
        button: 'dailyMetricBattBtn',
      },
    };
@@ -203,7 +352,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      console.debug(`[SoilPulse +${dt}s] ${msg}`);
    }
  
-   function setStatus(mode) {
+   // customText 用于区分断开原因（如"设备省电休眠"与"真故障"），不传则用默认文案
+   function setStatus(mode, customText) {
      const map = {
        disconnected: ['bg-slate-300', 'Disconnected', false],
        connecting:   ['bg-amber-400', 'Connecting…', true],
@@ -211,7 +361,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      };
      const [dot, text, active] = map[mode];
      els.statusDot.className = `w-3 h-3 rounded-full ${dot}`;
-     els.statusText.textContent = text;
+     els.statusText.textContent = customText || text;
     els.deviceNameText.classList.toggle('dev-name-idle', mode === 'disconnected');
     els.calibStatus.style.color = '';
      els.connectBtn.textContent = mode === 'connected' ? 'Disconnect' : 'Connect';
@@ -229,12 +379,15 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     }
    }
 
-   // Setting 面板仅连接后可操作；未连接时锁定 Tab 并切回 Data（若正停留在 Setting）
+   // Setting 面板仅连接后可操作；未连接时锁定 Tab 并切回 Data（若正停留在 Setting）。
+   // 例外：OTA 刚成功（设备重启断链）时保留 Setting 页与固件卡片可见，让用户看到成功提示，
+   //       直到用户主动切走或下次连接才恢复默认行为
    function updateSettingsAccess(connected) {
+     if (connected) state.otaJustSucceeded = false;   // 重新连接：成功提示展示期结束
      els.mainTabSettingBtn.disabled = !connected;
-     els.settingLockedHint.classList.toggle('hidden', connected);
-     els.settingContent.classList.toggle('hidden', !connected);
-     if (!connected && !els.mainTabSettingPanel.classList.contains('hidden')) {
+     els.settingLockedHint.classList.toggle('hidden', connected || state.otaJustSucceeded);
+     els.settingContent.classList.toggle('hidden', !connected && !state.otaJustSucceeded && !state.silentReconnecting);
+     if (!connected && !state.otaJustSucceeded && !state.silentReconnecting && !els.mainTabSettingPanel.classList.contains('hidden')) {
        switchMainTab('data');
      }
      els.tempOffsetInput.disabled = !connected || !state.tempOffsetChar;
@@ -267,6 +420,14 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     els.tempOffsetApplyBtn.disabled = lock || !connected || !state.tempOffsetChar;
     els.factoryResetBtn.disabled = lock || !connected || !state.resetChar;
     els.mainTabSettingBtn.disabled = lock || !connected;
+    // 中文：OTA 升级进行中锁定全部主 Tab（Data/Guide 置灰 + switchMainTab 守卫双保险），
+    //       防止升级链路被页面切换后的 UI 更新（图表重绘等）干扰，用户保持在 Setting 升级页
+    els.mainTabDataBtn.disabled = lock;
+    els.mainTabGuideBtn.disabled = lock;
+    els.mainTabDataBtn.classList.toggle('opacity-40', lock);
+    els.mainTabDataBtn.classList.toggle('cursor-not-allowed', lock);
+    els.mainTabGuideBtn.classList.toggle('opacity-40', lock);
+    els.mainTabGuideBtn.classList.toggle('cursor-not-allowed', lock);
 
     if (lock) {
       els.statusDot.className = 'w-3 h-3 rounded-full bg-violet-500';
@@ -314,40 +475,96 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        return window.matchMedia('(max-width: 640px)').matches;
      }
 
-   function sanitizeDailyRecords(records) {
+   function sanitizeDailyRecords(records, max = DAILY_MAX_RECORDS) {
      if (!Array.isArray(records)) return [];
      return records
        .filter((r) => Number.isFinite(r?.dateEpoch)
          && r.dateEpoch >= DAILY_EPOCH_MIN_VALID
          && r.dateEpoch <= DAILY_EPOCH_MAX_VALID)
       .sort((a, b) => a.dateEpoch - b.dateEpoch)
-      .slice(-7);
+      .slice(-max);
    }
 
-  function sanitizeTrendRecords(records) {
-    if (!Array.isArray(records)) return [];
-    return records
-      .map((r) => ({
-        timestamp: Number(r?.timestamp),
-        temp: Number(r?.temp),
-        hum: Number(r?.hum),
-        batt: Number(r?.batt),
-      }))
-      .filter((r) => Number.isFinite(r.timestamp)
-        && r.timestamp >= 0
-        && r.timestamp <= TREND_EPOCH_MAX_VALID
-        && Number.isFinite(r.temp)
-        && r.temp > -80
-        && r.temp < 120
-        && Number.isFinite(r.hum)
-        && r.hum >= 0
-        && r.hum <= 100
-        && Number.isFinite(r.batt)
-        && r.batt >= 0
-        && r.batt <= 100)
-      .sort((a, b) => a.timestamp - b.timestamp)
-      .slice(-5);
-  }
+// 中文：按"本地 0 点 epoch"精确合并两路日均值（0xFFED 的 30 天 + 0xFFE3 的 7 天）。
+ //       dateEpoch 是天索引×86400，不存在秒级漂移，直接按值去重即可；
+ //       同一日期以 extra（0xFFE3，RAM 环）为准——它更新更及时。
+ function mergeDailyRecords(base, extra) {
+   const byDay = new Map();
+   (Array.isArray(base) ? base : []).forEach((r) => {
+     if (Number.isFinite(r?.dateEpoch)) byDay.set(r.dateEpoch, r);
+   });
+   (Array.isArray(extra) ? extra : []).forEach((r) => {
+     if (Number.isFinite(r?.dateEpoch)) byDay.set(r.dateEpoch, r);
+   });
+   return Array.from(byDay.values()).sort((a, b) => a.dateEpoch - b.dateEpoch);
+ }
+
+// 中文：把 0xFFEE 的温度极值按 dateEpoch 挂到日均记录上（值 = 相对当日均值的 0.1℃ 偏移）。
+//       挂在记录上而不是另存一张 Map：sanitizeDailyRecords 只做过滤/排序/截断、保留整条对象，
+//       所以极值能跟着日均缓存一起持久化，切 7D/30D、重绘、离线看缓存时都还在。
+//       旧固件记录（0xFFEE 缺失或 0x80=UNKNOWN）不挂字段，渲染侧按"无极值"处理。
+ function attachDailyExt(records, extMap) {
+   if (!extMap || !extMap.size || !Array.isArray(records)) return records;
+   records.forEach((r) => {
+     const ext = extMap.get(r?.dateEpoch);
+     if (!ext || ext.tempMinD10 == null || ext.tempMaxD10 == null) return;
+     r.tempMinD10 = ext.tempMinD10;
+     r.tempMaxD10 = ext.tempMaxD10;
+   });
+   return records;
+ }
+
+ function sanitizeTrendRecords(records) {
+   if (!Array.isArray(records)) return [];
+   return records
+     .map((r) => ({
+       timestamp: Number(r?.timestamp),
+       temp: Number(r?.temp),
+       hum: Number(r?.hum),
+       batt: Number(r?.batt),
+     }))
+     .filter((r) => Number.isFinite(r.timestamp)
+       && r.timestamp > 0
+       && r.timestamp <= TREND_EPOCH_MAX_VALID
+       && Number.isFinite(r.temp)
+       && r.temp > -80
+       && r.temp < 120
+       && Number.isFinite(r.hum)
+       && r.hum >= 0
+       && r.hum <= 100
+       && Number.isFinite(r.batt)
+       && r.batt >= 0
+       && r.batt <= 100)
+     .sort((a, b) => a.timestamp - b.timestamp)
+     .slice(-TREND_MAX_RECORDS);
+ }
+
+ // 中文：按 timestamp 去重合并（base 在前、增量在后；同一时刻以增量为准——
+ //      设备新读出的记录覆盖缓存旧值）。供 render() 把轮询/通知的 5 条增量
+ //      并回 24h 大缓存用，避免每次小更新把缓存覆盖成只剩 5 条
+ function mergeTrendRecords(base, extra) {
+   // 先按时间排序，再做"近邻合并"：时间差 ≤ TREND_MERGE_TOLERANCE_S 视为同一条，
+   // 保留后出现的那条（extra 里的设备实时值优先覆盖缓存）。不能按 timestamp 建 Map
+   // 精确去重——对时基准每次连接会刷新，同一采样可能漂移 1~2 秒，精确匹配会漏判。
+   const all = [];
+   (Array.isArray(base) ? base : []).forEach((r) => {
+     if (Number.isFinite(r?.timestamp)) all.push(r);
+   });
+   (Array.isArray(extra) ? extra : []).forEach((r) => {
+     if (Number.isFinite(r?.timestamp)) all.push(r);
+   });
+   all.sort((a, b) => a.timestamp - b.timestamp);
+   const out = [];
+   for (const r of all) {
+     const last = out[out.length - 1];
+     if (last && Math.abs(r.timestamp - last.timestamp) <= TREND_MERGE_TOLERANCE_S) {
+       out[out.length - 1] = r;
+     } else {
+       out.push(r);
+     }
+   }
+   return out;
+ }
 
   // 浏览器本地缓存：保存最近图表数据，确保下次打开无需连接也能直接查看。
   function byteSize(text) {
@@ -462,6 +679,79 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     } catch (_) {}
   }
 
+  // —— OTA 结果验证闭环 ——
+  // 固件返回 SUCCESS 的语义是"回读 CRC32 通过 + boot mark 已切"，只证明写进去了，
+  // 不证明新固件能跑起来：新固件若初始化失败，bootctl 会在几次非预期复位后把另一个槽
+  // 恢复成 KNLT 并复位过去，设备最终跑的是旧版本。
+  // 因此升级成功时不把目标版本写进 state.fwVersion / fwVer 缓存（那是"期望"不是"事实"），
+  // 只记一条待验证；下次连上读到 DIS 0x2A26 的设备自报版本后再比对，一致才算真成功。
+  function setPendingFwVerify(deviceId, version) {
+    if (!deviceId || !version) return;
+    try {
+      localStorage.setItem(pendingFwKey(deviceId), JSON.stringify({ version, at: Date.now() }));
+    } catch (_) {}
+  }
+
+  function getPendingFwVerify(deviceId) {
+    if (!deviceId) return null;
+    const key = pendingFwKey(deviceId);
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const p = JSON.parse(raw);
+      if (!p || !p.version) return null;
+      if (!p.at || Date.now() - p.at > PENDING_FW_TTL_MS) {
+        localStorage.removeItem(key);   // 过期作废
+        return null;
+      }
+      return p;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function clearPendingFwVerify(deviceId) {
+    if (!deviceId) return;
+    try {
+      localStorage.removeItem(pendingFwKey(deviceId));
+    } catch (_) {}
+  }
+
+  /**
+   * 重连后校验上一轮升级是否真的生效。
+   * 必须在 state.fwVersion 已按 DIS 结果赋值、且 OTA 状态区已清空之后调用：
+   * 回滚场景下 checkFirmwareUpdate 会用设备真实（旧）版本重新比对清单，自动重新提示升级。
+   * @param {string} deviceId        当前设备 id
+   * @param {string|null} reportedVersion 固件 DIS 0x2A26 自报版本（读取失败为 null）
+   */
+  function verifyPendingFwUpdate(deviceId, reportedVersion) {
+    const pending = getPendingFwVerify(deviceId);
+    if (!pending) return;
+
+    // DIS 读失败：无从判定，保留记录等下次连接（TTL 兜底），宁可晚确认也不误报
+    if (!reportedVersion) {
+      log(`[OTA] update not verified yet: DIS read failed (expected v${pending.version}), retry next connect`);
+      return;
+    }
+
+    clearPendingFwVerify(deviceId);
+    // 归一化后比较：容忍 DIS 里的前导 v/V 与空白差异（两边的值来自同一个 CI 版本号，
+    // 只需抵御格式噪声；不能用 compareVersions——它会把 dev 的 commit hash 也解析成数字）
+    const norm = (v) => String(v || '').trim().replace(/^[vV]/, '');
+    if (norm(reportedVersion) === norm(pending.version)) {
+      log(`[OTA] update verified: device reports v${reportedVersion}`);
+      return;
+    }
+
+    // 设备自报版本 ≠ 刚写入的版本 → 新固件没起来（大概率被 bootctl 回滚到另一个槽）。
+    // state.fwVersion / fwVer 缓存此时已是设备真实版本，升级提示会重新出现。
+    els.otaStatus.textContent =
+      `Update did not take effect — device still reports v${reportedVersion} (expected v${pending.version}). Please retry.`;
+    els.otaStatus.className = 'text-xs font-medium text-rose-600';
+    setOtaRetryVisible(true);
+    log(`[OTA] UPDATE NOT APPLIED: wrote v${pending.version} but device reports v${reportedVersion} — likely rolled back by bootctl`);
+  }
+
   // 设备展示名徽章：设置文字并显示，同时持久化到 localStorage——断开连接、刷新页面后
   // 仍展示最近一次连接的设备名（需求：disconnect 时不隐藏设备名）
   function showDeviceNameBadge(name) {
@@ -518,9 +808,20 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
   // 电量胶囊高亮状态：仅"已连接且本会话拿到过实时数据"才绿色高亮。
   // 首屏会用本地缓存回显历史（restoreCachedCharts → render），若不区分连接态，
   // 未连接的页面也会显示"电量 100%"绿色高亮误导用户；断开时保留最后一次读数仅灰显，
-  // 与温度/湿度卡保留最后读数的行为一致
+  // 与温度/湿度卡保留最后读数的行为一致。
+  // 【低电】batt===0 且已连接 → 红色 + 明确文案。固件侧 0% 是"真实低电正常返回"
+  //   （不是测量失败），所以这里可以放心把 0 当成"该换电池了"处理；
+  //   未连接时不提示，避免缓存回显的旧 0% 造成误报。
   function syncBatteryPill() {
-    els.battPill?.classList.toggle('batt-idle', !(state.device?.gatt.connected && state.latestShown));
+    const connected = !!(state.device?.gatt.connected && state.latestShown);
+    const low = connected && Number(state.latestShown?.batt) === 0;
+    els.battPill?.classList.toggle('batt-idle', !connected);
+    els.battPill?.classList.toggle('batt-low', low);
+    if (els.battPill) {
+      const label = low ? 'Battery empty — replace batteries' : 'Battery level';
+      els.battPill.setAttribute('aria-label', label);
+      els.battPill.title = low ? '电量耗尽，请更换电池（低于 2.2V 触摸功能将失效）' : '';
+    }
   }
 
   // 清空 live 展示区（切换到另一台设备、或没有该设备缓存时，避免继续显示上一台设备的数据）。
@@ -528,6 +829,16 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     state.lastRecords = null;
     state.latestShown = null;
     state.lastDailyRecords = null;
+    // 中文：24h 回填态一并复位——换设备/清空后不能沿用上一台的"已拉到第几页"，
+    //      否则后台回填会拿旧的 oldestOffset 去翻新设备的环（张冠李戴）。
+    //      换对象而不是改字段：后台回填循环用对象身份判活（见 startHistoryBackfill）。
+    state.historyBackfill = { oldestOffset: 0, oldestTs: 0, total: 0, running: false, unsupported: false };
+    // 中文：可视窗口一并复位——否则换设备/清空后仍停在上一台的"拖到 8 小时前"位置，
+    //      新数据进来只会在窗口外，图上一片空白，看起来像清空没成功
+    state.trendView = { endTs: null, spanSec: TREND_VIEW_SPAN_DEFAULT, follow: true };
+    state.trendGeom = null;
+    if (els.trendChart) els.trendChart._trendLayout = null;
+    syncTrendLatestChip();
     els.tempValue.textContent = '--';
     els.humValue.textContent = '--';
     els.battValue.textContent = '--';
@@ -544,6 +855,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
   // 不通过 GAP 服务读取设备名
 
   // 加载指定设备（device.id）自己的历史缓存并回显到图表/表格。
+  // 缓存里有什么就画什么：清空动作（Clear / Factory reset）已经把缓存删干净了，
+  // 不需要再按时间戳二次判断"这条是不是清空前的残留"（2026-10-22 移除清空水位）。
   function restoreCachedCharts(deviceId) {
     const trendRecords = loadCachedTrendRecords(deviceId);
     if (trendRecords.length) {
@@ -558,16 +871,85 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     }
   }
 
+  // 中文：把设备读回的 24h 记录并进现有数据后整表重画。
+  //      先 merge 缓存再判断空：设备读回 0 条（或全是无时间戳的记录）时也要让 render 走一遍，
+  //      否则界面停在连接前的样子，既没提示也看不出这次到底拉没拉到。
+  function applyHistoryRecords(devRecords) {
+    const merged = mergeTrendRecords(loadCachedTrendRecords(state.activeDeviceId), devRecords || []);
+    render(merged.length ? merged : (devRecords || []));
+  }
+
+  // 中文：后台回填更旧的 24h 分块（0xFFEC）。
+  //      为什么要有它：首屏只拉了末页附近 ~6.7h（4 个 GATT 事务），更早的分块不能等用户
+  //      拖到那儿再现场拉（拖动是连续的，一卡就是几百毫秒）。这里在连接流程返回后
+  //      一页一页往前补，每页单独抢一次全局 GATT 锁、页间让出 120ms，
+  //      5s 轮询探活与用户点按都能插进来。
+  //      停止条件：拉到设备最旧一条（oldestOffset=0）/ 断链 / OTA / 清零（对象被换掉）。
+  //      每页到手就 render：旧数据往左补，最新读数不动（render 的 merge 语义）。
+  async function startHistoryBackfill() {
+    const cov = state.historyBackfill;
+    if (!state.hisBlkChar || cov.unsupported || cov.running || !cov.oldestOffset) return;
+    cov.running = true;
+    let pages = 0;
+    try {
+      // 中文：用对象身份判活——resetDisplay / 重新连接会把 state.historyBackfill 换成新对象，
+      //      这一轮就该停手，否则会拿上一台设备的 oldestOffset 去翻新设备的环
+      while (state.historyBackfill === cov && cov.oldestOffset > 0) {
+        if (state.device?.gatt?.connected !== true || state.otaRunning || state.disconnecting) break;
+        const page = await gattOp(
+          () => BLEProtocol.fetchHistoryBefore(state.hisBlkChar, { beforeOffset: cov.oldestOffset }),
+          'backfill older 24h history (0xFFEC)',
+          8000
+        );
+        if (!page.records.length) {   // 设备侧越界：已经是最旧一条
+          cov.oldestOffset = 0;
+          break;
+        }
+        // 中文：这一页读回来时可能已经发生了 Clear/Factory reset/换设备（resetDisplay 换掉了
+        //      state.historyBackfill）——此时必须丢弃，否则刚清空的界面会被这一页旧数据
+        //      重新 merge 回内存和 localStorage，表现成"清空没生效"。
+        if (state.historyBackfill !== cov) break;
+        cov.oldestOffset = page.oldestOffset;
+        const ts = page.records[0]?.timestamp;
+        if (Number.isFinite(ts) && ts > 0) cov.oldestTs = cov.oldestTs ? Math.min(cov.oldestTs, ts) : ts;
+        pages++;
+        render(page.records);
+        if (cov.oldestOffset > 0) await new Promise((r) => setTimeout(r, HISTORY_BACKFILL_GAP_MS));
+      }
+      log(`24h backfill finished: +${pages} page(s), oldestOffset=${cov.oldestOffset}`);
+    } catch (err) {
+      log(`24h backfill stopped: ${err.message || err}`);
+    } finally {
+      cov.running = false;
+    }
+  }
+
+  // 中文：只清"设备数据"类缓存（trend / daily / fwVer / pendingFw），
+  //      保留 lastDevice（上次连接的设备，决定首屏回显哪台设备的数据）、
+  //      devName、tempUnit、dailyRange —— 这些是用户偏好，不属于"测量数据"。
+  //      历史实现按 CACHE_PREFIX 全删，导致清一次数据就丢掉 lastDevice，
+  //      下次打开页面不再回显上次设备，表现为"分设备缓存逻辑消失了"。
   function clearAllCache() {
-    const keys = Object.keys(localStorage).filter((key) => key.startsWith(CACHE_PREFIX));
+    const isDataKey = (key) => RECORD_KEY_RE.test(key)
+      || key.startsWith(`${CACHE_PREFIX}fwVer:`)
+      || key.startsWith(`${CACHE_PREFIX}pendingFw:`)
+      // 历史遗留的"清空水位"key（已不再写入，见文件顶部说明）：一并按数据类清掉，
+      // 免得旧版本留在用户手机上的时间戳一直占着 storage
+      || key.startsWith(`${CACHE_PREFIX}clearedAt:`);
+    const keys = Object.keys(localStorage).filter(isDataKey);
     keys.forEach((key) => localStorage.removeItem(key));
     resetDisplay();
+    state.lastNotifiedRec = null;   // 清掉 notify 去重基线，避免重连后拿旧记录做基线
     log(`Cache cleared: removed ${keys.length} key(s)`);
   }
 
   // Factory reset 联动：设备端数据全部擦除后，网页本地为该设备缓存的数据同步清除——
   // 校准尝试记录（CALIB_ATTEMPT_KEY，不在 CACHE_PREFIX 下，clearAllCache 管不到）、
   // 该设备的历史/日均值缓存、设备展示名徽章。lastDevice（便于重连）与温度单位偏好保留
+  // 【必须同时清内存】只删 localStorage 是不够的：state.lastRecords / lastDailyRecords
+  //   仍留在内存里，图表也还画在 canvas 上；下一次 render()（轮询/重连/切 tab）会拿这份
+  //   残留数据 merge 并 saveTrendRecordsCache 写回本地缓存 → 设备明明已擦除，网页上
+  //   "重置后历史数据还在"，重连后还会被 restoreCachedCharts 重新画出来。
   function clearLocalDeviceCache() {
     try {
       localStorage.removeItem(CALIB_ATTEMPT_KEY);
@@ -579,6 +961,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     renderCalibPointUi('dry', 'clear');
     renderCalibPointUi('wet', 'clear');
     clearDeviceNameBadge();
+    resetDisplay();                 // 清内存（lastRecords/lastDailyRecords/latestShown）+ 重绘空图表/空表格
+    state.lastNotifiedRec = null;   // 清掉 notify 去重基线
   }
 
     /**
@@ -626,7 +1010,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     /**
      * 绘制Y轴刻度文本。
      */
-    function drawYAxisTicks(ctx, lo, hi, padTop, plotH, x, align, color, formatter) {
+    function drawYAxisTicks(ctx, lo, hi, padTop, plotH, x, align, color, formatter, skipYs) {
       ctx.fillStyle = color;
       ctx.font = '10px sans-serif';
       ctx.textAlign = align;
@@ -635,6 +1019,8 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       for (let i = 0; i <= 4; i++) {
         const val = hi - (hi - lo) * (i / 4);
         const y = padTop + (plotH / 4) * i;
+        // 中文：落在阈值角标上的刻度直接不画（由角标顶替），避免两行字叠在一起
+        if (skipYs && skipYs.some((sy) => Math.abs(sy - y) < 9)) continue;
         ctx.fillText(fmt(val), x, y);
       }
     }
@@ -683,8 +1069,31 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     }
  
    function render(records) {
-    records = sanitizeTrendRecords(records);
-    if (!records.length) return;
+    // 中文：先并入既有 24h 数据再清洗封顶——轮询(0xFFE1 5 条)/通知带来的增量
+    //      直接覆盖 state.lastRecords 会把 24h 缓存缩水成 5 条。
+    //      内存侧的旧数据靠 Clear/Reset 里的 resetDisplay() 清，不在这里按时间戳过滤
+    //      （2026-10-22 移除清空水位：过滤会让"设备里确实还在的数据"被静默藏掉）。
+    const base = state.lastRecords;
+    // 中文：进 sanitize 之前先记下本次传入的原始条数——用来区分两种"渲染后为空"：
+    //      ① 设备本来就没数据；② 设备给了 N 条但时间戳全部无效（未对时）。
+    //      原来两者都被下面的 return 吞掉，界面上什么提示都没有。
+    const incoming = Array.isArray(records) ? records.length : 0;
+    records = sanitizeTrendRecords(mergeTrendRecords(base, records));
+    if (!records.length) {
+      // 中文：设备给了数据却一条都过不了 sanitize = 时间戳全为 0 或越界，即设备尚未对时。
+      //      固件侧已用锚点双向推算兜底（锚点前后的记录都能推出真实 epoch），
+      //      这里只剩"整个窗口没有任何一条真实时间戳"的极端情况，必须明确告知用户，
+      //      否则界面停在连接前的样子，看起来像卡住了。
+      updateTrendSummary([]);   // 中文：统一空态文案（此前这句被上面的 return 挡成死代码）
+      if (incoming > 0) {
+        // 中文：文案里不带条数——render 会被通知/轮询以 1~5 条的小批次反复调用，
+        //      每批条数不同会让提示在 "5 record(s)" / "1 record(s)" 之间跳，
+        //      容易让人以为数据在变。真实条数留给日志诊断。
+        els.trendRangeText.textContent = 'Time not synced (device clock not set)';
+        log(`Trend records dropped: ${incoming} record(s) carry no valid timestamp (clock not set)`);
+      }
+      return;
+    }
      state.lastRecords = records;
     saveTrendRecordsCache(records, state.activeDeviceId);
      const latest = records[records.length - 1];
@@ -701,10 +1110,12 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        syncBatteryPill();
      }
  
+     // 中文：表格只列最近 20 条（24h 全量数据看上方趋势图；144 行全渲染徒增 DOM）
      els.historyBody.innerHTML = records
+       .slice(-20)
        .map((r, i) => `
          <tr class="border-b border-slate-50 last:border-0">
-           <td class="py-2 pr-2 text-slate-400">${i + 1}</td>
+           <td class="py-2 pr-2 text-slate-400">${records.length - Math.min(records.length, 20) + i + 1}</td>
            <td class="py-2 pr-2">${formatTime(r.timestamp)}</td>
            <td class="py-2 pr-2 text-amber-500 font-medium">${fmtTemp(r.temp)}</td>
            <td class="py-2 pr-2 text-sky-500 font-medium">${r.hum.toFixed(1)}%</td>
@@ -713,51 +1124,146 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        .reverse()
        .join('');
  
-     updateTrendSummary(records);
-     drawChart(records);
+    // 中文：先画图、再写范围文案——文案要显示"可视窗口"区间，而窗口几何是 drawChart
+    //      算出来写进 state.trendGeom 的。反过来（先写文案）在页面刚加载/重载时会拿到
+    //      null 几何，退化成"首末记录"文案，与图上真实画出的 6h 窗口对不上。
+    drawChart(records);
+    updateTrendSummary(records);
    }
 
-   // Data 面板改版后图下 3 个统计块(trend/dailyLatestValue 等)已从 index.html 移除，
-   // 本函数仅维护仍存在的 trendRangeText 时间范围文案；勿再引用已删除的元素
-   function updateTrendSummary(records) {
-     if (!records || !records.length) {
-       els.trendRangeText.textContent = 'No data available';
-       return;
-     }
+  // Data 面板改版后图下 3 个统计块(trend/dailyLatestValue 等)已从 index.html 移除，
+  // 本函数仅维护仍存在的 trendRangeText 时间范围文案；勿再引用已删除的元素
+   // 中文：跨天的时间段必须带日期。只写 "21:41 - 03:41" 会被读成"结束比开始早"，
+  //      实际是跨到了第二天（2026-10-22 用户反馈"看不懂、容易误解"）。
+  //      同一天则只在起点标一次日期，避免重复占宽度（手机上这行只有 ~317px）。
+  function formatRangeBound(ts, withDate) {
+    const hm = formatShortTime(ts);
+    if (!withDate || !Number.isFinite(ts) || ts <= 0) return hm;
+    const d = new Date(ts * 1000);
+    const pad2 = (n) => String(n).padStart(2, '0');
+    return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${hm}`;
+  }
 
-     const latest = records[records.length - 1];
-     const first = records[0];
-     els.trendRangeText.textContent = `Time Range: ${formatShortTime(first.timestamp)} - ${formatShortTime(latest.timestamp)}`;
-   }
+  function updateTrendSummary(records) {
+    if (!records || !records.length) {
+      els.trendRangeText.textContent = 'No data available';
+      return;
+    }
+
+    // 中文：范围文案跟着**可视窗口**走。窗口化之后若仍显示首末记录，用户会以为
+    //      图上铺的是 24h，其实只画了 6h（拖到中间时差得更多）。
+    //      窗口盖住全部数据时退化成原来的写法，不带跨度后缀。
+    const g = state.trendGeom;
+    const first = records[0].timestamp;
+    const latest = records[records.length - 1].timestamp;
+    const winStart = (g && Number.isFinite(g.winStart)) ? g.winStart : first;
+    const winEnd = (g && Number.isFinite(g.winEnd)) ? g.winEnd : latest;
+    const sameDay = Number.isFinite(winStart) && Number.isFinite(winEnd)
+      && new Date(winStart * 1000).toDateString() === new Date(winEnd * 1000).toDateString();
+    const startTxt = formatRangeBound(winStart, true);
+    const endTxt = formatRangeBound(winEnd, !sameDay);
+    if (winStart <= first + 1 && winEnd >= latest - 1) {
+      els.trendRangeText.textContent = `Time Range: ${startTxt} - ${endTxt}`;
+      return;
+    }
+    const span = winEnd - winStart;
+    const label = span >= 3600 ? `${Math.round(span / 3600)}h` : `${Math.max(1, Math.round(span / 60))}m`;
+    els.trendRangeText.textContent = `Time Range: ${startTxt} - ${endTxt} · ${label}`;
+  }
+
+  // 中文：只有"离开了最新那一屏"才露出 Latest 胶囊——默认不占版面（手机上一行空隙都金贵），
+  //      拖走或缩放之后才出现；点它回到"最新 + 默认 6h"。
+  function syncTrendLatestChip() {
+    if (!els.trendLatestBtn) return;
+    const v = state.trendView;
+    const show = !v.follow || v.spanSec !== TREND_VIEW_SPAN_DEFAULT;
+    els.trendLatestBtn.classList.toggle('hidden', !show);
+  }
  
-   /**
-    * 趋势图（5条历史记录）：温度(左轴,℃) + 湿度(右轴,%，固定0~100)。
-    * 为避免遮挡，关键数值放在图下统计区，不在曲线上堆叠标签。
-    */
+  /**
+   * 24h 趋势图：温度(左轴) + 湿度(右轴,%，固定 0~100)。
+   * 为避免遮挡，关键数值放在图下统计区，不在曲线上堆叠标签。
+   *
+   * x 轴是**可视窗口**（state.trendView）而不是全部 144 条：默认只画最近 6h，
+   * 左右拖动看更早的数据，手势见下方的 pointer/wheel 绑定。
+   */
    function drawChart(records) {
      const canvas = els.trendChart;
      if (!canvas || !records || !records.length) return;
 
-     const dpr = window.devicePixelRatio || 1;
-     const w = Math.max(280, canvas.clientWidth || canvas.parentElement.clientWidth || 280);
-     const compact = w < 420 || isMobileViewport();
-     const h = compact ? 240 : 228;
-     canvas.width = w * dpr;
-     canvas.height = h * dpr;
-     const ctx = canvas.getContext('2d');
-     ctx.scale(dpr, dpr);
-     ctx.clearRect(0, 0, w, h);
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(280, canvas.clientWidth || canvas.parentElement.clientWidth || 280);
+    const compact = w < 420 || isMobileViewport();
+    // 中文：画布高度取自 CSS（HTML 里两个面板同为 h-56 sm:h-60 = 224/240px），
+    //      不再硬编码 240/228——旧写法与 CSS 容器高度对不上，canvas 被 CSS 拉伸缩放
+    //      → 线虚、字糊；更糟的是两个图各写一份高度，改一处就"两个 tab 图不一样大"。
+    //      现在 CSS 是唯一尺寸真相，改 HTML 一处即两图同步。
+    const h = Math.max(200, canvas.clientHeight || (compact ? 240 : 228));
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
 
-     const padTop = compact ? 16 : 20;
-     const padBottom = compact ? 38 : 42;
-     const padLeft = compact ? 34 : Math.max(38, w * 0.10);
-     const padRight = compact ? 34 : Math.max(38, w * 0.10);
+    // 中文：内边距与日均图 drawMultiSeriesChart 取同一套（CHART_PAD_*），
+    //      切换 24h / 7D / 30D 时 X 轴刻度线、绘图区上下沿都在同一高度，不会跳。
+    const padTop = CHART_PAD_TOP;
+    const padBottom = CHART_PAD_BOTTOM;
+    const padLeft = compact ? CHART_PAD_LEFT_COMPACT : CHART_PAD_LEFT_WIDE;
+    const padRight = padLeft;   // 双轴视图：右侧要给湿度刻度留同样宽度
      const plotW = w - padLeft - padRight;
      const plotH = h - padTop - padBottom;
 
+     // ── 可视窗口（x 轴范围）──
+     // 中文：144 条 × 10min 铺满 24h 时，手机 ~230px 的绘图区里每条只摊到 1.6px，
+     //      点全挤成一条毛毛虫、最近几小时的走势反而看不清。改成"只画窗口内这一段"，
+     //      默认 6h（≈36 条，每条 ~6px），手指左右拖平移（手势见下方 pointer/wheel 绑定）。
+     const n = records.length;
+     const dataFirst = records[0].timestamp;
+     const dataLast = records[n - 1].timestamp;
+     const dataSpan = Math.max(1, dataLast - dataFirst);
+     const view = state.trendView;
+     if (view.follow || !Number.isFinite(view.endTs)) view.endTs = dataLast;
+     // 窗口比数据还宽时收缩到数据跨度：只有 3 条记录的新设备不该被摊到 6 小时宽
+     const spanSec = Math.round(Math.min(view.spanSec, Math.max(dataSpan * 1.1, 120)));
+     // 右边界钳在 [最早一条 + span, 最新一条]：拖到头就停，不会拖出纯空白区
+     const minEnd = Math.min(dataFirst + spanSec, dataLast);
+     // 中文：取整到秒——拖动时是 px→秒 的浮点换算，留小数会让窗口边界与记录时间戳
+     //      永远差 0.1s，比较"是否回到最新"之类的 ±1s 判据变得很脆
+     const endTs = Math.round(Math.min(Math.max(view.endTs, minEnd), dataLast));
+     const winStart = endTs - spanSec;
+     view.endTs = endTs;
+
+     // 窗口内可见的记录（visStart..visEnd 为下标半开区间）；整段落在断档里时退回最近一条
+     let visStart = 0;
+     while (visStart < n && records[visStart].timestamp < winStart) visStart++;
+     let visEnd = visStart;
+     while (visEnd < n && records[visEnd].timestamp <= endTs) visEnd++;
+     if (visEnd === visStart) {
+       let best = 0, bestD = Infinity;
+       for (let i = 0; i < n; i++) {
+         const d = Math.min(Math.abs(records[i].timestamp - winStart), Math.abs(records[i].timestamp - endTs));
+         if (d < bestD) { bestD = d; best = i; }
+       }
+       visStart = best;
+       visEnd = best + 1;
+     }
+     // 绘制范围两侧各带一个窗口外的点：线段能画到边界之外，裁剪后不会在边缘突然断头
+     const drawStart = Math.max(0, visStart - 1);
+     const drawEnd = Math.min(n, visEnd + 1);
+
      const temps = records.map(r => tempVal(r.temp));
      const hums = records.map(r => r.hum);
-     const tRange = niceRange(Math.min(...temps), Math.max(...temps));
+     // 中文：纵轴量程只按**窗口内**的点算。用全量 min/max 时，窗口里只有一条平线
+     //      也会被 24h 的极值压扁成一条直线——和"看不清"是同一个问题。
+     const visTemps = temps.slice(visStart, visEnd);
+     let tRange = niceRange(Math.min(...visTemps), Math.max(...visTemps));
+     // 中文：最小可视跨度。夜间 6h 土壤温度可能只摆动 0.4℃，按 20% 留白放大后
+     //      0.01℃ 的量化噪声会被画成锯齿；至少给 1.5（当前温度单位）保留真实起伏。
+     if (tRange.hi - tRange.lo < 1.5) {
+       const mid = (tRange.lo + tRange.hi) / 2;
+       tRange = { lo: mid - 0.75, hi: mid + 0.75 };
+     }
      const hLo = 0;
      const hHi = 100;
 
@@ -765,82 +1271,153 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      drawYAxisTicks(ctx, tRange.lo, tRange.hi, padTop, plotH, padLeft - 6, 'right', '#f59e0b', v => v.toFixed(1));
      drawYAxisTicks(ctx, hLo, hHi, padTop, plotH, w - padRight + 6, 'left', '#0ea5e9', v => v.toFixed(0));
 
-     if (records.length < 2) {
-       const x = padLeft + plotW / 2;
-       const yT = padTop + (1 - (temps[0] - tRange.lo) / (tRange.hi - tRange.lo)) * plotH;
-       const yH = padTop + (1 - (hums[0] - hLo) / (hHi - hLo)) * plotH;
-       ctx.beginPath();
-       ctx.arc(x, yT, compact ? 4 : 5, 0, Math.PI * 2);
-       ctx.fillStyle = '#fff';
-       ctx.fill();
-       ctx.lineWidth = 2;
-       ctx.strokeStyle = '#f59e0b';
-       ctx.stroke();
-       ctx.beginPath();
-       ctx.arc(x, yH, compact ? 4 : 5, 0, Math.PI * 2);
-       ctx.fillStyle = '#fff';
-       ctx.fill();
-       ctx.strokeStyle = '#0ea5e9';
-       ctx.stroke();
-       return;
-     }
+    // 中文：X 轴按真实时间定位，且映射的是**可视窗口**而不是首末记录：
+    //      旧实现 xOf = (ts - t0) / (t1 - t0) 一屏铺满全部 24h，采样均匀时看着还行，
+    //      但设备重启 / 清空 / 深睡造成几小时断档时，断档会被画成和正常 10 分钟间隔一样宽，
+    //      点越多越假；而窗口映射下断档自然表现为空白，且能靠拖动看清局部。
+    const xOf = (ts) => padLeft + ((ts - winStart) / spanSec) * plotW;
 
-     const stepX = plotW / (records.length - 1);
+    // 断档判定：超过"中位采样间隔 ×3"且至少 30 分钟才断线，避免正常抖动把曲线切碎。
+    // 中位间隔只统计绘制范围内的点——否则全量里的断档会把中位数抬高，窗口内的小断档被吞掉
+    const deltas = [];
+    for (let i = drawStart + 1; i < drawEnd; i++) {
+      deltas.push(records[i].timestamp - records[i - 1].timestamp);
+    }
+    const sortedDeltas = [...deltas].sort((a, b) => a - b);
+    const medDelta = sortedDeltas.length ? sortedDeltas[Math.floor(sortedDeltas.length / 2)] : 0;
+    const gapLimit = Math.max(medDelta * 3, 1800);
+    const segs = [[drawStart]];
+    for (let i = drawStart + 1; i < drawEnd; i++) {
+      if (records[i].timestamp - records[i - 1].timestamp > gapLimit) segs.push([i]);
+      else segs[segs.length - 1].push(i);
+    }
 
      const plotSeries = (vals, color, lo, hi, fillArea) => {
-       if (fillArea) {
+       // 中文：整库只有一条记录（刚 Clear / 新设备第一条采样）时，画不出"线"，
+       //      旧的落点只是一个空心小圆，用户反馈"温度是一个点不是长条"。
+       //      改成横贯绘图区的"保持线"：值不变时这条线就是它的全部历史，
+       //      真实采样时刻仍由下方 markFocusPoint 的圆点标出。
+       if (n === 1) {
+         const y = padTop + (1 - (vals[0] - lo) / (hi - lo)) * plotH;
          ctx.beginPath();
-         vals.forEach((v, i) => {
-           const x = padLeft + i * stepX;
-           const y = padTop + (1 - (v - lo) / (hi - lo)) * plotH;
-           i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-         });
-         ctx.lineTo(padLeft + (vals.length - 1) * stepX, padTop + plotH);
-         ctx.lineTo(padLeft, padTop + plotH);
-         ctx.closePath();
-         ctx.fillStyle = `${color}12`;
-         ctx.fill();
-       }
-
-       ctx.beginPath();
-       ctx.strokeStyle = color;
-       ctx.lineWidth = compact ? 2.2 : 2.5;
-       ctx.lineJoin = 'round';
-       ctx.lineCap = 'round';
-       vals.forEach((v, i) => {
-         const x = padLeft + i * stepX;
-         const y = padTop + (1 - (v - lo) / (hi - lo)) * plotH;
-         i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-       });
-       ctx.stroke();
-
-       vals.forEach((v, i) => {
-         const x = padLeft + i * stepX;
-         const y = padTop + (1 - (v - lo) / (hi - lo)) * plotH;
-         ctx.beginPath();
-         ctx.arc(x, y, compact ? 3.2 : 4, 0, Math.PI * 2);
-         ctx.fillStyle = '#fff';
-         ctx.fill();
-         ctx.lineWidth = compact ? 2 : 2.2;
          ctx.strokeStyle = color;
+         ctx.lineWidth = compact ? 2.2 : 2.5;
+         ctx.lineCap = 'round';
+         ctx.moveTo(padLeft, y);
+         ctx.lineTo(padLeft + plotW, y);
          ctx.stroke();
+       }
+       segs.forEach((seg) => {
+         // 面积填充按段闭合：断档两侧各自成块，不跨断档拉直线
+         if (fillArea && seg.length > 1) {
+           ctx.beginPath();
+           seg.forEach((i, k) => {
+             const x = xOf(records[i].timestamp);
+             const y = padTop + (1 - (vals[i] - lo) / (hi - lo)) * plotH;
+             k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+           });
+           ctx.lineTo(xOf(records[seg[seg.length - 1]].timestamp), padTop + plotH);
+           ctx.lineTo(xOf(records[seg[0]].timestamp), padTop + plotH);
+           ctx.closePath();
+           ctx.fillStyle = `${color}12`;
+           ctx.fill();
+         }
+
+         if (seg.length > 1) {
+           ctx.beginPath();
+           ctx.strokeStyle = color;
+           ctx.lineWidth = compact ? 2.2 : 2.5;
+           ctx.lineJoin = 'round';
+           ctx.lineCap = 'round';
+           seg.forEach((i, k) => {
+             const x = xOf(records[i].timestamp);
+             const y = padTop + (1 - (vals[i] - lo) / (hi - lo)) * plotH;
+             k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+           });
+           ctx.stroke();
+         }
+
+        // 中文：数据点标记按"像素间距"决定画法。点密集（间距 < ~3 倍标记直径）时
+        //      逐点画圈会互相重叠成"毛毛虫"，段边界标记也会在图中间冒出圆圈，
+        //      此时整条曲线只在窗口内最新那个点上画一个标记；稀疏或单点段逐点标记。
+        const markerR = compact ? 3.2 : 4;
+        const xFirst = xOf(records[seg[0]].timestamp);
+        const xLast = xOf(records[seg[seg.length - 1]].timestamp);
+        const spacing = seg.length > 1 ? (xLast - xFirst) / (seg.length - 1) : Infinity;
+        const dense = spacing < markerR * 6;
+        // 中文：密集时不在段内画标记，统一由下面的 markFocusPoint 补画（不受裁剪影响）
+        const markIdx = dense ? [] : seg;
+        markIdx.forEach((i) => {
+          const x = xOf(records[i].timestamp);
+          const y = padTop + (1 - (vals[i] - lo) / (hi - lo)) * plotH;
+          ctx.beginPath();
+          ctx.arc(x, y, markerR, 0, Math.PI * 2);
+          ctx.fillStyle = '#fff';
+          ctx.fill();
+          ctx.lineWidth = compact ? 2 : 2.2;
+          ctx.strokeStyle = color;
+          ctx.stroke();
+        });
        });
      };
 
+     // 中文：曲线/面积全部裁到绘图区内。窗口化之后，两侧各有一个"窗口外的点"用来
+     //      让线段延伸到边界，不裁剪的话它会画到左右刻度槽里（压在 Y 轴数字上）。
+     ctx.save();
+     ctx.beginPath();
+     ctx.rect(padLeft, padTop, plotW, plotH);
+     ctx.clip();
      plotSeries(hums, '#0ea5e9', hLo, hHi, true);
      plotSeries(temps, '#f59e0b', tRange.lo, tRange.hi, false);
+     ctx.restore();
 
+     // 中文：窗口内最新点的标记补画在裁剪区外。它经常正好贴着绘图区右边界
+     //      （默认视图就是"贴着最新一条"），裁剪会把圆切掉一半，看着像断头；
+     //      标记只有 3~4px，越界一点点也压不到刻度数字。
+     const markFocusPoint = (i, vals, color, lo, hi) => {
+       const x = xOf(records[i].timestamp);
+       const y = padTop + (1 - (vals[i] - lo) / (hi - lo)) * plotH;
+       ctx.beginPath();
+       ctx.arc(x, y, compact ? 3.2 : 4, 0, Math.PI * 2);
+       ctx.fillStyle = '#fff';
+       ctx.fill();
+       ctx.lineWidth = compact ? 2 : 2.2;
+       ctx.strokeStyle = color;
+       ctx.stroke();
+     };
+     markFocusPoint(visEnd - 1, hums, '#0ea5e9', hLo, hHi);
+     markFocusPoint(visEnd - 1, temps, '#f59e0b', tRange.lo, tRange.hi);
+
+     // 中文：X 轴刻度用"本地整点刻度"，且在**窗口内**生成。
+     //      旧实现按 i % skip 抽标签，跳过的记录数与真实时间无关，点一多标签就和曲线对不上。
      ctx.fillStyle = '#94a3b8';
      ctx.font = compact ? '8.5px sans-serif' : '9px sans-serif';
-     ctx.textAlign = 'center';
      ctx.textBaseline = 'top';
-     const maxLabels = Math.max(2, Math.floor(plotW / (compact ? 50 : 56)));
-     const skip = records.length > maxLabels ? Math.ceil(records.length / maxLabels) : 1;
-     records.forEach((r, i) => {
-       if (i % skip !== 0 && i !== records.length - 1) return;
-       const x = padLeft + i * stepX;
-       ctx.fillText(formatShortTime(r.timestamp), x, padTop + plotH + 6);
+     const labelY = padTop + plotH + 6;
+     const maxTicks = Math.max(2, Math.floor(plotW / (compact ? 62 : 76)));
+     const stepH = [1, 2, 3, 4, 6, 12].find((hh) => spanSec / (hh * 3600) <= maxTicks) || 12;
+     const ticks = [];
+     for (let tick = Math.ceil(winStart / 3600) * 3600; tick <= endTs; tick += 3600) {
+       if (new Date(tick * 1000).getHours() % stepH !== 0) continue;
+       ticks.push(tick);
+     }
+     // 窗口不足一个整点刻度：退化为首尾标注，避免整条轴只剩一个孤立标签
+     if (ticks.length < 2) { ticks.length = 0; ticks.push(winStart, endTs); }
+     ticks.forEach((ts) => {
+       const x = xOf(ts);
+       // 中文：贴边的标签往内对齐，否则"15:00"会被绘图区右边界切掉半个字
+       ctx.textAlign = (x - padLeft) < 16 ? 'left' : ((padLeft + plotW - x) < 16 ? 'right' : 'center');
+       ctx.fillText(formatShortTime(ts), x, labelY);
      });
+
+     // 中文：把本帧的几何留给手势层与测试（拖动的像素→秒换算、断言窗口区间都用它）
+     canvas._trendLayout = {
+       winStart, winEnd: endTs, spanSec, endTs,
+       padLeft, plotW, dataFirst, dataLast,
+       follow: view.follow, visible: visEnd - visStart,
+     };
+     state.trendGeom = canvas._trendLayout;
+     syncTrendLatestChip();
    }
 
     /**
@@ -850,7 +1427,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     function drawMultiSeriesChart(canvas, series, options = {}) {
       const dpr = window.devicePixelRatio || 1;
       const w = Math.max(280, canvas.clientWidth || canvas.parentElement.clientWidth || 280);
-      const h = options.height || 200;
+      // 中文：高度以 CSS 容器为准（与 24h 图同一条规则），options.height 只作兜底。
+      //      旧代码用调用处硬编码的 240/228，与 CSS 的 h-56/h-60 对不上，画布被
+      //      拉伸 → 线虚字糊，且与 24h 图各算一套高度，两个 tab 图不一样大。
+      const h = Math.max(200, canvas.clientHeight || options.height || 240);
       canvas.width = w * dpr;
       canvas.height = h * dpr;
       const ctx = canvas.getContext('2d');
@@ -863,15 +1443,27 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       const rightAxis = options.rightAxisIndices || [];
       const dual = rightAxis.length > 0;
 
-      const padTop = 20;
-      const padBottom = 44;
-      const padLeft = Math.max(38, w * 0.10);
-      const padRight = dual ? Math.max(38, w * 0.10) : Math.max(24, w * 0.06);
+      // 中文：与 24h 图 drawChart 共用同一套内边距（CHART_PAD_*）——两张图的 X 轴
+      //      标签基线、绘图区上下沿因此严格同高，切 24h / 7D / 30D 不再跳位。
+      //      左侧只放"刻度数字 + 阈值角标"两列（10px 字号 "28.3" ≈ 21px + 5px 间隙）。
+      const padTop = CHART_PAD_TOP;
+      const padBottom = CHART_PAD_BOTTOM;
+      const padLeft = w < 420 ? CHART_PAD_LEFT_COMPACT : CHART_PAD_LEFT_WIDE;
+      const padRight = dual ? padLeft : CHART_PAD_RIGHT_SINGLE;
       const plotW = w - padLeft - padRight;
       const plotH = h - padTop - padBottom;
 
-      const ranges = series.map(({ values }) => {
-        const min = Math.min(...values), max = Math.max(...values);
+      // 中文：band = 每个点的"取值范围"（日均温度 min–max）。量程必须把它算进去，
+      //      否则极值会被裁到画布外——均值线在 20~25℃ 时，一个 -3℃ 的霜冻极值会画到坐标轴外
+      const bandIdx = options.band ? (options.band.index ?? 0) : -1;
+      const ranges = series.map(({ values }, idx) => {
+        let min = Math.min(...values), max = Math.max(...values);
+        if (idx === bandIdx) {
+          const blo = options.band.lo.filter(Number.isFinite);
+          const bhi = options.band.hi.filter(Number.isFinite);
+          if (blo.length) min = Math.min(min, ...blo);
+          if (bhi.length) max = Math.max(max, ...bhi);
+        }
         return niceRange(min, max);
       });
 
@@ -882,12 +1474,95 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       let rightHi = rightAxis.length ? Math.max(...rightAxis.map(i => ranges[i].hi)) : 1;
       if (options.leftAxisRange) { leftLo = options.leftAxisRange[0]; leftHi = options.leftAxisRange[1]; }
       if (options.rightAxisRange) { rightLo = options.rightAxisRange[0]; rightHi = options.rightAxisRange[1]; }
+      // 中文：自动量程的物理边界（电量 0~100 这类），只夹边界、不改变自适应能力
+      if (options.leftAxisBounds) {
+        leftLo = Math.max(options.leftAxisBounds[0], leftLo);
+        leftHi = Math.min(options.leftAxisBounds[1], leftHi);
+      }
+      // 中文：最小可视跨度——电量这类"1% 量化"的指标，跨度过小会把 1 个 LSB 的
+      //      量化台阶放大成"断崖"。至少给 4 个百分点，噪声不再被戏剧化。
+      if (options.leftAxisMinSpan && leftHi - leftLo < options.leftAxisMinSpan) {
+        const mid = (leftLo + leftHi) / 2;
+        leftLo = mid - options.leftAxisMinSpan / 2;
+        leftHi = mid + options.leftAxisMinSpan / 2;
+        if (options.leftAxisBounds) {
+          if (leftLo < options.leftAxisBounds[0]) { leftHi += options.leftAxisBounds[0] - leftLo; leftLo = options.leftAxisBounds[0]; }
+          if (leftHi > options.leftAxisBounds[1]) { leftLo -= leftHi - options.leftAxisBounds[1]; leftHi = options.leftAxisBounds[1]; }
+        }
+      }
+      if (leftHi - leftLo < 1e-6) leftHi = leftLo + 1;
+
+      // 中文：温度风险区背景——整片高于热害阈值涂淡红、低于霜冻阈值涂淡蓝。
+      //      比"每天一根竖须/一条 min–max 色带"更省心：不需要任何图例，曲线掉进蓝区
+      //      就是要防冻、伸进红区就是要防灼。画在坐标轴框架之前，网格线保持清晰。
+      if (options.band) {
+        const useRight = rightAxis.includes(bandIdx >= 0 ? bandIdx : 0);
+        const zLo = useRight ? rightLo : leftLo;
+        const zHi = useRight ? rightHi : leftHi;
+        const zy = v => padTop + (1 - (v - zLo) / (zHi - zLo)) * plotH;
+        const heat = options.band.heatAbove;
+        const frost = options.band.frostBelow;
+
+        // 阈值线：虚线而非实线，避免和均值线抢注意力；只画在对应色区的边界上
+        const edge = (y, color) => {
+          ctx.save();
+          ctx.setLineDash([4, 3]);
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(padLeft, y);
+          ctx.lineTo(padLeft + plotW, y);
+          ctx.stroke();
+          ctx.restore();
+        };
+
+        ctx.save();
+        if (Number.isFinite(heat) && heat < zHi) {
+          const yEdge = zy(Math.max(zLo, heat));
+          ctx.fillStyle = 'rgba(220,38,38,0.10)';
+          ctx.fillRect(padLeft, padTop, plotW, Math.max(0, yEdge - padTop));
+          edge(yEdge, 'rgba(220,38,38,0.45)');
+          // 阈值数值不画在图内：最新的竖条正好落在右侧、左缘也被首日条压住，
+          // 改成摘要头右侧的固定图例（见 updateDailyZoneLegend）
+        }
+        if (Number.isFinite(frost) && frost > zLo) {
+          const yEdge = zy(Math.min(zHi, frost));
+          ctx.fillStyle = 'rgba(2,132,199,0.10)';
+          ctx.fillRect(padLeft, yEdge, plotW, Math.max(0, padTop + plotH - yEdge));
+          edge(yEdge, 'rgba(2,132,199,0.45)');
+        }
+        ctx.restore();
+      }
 
       drawAxisFrame(ctx, padTop, padLeft, padRight, w, plotH);
 
       const leftColor = options.leftAxisColor || '#64748b';
       const leftFmt = options.leftAxisFormatter || (v => v.toFixed(1));
-      drawYAxisTicks(ctx, leftLo, leftHi, padTop, plotH, padLeft - 6, 'right', leftColor, leftFmt);
+      // 中文：阈值角标（≥35.0 红 / ≤2.0 蓝）与刻度数字同列，先算出它们的 y，
+      //      再交给刻度绘制做"让位"——阈值贴近某个刻度时，那个灰色刻度干脆不画，
+      //      由彩色角标顶替。这样永远不会出现两行字叠在一起（旧做法是挪 7px，
+      //      刻度一多仍然会压住）。
+      const thMarks = [];
+      if (options.band && !dual) {
+        const pushMark = (val, color, prefix) => {
+          if (!Number.isFinite(val) || val <= leftLo || val >= leftHi) return;
+          thMarks.push({
+            y: padTop + (1 - (val - leftLo) / (leftHi - leftLo)) * plotH,
+            color,
+            text: `${prefix}${val.toFixed(1)}`,
+          });
+        };
+        pushMark(options.band.heatAbove, '#dc2626', '≥');
+        pushMark(options.band.frostBelow, '#0284c7', '≤');
+      }
+      drawYAxisTicks(ctx, leftLo, leftHi, padTop, plotH, padLeft - 6, 'right', leftColor, leftFmt, thMarks.map(m => m.y));
+      thMarks.forEach(({ y, color, text }) => {
+        ctx.font = 'bold 8px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = color;
+        ctx.fillText(text, padLeft - 6, y);
+      });
 
       if (dual) {
         const rightColor = options.rightAxisColor || '#64748b';
@@ -895,13 +1570,61 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         drawYAxisTicks(ctx, rightLo, rightHi, padTop, plotH, w - padRight + 6, 'left', rightColor, rightFmt);
       }
 
+      // 中文：只有一天数据（Clear 后 / 刚上电）时，温度仍要画"当日区间竖条"。
+      //      旧实现在这里直接画圆点后 return，把 min–max 圆头竖条整段跳过了，
+      //      于是"温度只有一个点"，与多天视图的语义（条的高低端 = 当日最低/最高）
+      //      对不上；湿度/电量是单值系列，画横贯绘图区的"保持线"+正中圆点。
+      //      竖条画在绘图区正中；当日 min==max 时条没有长度，补到 MIN_BAR_PX
+      //      让它仍是一条圆头短条，而不是退化成一个点。
       if (len < 2) {
         const x = padLeft + plotW / 2;
+        let barDrawn = false;
+        if (options.band && bandIdx >= 0) {
+          const useRight = rightAxis.includes(bandIdx);
+          const lo = useRight ? rightLo : leftLo;
+          const hi = useRight ? rightHi : leftHi;
+          const yOf = v => padTop + (1 - (v - lo) / (hi - lo)) * plotH;
+          const bLo = options.band.lo?.[0];
+          const bHi = options.band.hi?.[0];
+          if (Number.isFinite(bLo) && Number.isFinite(bHi)) {
+            let yTop = Math.min(yOf(bHi), yOf(bLo));
+            let yBot = Math.max(yOf(bHi), yOf(bLo));
+            const MIN_BAR_PX = 8;
+            if (yBot - yTop < MIN_BAR_PX) {
+              const mid = (yTop + yBot) / 2;
+              yTop = mid - MIN_BAR_PX / 2;
+              yBot = mid + MIN_BAR_PX / 2;
+            }
+            const { color: barColor } = series[bandIdx] || {};
+            ctx.save();
+            ctx.strokeStyle = barColor || '#f59e0b';
+            ctx.lineCap = 'round';
+            ctx.lineWidth = 7;     // 与多天视图的条宽上限一致（stepX 大时封顶 7）
+            ctx.beginPath();
+            ctx.moveTo(x, yTop);
+            ctx.lineTo(x, yBot);
+            ctx.stroke();
+            ctx.restore();
+            barDrawn = true;
+          }
+        }
         series.forEach(({ values, color }, idx) => {
+          // 区间竖条已表达该系列时不再叠圆点；band 存在但极值无效（barDrawn=false）
+          // 时不能跟着跳过——旧代码这里会让温度整段消失，一个像素都不画。
+          if (idx === bandIdx && barDrawn) return;
           const useRight = rightAxis.includes(idx);
           const lo = useRight ? rightLo : leftLo;
           const hi = useRight ? rightHi : leftHi;
           const y = padTop + (1 - (values[0] - lo) / (hi - lo)) * plotH;
+          // 中文：单值系列（湿度/电量）与 24h 图同一套语言——横贯绘图区的
+          //      "保持线"表达"这一段里值没变过"，圆点只落在该天正中的位置上，
+          //      不再是一条孤零零的点。
+          ctx.beginPath();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2.2;
+          ctx.moveTo(padLeft, y);
+          ctx.lineTo(padLeft + plotW, y);
+          ctx.stroke();
           ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2);
           ctx.fillStyle = '#fff'; ctx.fill();
           ctx.lineWidth = 2; ctx.strokeStyle = color; ctx.stroke();
@@ -912,7 +1635,76 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       const stepX = plotW / (len - 1);
       const allLabels = [];
 
+      // 中文：点击/tap 选日（Apple Health 式）。把本次布局存到 canvas 上，
+      //      外部点击处理器用它把 offsetX 换算成天序号，无需重复推算内边距
+      canvas._chartLayout = { padLeft, plotW, stepX, len };
+      const selIdx = Number.isInteger(options.selIdx) ? options.selIdx : len - 1;
+
+      // 中文：选中日竖细线对三种指标都画——温度靠它指出"当前是哪个柱子"，
+      //      湿度/电量（只有单值、没有区间柱）靠它指出"摘要头显示的是哪一天"，
+      //      点选交互的视觉语言保持一致。画在最底层，不遮数据。
+      //      三个维度区分于坐标轴（用户反馈"像坐标轴"，2026-10-22）：紫色 #7c3aed
+      //      （轴框是灰 #cbd5e1；橙/蓝/绿已被三个指标占用，紫是唯一无主色）、
+      //      虚线（轴框是实线）、上下各内缩 3px 不顶格——默认选中最后一天时
+      //      线正贴绘图区右缘，同色顶格会被当成"右边框/右轴"。底端补一个
+      //      小圆点端帽，一眼看出是"指针"而不是边框。
+      if (Number.isInteger(options.selIdx) && options.selIdx >= 0 && options.selIdx < len) {
+        const hx = padLeft + options.selIdx * stepX;
+        ctx.save();
+        ctx.strokeStyle = '#7c3aed';
+        ctx.setLineDash([3, 3]);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(hx, padTop + 3);
+        ctx.lineTo(hx, padTop + plotH - 3);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.arc(hx, padTop + plotH - 3, 2, 0, Math.PI * 2);
+        ctx.fillStyle = '#7c3aed';
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // 中文：min–max 画成 Apple Health 健康数据那种"圆头竖条"——每天一根，
+      //      条的两端即当天最低/最高。圆头粗条自带"这是一段范围"的语义，
+      //      不需要图例；均值即条的中点，不再叠折线（叠线会和条互相打架）。
+      //      画在网格之后、无系列线遮挡，选中日加一条浅灰竖细线做指示。
+      if (options.band) {
+        const useRight = rightAxis.includes(bandIdx >= 0 ? bandIdx : 0);
+        const lo = useRight ? rightLo : leftLo;
+        const hi = useRight ? rightHi : leftHi;
+        const yOf = v => padTop + (1 - (v - lo) / (hi - lo)) * plotH;
+        const { lo: bLo, hi: bHi } = options.band;
+        const xOf = i => padLeft + i * stepX;
+
+        ctx.save();
+        const { color: barColor } = series[bandIdx >= 0 ? bandIdx : 0] || {};
+        ctx.strokeStyle = barColor || '#f59e0b';
+        ctx.lineCap = 'round';
+        // 条宽随像素间距伸缩：30D 手机 ~8.6px/天 → 3.6px；7D/桌面 40px+ → 封顶 7px
+        ctx.lineWidth = Math.max(3, Math.min(7, stepX * 0.42));
+        for (let i = 0; i < len; i++) {
+          if (!Number.isFinite(bLo[i]) || !Number.isFinite(bHi[i])) continue;
+          ctx.beginPath();
+          ctx.moveTo(xOf(i), yOf(bHi[i]));
+          ctx.lineTo(xOf(i), yOf(bLo[i]));
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // 中文：rangeBars 模式下，band 系列改用上面的圆头竖条表达，不再画折线+点标记
+      const barsFor = (options.rangeBars && options.band) ? (bandIdx >= 0 ? bandIdx : 0) : -1;
+
+      // 中文：像素密度判定，与 24h 图 drawChart 的点标记同一套口径（间距 < 6 倍
+      //      标记半径即算密）。逐点画 3.5px 圈在密集视图会连成"毛毛虫"，
+      //      密集时点标记只画最末一天（最新读数）；稀疏时维持逐点原样。
+      const markerR = 3.5;
+      const dense = stepX < markerR * 6;
+
       series.forEach(({ values, color }, idx) => {
+        if (idx === barsFor) return;
         const useRight = rightAxis.includes(idx);
         const lo = useRight ? rightLo : leftLo;
         const hi = useRight ? rightHi : leftHi;
@@ -929,11 +1721,21 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         });
         ctx.stroke();
 
-        values.forEach((v, i) => {
+        // 中文：点标记按像素间距决定画法——与 24h 图 drawChart 同一阈值
+        //      （间距 < 6 倍标记半径即密）。密集时逐点画圈会连成"毛毛虫"，
+        //      只在最末点（最新一天）画一个；稀疏时逐点标记。
+        // 中文：密集时除了最新一天，选中的那天也要留一个点——否则点选后摘要头在跳，
+        //      图上却找不到对应数据点（竖细线只指明"哪一天"，点才标出"哪个值"）。
+        const denseIdx = [len - 1];
+        if (Number.isInteger(options.selIdx) && options.selIdx >= 0 && options.selIdx < len - 1) {
+          denseIdx.unshift(options.selIdx);
+        }
+        const markIdx = dense ? denseIdx : values.map((_, i) => i);
+        markIdx.forEach((i) => {
           const x = padLeft + i * stepX;
-          const y = padTop + (1 - (v - lo) / (hi - lo)) * plotH;
+          const y = padTop + (1 - (values[i] - lo) / (hi - lo)) * plotH;
           ctx.beginPath();
-          ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+          ctx.arc(x, y, markerR, 0, Math.PI * 2);
           ctx.fillStyle = '#fff';
           ctx.fill();
           ctx.lineWidth = 2;
@@ -970,9 +1772,15 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         const maxLabels = Math.max(2, Math.floor(plotW / 44));
         const skip = len > maxLabels ? Math.ceil(len / maxLabels) : 1;
         options.xLabels.forEach((label, i) => {
-          if (i % skip !== 0 && i !== len - 1) return;
+          if (i !== len - 1) {
+            if (i % skip !== 0) return;
+            // 末位标签固定要画；skip 抽稀后若倒数第二个正好落在它旁边，让位避免重叠
+            if (i === len - 2 && skip > 1) return;
+          }
           const x = padLeft + i * stepX;
-          ctx.fillText(String(label), x, padTop + plotH + 6);
+          // 中文：首尾标签钳回画布内——padRight 收窄后末位"10/21"再居中会探出右缘被裁
+          const cx = Math.min(w - 14, Math.max(14, x));
+          ctx.fillText(String(label), cx, padTop + plotH + 6);
         });
       }
     }
@@ -982,9 +1790,126 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        const btn = els[cfg.button];
        if (!btn) return;
        const active = state.dailyMetric === metric;
-       btn.className = `daily-metric-btn rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${active ? 'bg-white shadow-sm' : 'text-slate-500'}`;
-       btn.style.color = active ? cfg.color : '';
+       // "卡片切换"样式：每个指标一张卡，选中=线色填充白字，未选=同色浅底。
+       // 视觉语言与顶部中性的 24h/7D/30D 分段控件区分开；按钮颜色即图线颜色
+       btn.className = `daily-metric-btn w-full text-center rounded-xl px-2 py-1.5 text-xs sm:px-2.5 sm:text-sm font-semibold transition ${active ? cfg.onCls : cfg.offCls}`;
+       btn.style.color = '';   // 颜色交给类控制，勿再以 style 覆盖
      });
+   }
+
+   // 中文：24h / 7D / 30D 现在是同一排的三个等权视图按钮（与上方 Temperature / Moisture /
+   //      Refresh 三列同节奏）。"日均"不再是独立 tab——选中 7D/30D 就是进日均视图，
+   //      所以选中态只有一份真相：dailyTabPanel 是否可见 + state.dailyRange。
+   function dailyCan30() {
+     if (state.daily30Char) return true;
+     return Array.isArray(state.lastDailyRecords) && state.lastDailyRecords.length > 7;
+   }
+
+   function daily30BlockReason() {
+     if (state.daily30Char) return '';
+     const n = Array.isArray(state.lastDailyRecords) ? state.lastDailyRecords.length : 0;
+     return n > 0 ? '暂只有 7 天内的日均数据，累积更多或连接新固件后可看 30 天'
+                  : '需固件支持 30 天日均（0xFFED）';
+   }
+
+   // 中文：实际生效的日均区间（30D 不可用时回落到 7D）
+   function activeDailyRange() {
+     return (state.dailyRange === 30 && dailyCan30()) ? 30 : 7;
+   }
+
+   function isDailyView() {
+     return !els.dailyTabPanel.classList.contains('hidden');
+   }
+
+   const CHART_TAB_BASE = 'chart-tab-btn whitespace-nowrap rounded-lg px-2 py-1.5 text-sm font-semibold transition';
+   const CHART_TAB_ON = 'bg-emerald-700 text-white';
+   const CHART_TAB_OFF = 'bg-slate-100 text-slate-500 hover:bg-slate-200';
+
+   function updateChartViewButtons() {
+     const daily = isDailyView();
+     const range = activeDailyRange();
+     const can30 = dailyCan30();
+     if (els.trendTabBtn) {
+       els.trendTabBtn.className = `${CHART_TAB_BASE} ${daily ? CHART_TAB_OFF : CHART_TAB_ON}`;
+       els.trendTabBtn.title = '最近 24 小时的逐条记录';
+     }
+     if (els.dailyRange7Btn) {
+       els.dailyRange7Btn.className = `${CHART_TAB_BASE} ${(daily && range === 7) ? CHART_TAB_ON : CHART_TAB_OFF}`;
+       els.dailyRange7Btn.title = '7 天日均';
+     }
+     if (els.dailyRange30Btn) {
+       els.dailyRange30Btn.className = `${CHART_TAB_BASE} ${(daily && range === 30) ? CHART_TAB_ON : CHART_TAB_OFF}${can30 ? '' : ' opacity-40 cursor-not-allowed'}`;
+       els.dailyRange30Btn.disabled = !can30;
+       els.dailyRange30Btn.title = can30 ? '30 天日均（设备 Flash 日志）' : daily30BlockReason();
+     }
+   }
+
+   function updateDailyNote(range) {
+     if (!els.dailyNote) return;
+     els.dailyNote.textContent = `${range}-day daily average`;
+   }
+
+   // 温度极值文案：图上色带只看得出"每天摆幅"，这行补上窗口内最低/最高那天的确切读数与日期。
+   // 只在温度指标下出现（湿度极值多为浇水尖峰、电池单调下降，都没有阈值型信息）。
+   function updateDailyExtNote(shown, cfg, band) {
+     const el = els.dailyExtNote;
+     if (!el) return;
+     if (cfg.key !== 'temp' || !band) {
+       el.classList.add('hidden');
+       el.textContent = '';
+       return;
+     }
+     let low = null, high = null;
+     shown.forEach((r) => {
+       const t = Number(r.temp);
+       if (!Number.isFinite(t)) return;
+       if (Number.isFinite(r.tempMinD10)) {
+         const v = t + r.tempMinD10 / 10;
+         if (!low || v < low.v) low = { v, r };
+       }
+       if (Number.isFinite(r.tempMaxD10)) {
+         const v = t + r.tempMaxD10 / 10;
+         if (!high || v > high.v) high = { v, r };
+       }
+     });
+     const parts = [];
+     if (low) parts.push(`${low.v <= DAILY_FROST_C ? '❄ ' : ''}Low ${fmtTemp(low.v)} · ${formatMonthDay(low.r.dateEpoch)}`);
+     if (high) parts.push(`${high.v >= DAILY_HEAT_C ? '🔥 ' : ''}High ${fmtTemp(high.v)} · ${formatMonthDay(high.r.dateEpoch)}`);
+    el.textContent = parts.join('    ');
+    el.classList.toggle('hidden', parts.length === 0);
+  }
+
+  // 中文：Apple Health 式摘要头——大号数字给出"选中那天"的读数（温度=min–max 区间），
+  //      其余指标给单值。默认选最新一天，点图中任意天由点击处理器切换。
+  function updateDailyRangeHeader(shown, cfg, band, selIdx) {
+    const card = els.dailyRangeCard;
+    if (!card) return;
+    const r = shown[selIdx];
+    if (!r) { card.classList.add('hidden'); return; }
+    card.classList.remove('hidden');
+    if (els.dailyRangeLabel) els.dailyRangeLabel.textContent = cfg.title;
+    let value = '';
+    let unit = '';
+    if (cfg.key === 'temp' && band && Number.isFinite(band.lo[selIdx]) && Number.isFinite(band.hi[selIdx])) {
+      value = `${band.lo[selIdx].toFixed(1)} – ${band.hi[selIdx].toFixed(1)}`;
+      unit = tempUnitSymbol();
+    } else {
+      let v = Number(r[cfg.key]) || 0;
+      if (cfg.key === 'temp') v = tempVal(v);   // formatValue 期望的是已换算单位前的摄氏度
+      value = cfg.formatValue(v);
+    }
+    if (els.dailyRangeValue) els.dailyRangeValue.textContent = value;
+    if (els.dailyRangeUnit) els.dailyRangeUnit.textContent = unit;
+    if (els.dailyRangeDate) els.dailyRangeDate.textContent = r.dateEpoch ? `· ${formatMonthDay(r.dateEpoch)}` : '';
+  }
+
+  function setDailyRange(range) {
+     if (range !== 7 && range !== 30) return;
+     if (range === 30 && !dailyCan30()) return;
+     state.dailyRange = range;
+     state.dailySelIdx = null;   // 换窗口后选中日重新回到最新一天
+     try { localStorage.setItem(`${CACHE_PREFIX}dailyRange:v1`, String(range)); } catch (_) {}
+     switchChartView('daily');
    }
 
    function updateTempUnitUI() {
@@ -1016,51 +1941,109 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
 
 
    function renderDaily(records) {
+    // 中文：state.lastDailyRecords 存的是"设备给的完整集合"（最多 30 天）——
+    //      切 7D/30D 时不用重新读设备，直接在这里截取要画的那一段
+    //      这里不做任何"按时间戳过滤"：日均记录要么来自设备直读、要么来自缓存，
+    //      两者都是当前该展示的真实数据（清空水位机制已于 2026-10-22 移除）
     records = sanitizeDailyRecords(records);
     state.lastDailyRecords = records;
      const cfg = DAILY_METRICS[state.dailyMetric] || DAILY_METRICS.temp;
      updateDailyMetricButtons();
+     updateChartViewButtons();
 
-     if (!records || !records.length) {
+     // 中文：30D 只在能拿到 30 天数据时可选（新固件 0xFFED 或缓存已超 7 天）
+     const range = activeDailyRange();
+     updateDailyNote(range);
+     const shown = records.slice(-range);
+
+     if (!shown.length) {
        els.dailyEmpty.classList.remove('hidden');
+       els.dailyNote?.classList.add('hidden');
+       if (els.dailyExtNote) { els.dailyExtNote.classList.add('hidden'); els.dailyExtNote.textContent = ''; }
+       if (els.dailyRangeCard) els.dailyRangeCard.classList.add('hidden');
        const ctx = els.dailyChart.getContext('2d');
        if (ctx) ctx.clearRect(0, 0, els.dailyChart.width, els.dailyChart.height);
        return;
      }
 
      els.dailyEmpty.classList.add('hidden');
+     els.dailyNote?.classList.remove('hidden');
 
-     const xLabels = records.map(r => formatMonthDay(r.dateEpoch));
-     let values = records.map(r => Number(r[cfg.key]) || 0);
+     const xLabels = shown.map(r => formatMonthDay(r.dateEpoch));
+     let values = shown.map(r => Number(r[cfg.key]) || 0);
      if (cfg.key === 'temp') values = values.map(tempVal);
+
+     // 中文：温度极值（0xFFEE）。设备存的是"相对当日均值的 0.1℃ 偏移"，
+     //      绝对温度 = 当日均值 + delta/10；单位换算必须在算出绝对值之后再做
+     //      （℉ 是仿射变换，偏移量不能单独换算后相加）。
+     let band = null;
+     if (cfg.key === 'temp') {
+       const bLo = [], bHi = [];
+       let hasExt = false;
+       shown.forEach((r) => {
+         const t = Number(r.temp);
+         const ok = Number.isFinite(t) && Number.isFinite(r.tempMinD10) && Number.isFinite(r.tempMaxD10);
+         if (!ok) { bLo.push(NaN); bHi.push(NaN); return; }
+         hasExt = true;
+         bLo.push(tempVal(t + r.tempMinD10 / 10));
+         bHi.push(tempVal(t + r.tempMaxD10 / 10));
+       });
+       if (hasExt) {
+         band = {
+           lo: bLo,
+           hi: bHi,
+           frostBelow: tempVal(DAILY_FROST_C),
+           heatAbove: tempVal(DAILY_HEAT_C),
+         };
+       }
+     }
+     updateDailyExtNote(shown, cfg, band);
+
+     // 中文：选中日（Apple Health 式点选）。默认最新一天；切换范围后序号可能越界，钳回
+     if (!Number.isInteger(state.dailySelIdx) || state.dailySelIdx < 0 || state.dailySelIdx >= shown.length) {
+       state.dailySelIdx = shown.length - 1;
+     }
+     updateDailyRangeHeader(shown, cfg, band, state.dailySelIdx);
 
      drawMultiSeriesChart(els.dailyChart, [
        { values, color: cfg.color },
      ], {
-       showValueLabels: false,
-       xLabels,
-       height: isMobileViewport() ? 240 : 228,
-       leftAxisRange: cfg.range || undefined,
+      showValueLabels: false,
+      xLabels,
+      // 高度不再在这里指定：与 24h 图一样取自 CSS 容器（见 drawMultiSeriesChart）
+      leftAxisRange: cfg.range || undefined,
+       leftAxisBounds: cfg.bounds || undefined,
+       leftAxisMinSpan: cfg.minSpan || undefined,
        leftAxisColor: cfg.color,
        leftAxisFormatter: cfg.axisFormatter,
+       band,
+       rangeBars: cfg.key === 'temp',
+       selIdx: state.dailySelIdx,
      });
 
      saveDailyRecordsCache(records, state.activeDeviceId);
    }
  
-   function switchChartTab(tab) {
-     const isTrend = tab === 'trend';
+   // 中文：视图切换的唯一入口——'trend'(24h 逐条) / 'daily'(7D、30D 日均)。
+   //      tab 式双按钮 + 面板内的范围控件已合并成顶部一排三个等权按钮，
+   //      所以选中态统一交给 updateChartViewButtons()，这里只负责面板与重绘。
+   function switchChartView(view) {
+     const isTrend = view === 'trend';
      els.trendTabPanel.classList.toggle('hidden', !isTrend);
      els.dailyTabPanel.classList.toggle('hidden', isTrend);
-     els.trendTabBtn.className = `chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-emerald-700 text-white' : 'bg-slate-100 text-slate-500'}`;
-     els.dailyTabBtn.className = `chart-tab-btn flex-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition ${isTrend ? 'bg-slate-100 text-slate-500' : 'bg-emerald-700 text-white'}`;
- 
-     if (isTrend && state.lastRecords) {
-       drawChart(state.lastRecords);
-     } else if (!isTrend && state.lastDailyRecords) {
+     updateChartViewButtons();
+
+     if (isTrend) {
+       if (state.lastRecords) drawChart(state.lastRecords);
+       return;
+     }
+     if (state.lastDailyRecords) {
        renderDaily(state.lastDailyRecords);
-     } else if (!isTrend) {
+     } else {
        updateDailyMetricButtons();
+       updateDailyNote(activeDailyRange());
+       els.dailyEmpty?.classList.remove('hidden');
+       els.dailyNote?.classList.add('hidden');
      }
    }
 
@@ -1082,7 +2065,11 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      const isData = tab === 'data';
      const isGuide = tab === 'guide';
      const isSetting = tab === 'setting';
-     if (isSetting && els.mainTabSettingBtn.disabled) return;  // setting 仅连接后可点
+     if (isSetting && els.mainTabSettingBtn.disabled && !state.otaJustSucceeded) return;  // setting 仅连接后可点（OTA 成功展示期允许程序化切回）
+     // 中文：OTA 升级进行中禁止切离 Setting 页（按钮置灰之外的逻辑兜底，拦截程序化切换）
+     if (state.otaRunning && !isSetting) return;
+     // 中文：用户主动切离 Setting 后，OTA 成功提示使命完成，恢复断链后“切回 Data”的默认行为
+     if (!isSetting) state.otaJustSucceeded = false;
      els.mainTabDataPanel.classList.toggle('hidden', !isData);
      els.mainTabGuidePanel.classList.toggle('hidden', !isGuide);
      els.mainTabSettingPanel.classList.toggle('hidden', !isSetting);
@@ -1101,16 +2088,54 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    }
 
    async function readDaily() {
-     if (!state.dailyChar) return;
-     const val = await state.dailyChar.readValue();
-     const rawRecords = BLEProtocol.parseDailyPacket(val);
-     const records = sanitizeDailyRecords(rawRecords);
-     const dropped = rawRecords.length - records.length;
-     if (dropped > 0) {
-       log(`Daily read filtered ${dropped} invalid record(s)`);
+     let from30 = [];
+     let from7 = [];
+
+     // 7 天（0xFFE3，RAM 环）：与 30 天合并，兜住"当天刚结算、Flash 还没追加"的边界，
+     // 且 RAM 值更新更及时（同一天以它为准）。
+     if (state.dailyChar) {
+       const val = await state.dailyChar.readValue();
+       from7 = BLEProtocol.parseDailyPacket(val);
      }
-     log(`Daily read: ${records.length} day(s)`);
-     renderDaily(records);
+
+    // 30 天（0xFFED，设备 Flash 日志）：一次读 184B 拿最多 30 天，跨掉电/换电池存活。
+    // 包头自带设备时区，不需要再从 0xFFE3 反推（换电池后 0xFFE3 是空的）。
+    if (state.daily30Char) {
+      try {
+        const val = await state.daily30Char.readValue();
+        from30 = BLEProtocol.parseDaily30Packet(val);
+      } catch (err) {
+        log(`Daily30 read failed: ${err.message}`);
+      }
+    }
+
+    // 30 天温度极值（0xFFEE，新固件专有）：124B 单次读完，无需分块。
+    // 旧固件没有该特征 → daily30ExtChar 为 null，静默降级为"只画均值"。
+    let extMap = null;
+    if (state.daily30ExtChar) {
+      try {
+        const val = await state.daily30ExtChar.readValue();
+        const extRecs = BLEProtocol.parseDaily30ExtPacket(val);
+        extMap = new Map(extRecs.map(e => [e.dateEpoch, e]));
+      } catch (err) {
+        log(`Daily30Ext read failed: ${err.message}`);
+      }
+    }
+
+    if (!from30.length && !from7.length && !state.daily30Char && !state.dailyChar) return;
+
+    const merged = mergeDailyRecords(from30, from7);
+    // 中文：极值必须在 merge 之后按 dateEpoch 挂——同日以 0xFFE3(RAM 环) 为准，
+    //      它会整条覆盖 0xFFED 的同一天记录；先挂再 merge 会让最近 7 天的极值被冲掉
+    attachDailyExt(merged, extMap);
+
+    const records = sanitizeDailyRecords(merged);
+    const dropped = merged.length - records.length;
+    if (dropped > 0) {
+      log(`Daily read filtered ${dropped} invalid record(s)`);
+    }
+    log(`Daily read: ${records.length} day(s) (30d=${from30.length}, 7d=${from7.length}, ext=${extMap ? extMap.size : 0})`);
+    renderDaily(records);
    }
  
  
@@ -1166,7 +2191,92 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
        state.pollTimer = null;
      }
    }
- 
+
+  // —— 连接空闲提醒（与固件 SOIL_CONN_IDLE_TIMEOUT_S=240 配合）——
+  // 设备端：240s 内没有任何读写就主动断链回睡眠（省电，防止连上后忘断开）。
+  // web 端：180s 无续命就弹窗倒计时 30s 问"还要不要连着"：
+  //        · 点 Keep connected → 写 0xFFE7 续命，重新计时
+  //        · 点 Let it sleep / 什么都不做让倒计时归零 → **立即断开**
+  //        「问了就得有结果」——弹窗既然带了倒计时，归零就该落地下线，而不是把决定权
+  //        再甩给设备的 240s 超时（那样用户等两分多钟还连着，跟没做这个功能一样）。
+  //        设备侧 240s 仍然保留，覆盖"页面被切后台/被系统杀掉"这类 web 无法执行的情况。
+  // 只有**能清零设备 idle 的写操作**（Refresh/Apply/校准/Clear/改名）成功后才重新计时；
+  // 轮询的读不算（设备端也不认读），否则 5s 一次的轮询会让提醒永远不出现。
+  function clearIdleWatch() {
+    if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
+    if (state.idleTickTimer) { clearInterval(state.idleTickTimer); state.idleTickTimer = null; }
+    hideIdlePrompt();
+  }
+
+  function hideIdlePrompt() {
+    if (els.idlePrompt) els.idlePrompt.classList.add('hidden');
+    if (els.idlePrompt) els.idlePrompt.classList.remove('flex');
+  }
+
+  /** 重新开始 180s 计时。必须在"设备侧 idle 被清零"之后调用，否则提醒会早于设备超时。 */
+  function armIdleWatch() {
+    clearIdleWatch();
+    state.idleSleepExpected = false;
+    if (!state.device?.gatt.connected || state.otaRunning) return;
+    // 页面在后台时不装定时器：隐藏期间不会有人点"保持连接"，装上也只会在恢复时补一次误报；
+    // 隐藏期间设备 240s 自然断，回到前台由 visibilitychange 重新装
+    if (document.visibilityState !== 'visible') return;
+    state.idleTimer = setTimeout(showIdlePrompt, IDLE_WARN_MS);
+  }
+
+  function showIdlePrompt() {
+    state.idleTimer = null;
+    // 到点时若已断开 / 正在 OTA / 页面被隐藏，都不打扰
+    if (!state.device?.gatt.connected || state.otaRunning) return;
+    if (document.visibilityState !== 'visible') return;
+    if (!els.idlePrompt) return;
+    state.idleLeft = IDLE_GRACE_S;
+    els.idleCountdown.textContent = String(state.idleLeft);
+    els.idlePrompt.classList.remove('hidden');
+    els.idlePrompt.classList.add('flex');
+    // 焦点落在主按钮（Let it sleep = 倒计时归零的默认结果）：
+    // 键盘 Enter/空格得到的动作与"不理会"一致，读屏用户也先听到默认选项
+    try { els.idleSleepBtn?.focus({ preventScroll: true }); } catch (_) { /* 老浏览器忽略 */ }
+    state.idleTickTimer = setInterval(() => {
+      state.idleLeft -= 1;
+      if (state.idleLeft > 0) {
+        els.idleCountdown.textContent = String(state.idleLeft);
+        return;
+      }
+      // 倒计时归零 = 用户没做选择：按"默认休眠"处理，立即断开（等同点 Let it sleep）
+      log('Idle countdown expired — no response, disconnecting now');
+      idleSleepNow();
+    }, 1000);
+    log('Idle 3 min — asking whether to keep the link alive');
+  }
+
+  /** 点「Keep connected」：写一次 0xFFE7（固件收到即清零 idle 计时），然后重新计时 */
+  async function idleKeepAlive() {
+    if (!state.device?.gatt.connected || !state.refreshChar) { clearIdleWatch(); return; }
+    els.idleKeepBtn.disabled = true;
+    try {
+      await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Idle keep-alive refresh (0xFFE7)');
+      armIdleWatch();
+      log('Link kept alive (0xFFE7), idle timer restarted');
+    } catch (err) {
+      clearIdleWatch();
+      log(`Keep-alive failed: ${err.message || err}`);
+    } finally {
+      els.idleKeepBtn.disabled = false;
+    }
+  }
+
+  /** 点「Let it sleep」/ 倒计时归零：立即断开，比等设备 240s 超时更省电，也让用户所见即所得 */
+  function idleSleepNow() {
+    clearIdleWatch();
+    state.idleSleepExpected = true;   // 归入"预期内休眠断链"：不当故障处理，状态词仍是 Disconnected
+    log('Idle sleep — disconnecting now');
+    forceDisconnect('idle sleep');
+  }
+
+  els.idleKeepBtn?.addEventListener('click', idleKeepAlive);
+  els.idleSleepBtn?.addEventListener('click', idleSleepNow);
+
    function onDisconnected() {
       // 重入保护：gattserverdisconnected 事件 / 轮询 / forceDisconnect / visibilitychange
       // 可能并发触发，第一个进入的路径执行清理，后续直接返回（避免重复日志/重复复位）
@@ -1175,11 +2285,15 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       if (state.characteristic === null && state.device === null) return;
       state.disconnecting = true;
       try {
+        clearIdleWatch();      // 先收起空闲提醒弹窗/定时器，避免断开后还挂着一个"要不要保持连接"
         stopPolling();         // 先停定时器：防止清理期间轮询再跑一拍（断开后 GATT 报错噪音的来源）
         cancelRefreshWait();   // 若 refresh 正在等待测量结果，断连后立即恢复按钮
         state.otaRunning = false;
         setConnectBusy(false);   // 断开完成：解锁 Connect 按钮
         setOtaUiLock(false);
+        // 中文：休眠断链状态词仍显示 Disconnected——web 主动断开后并不知道设备
+        //      是否真睡了（它按自己的节奏进睡眠），"Asleep" 是替设备下的结论，
+        //      描述不准确；是否预期内断开只在日志里区分（下方 log）。
         setStatus('disconnected');
         syncBatteryPill();
         state.characteristic = null;   // 中文：显式置空，与 device 双 null 闭合幂等条件
@@ -1197,7 +2311,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         state.calibChar = null;
         state.refreshChar = null;
         state.tempOffsetChar = null;
-        state.tempOffsetX10 = 0;
+        state.tempOffsetX100 = 0;
         state.calibStatusChar = null;
         state.otaChar = null;
         state.otaRunning = false;
@@ -1206,7 +2320,9 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
         // 断开后隐藏"已校准"徽标；设备名保留展示（最近一次连接的设备名，不随断开隐藏）
         renderCalibHints(null);
         if (els.devNameStatus) els.devNameStatus.textContent = '';
-        log('Device disconnected');
+        log(state.idleSleepExpected
+          ? 'Device disconnected — idle sleep'
+          : 'Device disconnected');
       } finally {
         state.disconnecting = false;
       }
@@ -1215,7 +2331,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
    // 剪贴板写入（iOS Safari 兼容）：优先 Clipboard API（要求 HTTPS + 在用户手势内调用），
    // 失败或不可用时回退到隐藏 textarea + document.execCommand('copy') 的同步复制方案。
    // standalone（添加到主屏幕的 App 模式）在 iOS 上不支持 Web Bluetooth（beacio 扩展也不注入）。
-   // 此函数用于 showModal 里分流提示用户回 Safari 连接；与 PWA 安装引导无关。
+   // 此函数用于各平台引导弹窗（guideIosStandalone / guideBluefy / guideDesktopChrome）里分流提示用户回 Safari/Chrome 连接；与 PWA 安装引导无关。
    const isStandalone = () =>
      window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
    async function copyTextToClipboard(text) {
@@ -1266,74 +2382,65 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      return m ? parseFloat(m[1].replace(/_/g, '.')) : null;
    }
 
-  // ===== 自研 beacio 检测（2026-09-28 替换原 decide(20) 轮询；beacio.js 已不再加载）=====
-  // 核心事实：扩展运行时才会注入标记/回握手；网页层无法区分"已装未开"与"未装"，
-  // 统一判 not-installed，"已装/未装"靠 window.open 探测 onboarding-start 分流：
-  // 已装被拉起（popup 不加载，load 不触发）→ app 引导开启；未装（popup load 触发：setup.html 加载）
-  // → 关探测标签 + 直接跳 App Store。
+  // ===== 自研 beacio 探测（2026-10-12 重构：移除一次性闩锁缓存，改为按需无状态探测）=====
+  // 核心事实：beacio 是 Safari Web Extension，navigator.bluetooth 由其 content script 注入。
+  // iOS 锁屏时 Safari 挂起页面进程，唤醒后从内存快照恢复页面（不重载、JS 闭包状态保留），
+  // 但扩展桥的注入需要重建——历史上"检测只跑一次、结果长期可信"的闩锁缓存（beacioL /
+  // beacioX / beacioFinalized / beacioDetectStarted）在唤醒后变成陈旧毒药：点 Connect 时
+  // 要么误判"未装 beacio"弹引导，要么调到未就绪的 polyfill 静默失败（蓝牙授权/设备选择器
+  // 弹窗偶现不出现）。现改为点击 Connect 时实时探测：快路径三种官方就绪信号任一命中即真；
+  // 否则 ping/pong + ready 事件等待至多 timeoutMs（覆盖唤醒后扩展桥恢复竞态）。
+  // 无状态：每次调用都是全新探测，settle 时自清理监听与定时器，可安全重复调用。
   const BEACIO_ONBOARDING_START = 'https://link.beacio.com/onboarding-start';
-  let beacioL = false;          // active：扩展注入真 API
-  let beacioX = false;          // installed：标记残留
-  let beacioFinalized = false;  // 检测是否已收尾（≤~1s 握手 + 兜底）
-  let beacioDetectStarted = false;
-
-  function beacioCheckInstalled() {
-    if (beacioX) return true;
+  function probeBeacioReady(timeoutMs = 500) {
     try {
-      if (document.documentElement.dataset.beacioInstalled === 'true') {
-        beacioX = true;
-        return true;
-      }
+      if (document.documentElement.dataset.beacioExtension === 'true') return Promise.resolve(true);
     } catch (e) {}
-    return false;
-  }
-  function beacioMarkActive() {
-    if (beacioL) return;
-    beacioL = true;
-    beacioX = true;
-    try { localStorage.setItem('beacio_seen', JSON.stringify({ ts: Date.now(), v: 1 })); } catch (e) {}
-    beacioFinalize();
-  }
-  function beacioFinalize() {
-    if (beacioFinalized) return;
-    beacioFinalized = true;
-    beacioCheckInstalled();
-  }
-  function beacioState() {
-    return beacioL ? 'active' : beacioX ? 'installed-inactive' : 'not-installed';
-  }
-  function startBeacioDetect() {
-    if (beacioDetectStarted) return;   // 幂等：初始化与 handleConnect 均可安全调用
-    beacioDetectStarted = true;
-    const ua = navigator.userAgent;
-    if (!/iPad|iPhone|iPod/.test(ua) || window.MSStream) return;
-    beacioCheckInstalled();
-    try {
-      if (document.documentElement.dataset.beacioExtension === 'true') { beacioMarkActive(); return; }
-    } catch (e) {}
-    if (navigator.beacio !== undefined) { beacioMarkActive(); return; }
-    window.addEventListener('beacio:extension:ready', beacioMarkActive, { once: true });
-    // ping/pong 握手：nonce 匹配，最多 5 次 ×100ms（对齐官方握手协议）
-    const nonce = 'beacio-ping-' + Date.now() + '-' + Math.random().toString(16).slice(2);
-    const onPong = (e) => {
-      const d = e.detail;
-      if (d && d.nonce === nonce) {
+    if (navigator.beacio !== undefined || navigator.bluetooth) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const nonce = 'beacio-ping-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('beacio:extension:ready', onReady);
         window.removeEventListener('beacio:extension:pong', onPong);
-        beacioMarkActive();
-      }
-    };
-    window.addEventListener('beacio:extension:pong', onPong);
-    let n = 0;
-    const sendPing = () => {
-      n += 1;
-      try { window.dispatchEvent(new CustomEvent('beacio:extension:ping', { detail: { nonce } })); } catch (e) {}
-      if (n >= 5) window.removeEventListener('beacio:extension:pong', onPong);
-      else setTimeout(sendPing, 100);
-    };
-    sendPing();
-    setTimeout(beacioFinalize, 1000);  // 收尾判定
-    setTimeout(beacioFinalize, 3000);  // 绝对兜底
+        clearTimeout(pingTimer);
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const onReady = () => finish(true);
+      const onPong = (e) => {
+        const d = e.detail;
+        if (d && d.nonce === nonce) finish(true);
+      };
+      window.addEventListener('beacio:extension:ready', onReady);
+      window.addEventListener('beacio:extension:pong', onPong);
+      // ping/pong 握手：nonce 匹配，最多 5 次 ×100ms（对齐官方握手协议）
+      let n = 0;
+      let pingTimer = 0;
+      const sendPing = () => {
+        if (settled) return;
+        n += 1;
+        try { window.dispatchEvent(new CustomEvent('beacio:extension:ping', { detail: { nonce } })); } catch (e) {}
+        if (n < 5) pingTimer = setTimeout(sendPing, 100);
+      };
+      pingTimer = setTimeout(sendPing, 0);
+      const timer = setTimeout(() => finish(false), timeoutMs);
+    });
   }
+
+  // 等待 beacio 重新注入（方案A）：后台切回时扩展注入可能被系统挂起，navigator.bluetooth 瞬时不可用。
+  // 重新触发自研握手并等待恢复：① navigator.bluetooth 出现；② beacio:extension:ready 事件；
+  // ③ ping/pong 握手成功（beacioL）。超时未恢复返回 false，由 ensureIosEnv 走正常引导。
+  // 【崩溃修复】2026-10-12 无状态探测重构删除了 startBeacioDetect/beacioL，但本函数仍引用
+  // → 点 Connect 抛 "Can't find variable: startBeacioDetect"（unhandledrejection）。
+  // probeBeacioReady 已覆盖全部等待语义（dataset 注入标记 / navigator.beacio / navigator.bluetooth
+  // 快信号 + beacio:extension:ready 事件 + ping/pong 握手），直接委托即可
+  function waitBeacioActive(timeoutMs) {
+    return probeBeacioReady(timeoutMs);
+  }
+
   function beacioGotoOnboarding() {
     // 双按钮知情分流（替代探测法）：iOS Safari 不允许脚本关闭探测标签（popup.close 被忽略），
     // 探测会在未装时残留 setup.html 标签；改为让用户自述已装/未装，主站页面永不导航走：
@@ -1370,17 +2477,15 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     });
   }
 
-  // 安装引导弹窗：仅兜底场景使用（URL 构造失败等异常，此时无法探测装/未装）。
-  // 复用同一 modal：标题/文案/按钮换成安装指引 + App Store 链接按钮（用户主动点击才跳转）
+  // 安装引导弹窗：仅兜底场景使用（onboarding-start URL 构造失败等异常）。
+  // 复用 showGuideModal：标题/文案/按钮换成安装指引 + App Store 链接（用户主动点击才跳转）
   function beacioShowInstallGuide() {
-    els.modalTitle.textContent = 'Bluetooth needs beacio';
-    els.modalMessage.textContent = 'The beacio Safari extension does not appear to be installed on this iPhone. To connect, install the free beacio extension (iOS 26.2+), then enable it: tap the "aA" icon in the address bar → Manage Extensions → turn on beacio → choose "Allow on Every Website", then refresh this page and tap Connect.';
-    els.modalActionBtn.textContent = 'Install beacio (free)';
-    els.modalActionBtn.href = BEACIO_APPSTORE_URL;
-    els.modalActionBtn.onclick = null;
-    els.modalActionBtn.classList.remove('hidden');
-    els.modal.classList.remove('hidden');
-    els.modal.classList.add('flex');
+    showGuideModal({
+      iconHtml: GUIDE_LOGO_ICON,
+      title: 'Bluetooth needs beacio',
+      message: 'The beacio Safari extension does not appear to be installed on this iPhone or iPad. To connect, install the free beacio extension (iOS/iPadOS 26.2+), then enable it: tap the "aA" icon in the address bar → Manage Extensions → turn on beacio → choose "Allow on Every Website", then refresh this page and tap Connect.',
+      action: { text: 'Install beacio (free)', href: BEACIO_APPSTORE_URL },
+    });
   }
 
   // iOS 上所有浏览器壳都是 WKWebView、UA 都以 Safari 结尾，用排除法识别原生 Safari。
@@ -1391,132 +2496,7 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     return /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|Aviator|Mercury|DuckDuckGo|Bluefy|wv|WebView/i.test(ua);
   }
 
-  function showModal(isIOS, isAndroid) {
-     const ua = navigator.userAgent;
-     // iOS 上所有浏览器壳都是 WKWebView、UA 都以 Safari 结尾，用排除法识别原生 Safari。
-     // beacio 是 Safari 扩展、仅在 Safari 生效，故 beacio 引导弹窗只对原生 Safari 显示，
-     // 防止 Chrome iOS(CriOS)/Firefox(FxiOS)/Edge(EdgiOS) 等其他浏览器也弹 beacio 引导。
-     const isSafari = isNativeSafari();
- 
-     if (isIOS) {
-       els.modalIcon.innerHTML = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
-       if (isStandalone()) {
-         // iOS 添加到主屏幕的 standalone App 模式不支持 Web Bluetooth（beacio 扩展也不注入）。
-         // iOS 平台限制：standalone 无法程序化打开完整 Safari 标签页（target="_blank" 对 scope 内
-         // URL 实测不跳转）。因此退化为最可靠方案：复制链接，指引用户手动去 Safari 打开连接。
-         els.modalTitle.textContent = 'Open in Safari to Connect';
-         els.modalMessage.textContent = `This App mode on iPhone can't use Web Bluetooth. Tap "Copy Link", then open it in the Safari browser and tap Connect there. Tip: if you want to keep this page on your Home Screen, uncheck \"Open as Web App\" when adding it, so it opens in Safari with Bluetooth available.`;
-         els.modalActionBtn.textContent = 'Copy Link';
-         els.modalActionBtn.href = '#';
-         els.modalActionBtn.onclick = async (e) => {
-           e.preventDefault();
-           const copied = await Promise.race([
-             copyTextToClipboard(window.location.href),
-             new Promise((resolve) => setTimeout(() => resolve(false), 400)),
-           ]);
-           els.modalMessage.textContent = copied
-             ? '✅ Link copied. Now open the Safari browser, paste this address in the address bar and tap Connect.'
-             : `Please open Safari and manually enter this address: ${window.location.href}`;
-           els.modalActionBtn.classList.add('hidden');
-         };
-       } else {
-         // beacio Safari 扩展要求 iOS 26.2+；26.2+ 优先引导 beacio（新增分支），
-         // 低于该版本（或版本解析失败）走回原有、稳定的 Bluefy 引导（原逻辑未改动）
-         const iosVer = parseIOSVersion(ua);
-         if (isSafari && iosVer !== null && iosVer >= 26.2) {
-           // 自研 beacio 检测替代原 decide(20) 轮询：主动握手判定（标记/ready/ping-pong，≤1s 收尾）。
-           //   - active（扩展已开启并注入真 API）→ 不弹窗，Connect 走正常 requestDevice；
-           //   - 非 active（已装未开 / 未装，网页层无法区分）→ 弹我们自己的引导弹窗，
-           //     用户点按钮后跳转（onboarding-start 新标签探测：已装拉起 app 引导开启；
-           //     未装 popup load 触发后关探测标签直接跳 App Store，不经过 setup.html 停留）；
-           //     兜底仅用于探测标签被拦截等异常。
-           const showBeacioGuide = () => {
-             els.modalTitle.textContent = 'Bluetooth needs beacio';
-             els.modalMessage.textContent = 'To connect on iPhone, the free beacio Safari extension (iOS 26.2+) must be installed and enabled. Have you installed beacio before? Choose the first option only if you really installed it before — after enabling or installing, return here, refresh the page, and tap Connect again.';
-             beacioGotoOnboarding();
-           };
-           if (beacioState() === 'active') {
-             return;   // beacio 已接管，不显示我们的弹窗
-           }
-           if (beacioFinalized) {
-             showBeacioGuide();
-           } else {
-             // 自研握手尚未收尾（≤~1s）：等待收尾后再决定，active 不弹、否则弹引导
-             let waited = 0;
-             const waitFinal = () => {
-               if (beacioState() === 'active') return;
-               if (beacioFinalized || waited >= 30) { showBeacioGuide(); return; }
-               waited += 1;
-               setTimeout(waitFinal, 100);
-             };
-             waitFinal();
-           }
-           return;     // 不走到末尾的统一显示，由上方决定
-         } else if (iosVer !== null && iosVer >= 26.2) {
-           // 系统 ≥iOS 26.2（支持 beacio 扩展）但当前不是原生 Safari（Chrome iOS / Edge iOS 等）：
-           // beacio 是 Safari 扩展、仅原生 Safari 生效；用 iOS 唤起 Safari 的私有深链 x-safari-https://
-           // 直接切到 Safari 打开当前页面（比"复制链接"更顺滑）。注意该 scheme 非 Apple 公开 API，需真机回归。
-           els.modalTitle.textContent = 'Open in Safari to Connect';
-           els.modalMessage.textContent = 'Your iPhone supports the beacio extension (iOS 26.2+), but this browser does not support Web Bluetooth. Tap "Open in Safari" to switch to the Safari browser and connect.';
-           els.modalActionBtn.textContent = 'Open in Safari';
-           els.modalActionBtn.href = '#';
-           els.modalActionBtn.onclick = (e) => {
-             e.preventDefault();
-             // x-safari-https:// 为 iOS 唤起 Safari 的私有 scheme（iOS 17+）
-             window.location.href = 'x-safari-https://' + window.location.href.replace(/^https?:\/\//i, '');
-           };
-         } else {
-           els.modalTitle.textContent = 'Bluetooth Unavailable in Browser';
-           els.modalMessage.textContent = 'iOS Browser does not support Web Bluetooth. Tap "Open in Bluefy" to continue — the dashboard link will be copied to your clipboard so you can paste it into Bluefy after installing.';
-           els.modalActionBtn.textContent = 'Open in Bluefy';
-           els.modalActionBtn.href = BLUEFY_APPSTORE_URL;
-           els.modalActionBtn.onclick = async (e) => {
-             e.preventDefault();
-             // iOS Safari 只允许在用户手势内写剪贴板，且此刻还无法判断是否已安装 Bluefy，
-             // 因此必须"先复制、后跳转"：已安装 → 深链直接打开 Bluefy 加载 Dashboard；
-             // 未安装 → 回退 App Store，用户装好 Bluefy 后打开它，长按地址栏粘贴剪贴板里
-             // 的地址即可进入本页。加 400ms 超时兜底，避免剪贴板写入异常时卡住深链跳转。
-             const copied = await Promise.race([
-               copyTextToClipboard(window.location.href),
-               new Promise((resolve) => setTimeout(() => resolve(false), 400)),
-             ]);
-             els.modalMessage.textContent = copied
-               ? '✅ Dashboard link copied to clipboard. Opening Bluefy… If it is not installed, you will be taken to the App Store — after installing, open Bluefy and paste the link to continue.'
-               : `After installing Bluefy from the App Store, open it and manually enter this address: ${window.location.href}`;
-
-             const start = Date.now();
-             // 先尝试 Bluefy 深链直接加载 Dashboard；2.5s 后页面仍在前台说明深链未拉起（未安装），
-             // 回退 App Store。已安装时页面被切到后台：pagehide 会清除定时器；即使定时器被系统
-             // 暂停后恢复触发，此时页面已隐藏（document.hidden）或 elapsed 已超 5s，均不会误跳。
-             const fallback = setTimeout(() => {
-               if (!document.hidden && Date.now() - start < 5000) {
-                 window.location.href = BLUEFY_APPSTORE_URL;
-               }
-             }, 2500);
-             window.addEventListener('pagehide', () => clearTimeout(fallback), { once: true });
-             window.location.href = BLUEFY_DEEPLINK;
-           };
-         }
-       }
-       els.modalActionBtn.classList.remove('hidden');
-     } else if (isAndroid) {
-       els.modalIcon.innerHTML = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
-       els.modalTitle.textContent = 'Browser Web Bluetooth Unavailable';
-       // 统一引导：Android 只有 Chrome/Edge（canUseBluetooth 已放行）可直连，其余一律提示开启蓝牙并用 Chrome 打开
-       els.modalMessage.textContent = 'Turn on Bluetooth, then open this page in Google Chrome to connect your sensor.';
-       els.modalActionBtn.textContent = 'Get Chrome on Google Play';
-       els.modalActionBtn.href = 'https://play.google.com/store/apps/details?id=com.android.chrome';
-       els.modalActionBtn.classList.remove('hidden');
-     } else {
-       els.modalIcon.textContent = '💻';
-       els.modalTitle.textContent = 'Web Bluetooth Unavailable';
-       els.modalMessage.textContent = 'Please use Google Chrome to access this site';
-       els.modalActionBtn.classList.add('hidden');
-     }
- 
-     els.modal.classList.remove('hidden');
-     els.modal.classList.add('flex');
-   }
+   // showModal 已移除：平台引导统一由 ensureBluetoothEnv / showGuideModal / guide* 系列处理（见原 canUseBluetooth 位置）
  
 let connectToken = 0;   // 用于丢弃“超时/失败后又迟到成功”的连接，防止幽灵状态
 
@@ -1534,30 +2514,301 @@ function clearConnectError() {
   els.connectErrorText.classList.add('hidden');
 }
 
-   // Android 实测：仅 Chromium 内核的 Chrome / Edge 能可靠拉起 Web Bluetooth，
-   // 其余（Firefox、三星、微信内嵌等）即使 navigator.bluetooth 存在也常为假支持。
-   // 故 Android 下"有 bluetooth 且浏览器可信（Chrome/Edge）"才直连；iOS/桌面有 bluetooth 即可用。
-   function canUseBluetooth() {
-     if (!navigator.bluetooth) return false;
+   // ===== 平台判定与浏览器引导（平台优先重构：全链路只判一次平台，加载/点击共用同一闸门） =====
+
+   // 平台判定：ios / android / desktop。iOS 用排除法（所有 iOS 浏览器壳 UA 都含 Safari，
+   // MSStream 排除旧 Edge）；iPadOS 桌面级 UA（Macintosh，Chrome/Safari 默认"桌面模式"）
+   // 通过触屏信号识别后归入 ios，与 iPhone 走同一套 Safari/beacio/Bluefy 升级引导——
+   // Mac 真机没有触摸屏（maxTouchPoints=0），iPad 触屏 maxTouchPoints≥5，
+   // maxTouchPoints>1 即可无歧义区分。若归入 desktop，iPad Chrome 会弹桌面"Copy Link"
+   // 引导，无法利用 x-safari-https 深链与 beacio/Bluefy 路径，OTA 引导链路断裂。
+   function detectPlatform() {
      const ua = navigator.userAgent;
-     if (/Android/.test(ua)) {
-       const isWeChat = /MicroMessenger/i.test(ua);
-       const isSamsung = /SamsungBrowser/i.test(ua);
-       const isChromium = /(Chrome|Edg)/i.test(ua) && !/wv/i.test(ua) && !/WebView/i.test(ua);
-       return isChromium && !isWeChat && !isSamsung;
-     }
-     return true;
+     if (/iPad|iPhone|iPod/.test(ua) && !window.MSStream) return 'ios';
+     if (/Android/.test(ua)) return 'android';
+     if (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) return 'ios';   // iPadOS 桌面级 UA
+     return 'desktop';
    }
 
-   async function handleConnect() {
-     if (!canUseBluetooth()) {
-       const ua = navigator.userAgent;
-       showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
-       return;
+
+   // UA-CH 品牌精确识别：真实 Chrome 上报 "Google Chrome"、Edge 上报 "Microsoft Edge"，
+   // 其余 Chromium 系浏览器（Brave/Opera/Vivaldi/Arc/微信 XWeb/三星 等）只报自己或 Chromium。
+   // 返回 true/false = 品牌判定结果；null = UA-CH 不可用（旧内核），无法判定品牌。
+   function isTrustedChromiumBrand() {
+     const uad = navigator.userAgentData;
+     if (uad && Array.isArray(uad.brands)) {
+       return uad.brands.some((b) => /^(Google Chrome|Microsoft Edge)$/i.test((b && b.brand) || ''));
      }
-     // 有 Web Bluetooth 时直接连接（Bluefy / beacio active / 桌面等真实 API）。
-     // 无 Web Bluetooth 时由上方 showModal 引导；beacio 未激活不会注入 API（会走上方
-     // !navigator.bluetooth 分支），故无需按浏览器/UA 额外拦截。
+     return null;
+   }
+
+   // 浏览器白名单：Android 与桌面均只信任 Google Chrome / Microsoft Edge。
+   // iOS 的 Safari/Bluefy 判定在 ensureBluetoothEnv 内单独做（本函数只处理 android/desktop）。
+   // 已知第三方浏览器 UA 标记：安卓国产/厂商浏览器全部为 Chromium 内核、UA 同样携带
+   // "Chrome/xxx"，仅凭 /(Chrome|Edg)/ 会误放行 UC / QQ / 夸克 / 小米 / Vivo / OPPO / 华为
+   // 等"假支持"浏览器，须整表排除（新增浏览器时在此追加标记即可）。
+   const THIRD_PARTY_BROWSER_UA_RE = /(MicroMessenger|SamsungBrowser|OPR|Opera|UCBrowser|UCWEB|MQQBrowser|QQBrowser|Quark|baidubrowser|baiduboxapp|MiuiBrowser|VivoBrowser|HeyTapBrowser|HuaweiBrowser|HiBrowser|DuckDuckGo)/i;
+
+   // Android：Chromium 标记 + 排除第三方 + UA-CH 品牌判定，三级过滤
+   function isAllowedAndroidBrowser() {
+     const ua = navigator.userAgent;
+     if (THIRD_PARTY_BROWSER_UA_RE.test(ua)) {
+       log('[gate] android: third-party browser UA → blocked (fake Web Bluetooth)');
+       return false;   // 微信/三星/UC/QQ/小米…假支持
+     }
+     const isChromium = /(Chrome|Edg)/i.test(ua) && !/wv/i.test(ua) && !/WebView/i.test(ua);
+     if (!isChromium) {
+       log('[gate] android: non-Chromium UA → blocked');
+       return false;                                         // Firefox 等非 Chromium
+     }
+     const brand = isTrustedChromiumBrand();
+     log(`[gate] android: UA-CH brand check=${brand}`);      // null（无 UA-CH）= 旧内核回退放行
+     return brand !== false;
+   }
+
+   // 桌面：真实 API（排除 Safari/Firefox）+ 品牌收紧到 Chrome/Edge
+   //（Brave/Opera/Vivaldi/Arc 等有真实 API 但非白名单品牌 → 引导换 Chrome）；
+   // 无 UA-CH 的旧内核 Chromium 回退能力判定放行，避免误杀
+   function isAllowedDesktopBrowser() {
+     if (!navigator.bluetooth) {
+       log('[gate] desktop: no navigator.bluetooth (Safari/Firefox or non-secure context) → blocked');
+       return false;
+     }
+     const brand = isTrustedChromiumBrand();
+     log(`[gate] desktop: UA-CH brand check=${brand}`);      // null（无 UA-CH）= 回退放行
+     return brand !== false;
+   }
+
+   function isBrowserAllowed(platform) {
+     return platform === 'android' ? isAllowedAndroidBrowser() : isAllowedDesktopBrowser();
+   }
+
+   // 兼容性引导弹窗统一渲染：一次调用设置图标/标题/文案/按钮并显示 modal
+   const GUIDE_LOGO_ICON = '<img src="./page/images/alinfancy-logo.svg" alt="logo" class="w-8 h-8 mx-auto" />';
+   function showGuideModal({ iconHtml, title, message, action, hideAction = false }) {
+     if (iconHtml !== undefined) els.modalIcon.innerHTML = iconHtml;
+     els.modalTitle.textContent = title;
+     els.modalMessage.textContent = message;
+     els.modalActionBtn.onclick = null;
+     if (hideAction || !action) {
+       els.modalActionBtn.classList.add('hidden');
+     } else {
+       els.modalActionBtn.textContent = action.text;
+       els.modalActionBtn.href = action.href || '#';
+       els.modalActionBtn.onclick = action.onClick || null;
+       els.modalActionBtn.classList.remove('hidden');
+     }
+     els.modal.classList.remove('hidden');
+     els.modal.classList.add('flex');
+   }
+
+   // 复制 Dashboard 链接（iOS Safari 只允许用户手势内写剪贴板，加 400ms 超时兜底）。
+   // standalone / Bluefy / 桌面三处引导共用。
+   function copyDashboardLink() {
+     return Promise.race([
+       copyTextToClipboard(window.location.href),
+       new Promise((resolve) => setTimeout(() => resolve(false), 400)),
+     ]);
+   }
+
+   // iOS：非原生 Safari（Chrome iOS 等壳）→ x-safari-https 带当前页 URL 跳 Safari（iOS 17+，
+   // 免复制粘贴）。x-safari-https 为 iOS 唤起 Safari 的私有 scheme，需真机回归。
+   function guideIosNonSafari() {
+     showGuideModal({
+       iconHtml: GUIDE_LOGO_ICON,
+       title: 'Open in Safari to Connect',
+       message: 'Your iPhone or iPad does not support Web Bluetooth in this browser. Tap "Open in Safari" to switch to the Safari browser and connect.',
+       action: {
+         text: 'Open in Safari',
+         onClick: (e) => {
+           e.preventDefault();
+           window.location.href = 'x-safari-https://' + window.location.href.replace(/^https?:\/\//i, '');
+         },
+       },
+     });
+   }
+
+   // iOS：standalone（添加到主屏幕的 App 模式）不支持 Web Bluetooth，复制链接引导回 Safari。
+   // iOS 平台限制：standalone 无法程序化打开完整 Safari 标签页，复制链接是最可靠方案。
+   function guideIosStandalone() {
+     showGuideModal({
+       iconHtml: GUIDE_LOGO_ICON,
+       title: 'Open in Safari to Connect',
+       message: `This App mode on iPhone or iPad can't use Web Bluetooth. Tap "Copy Link", then open it in the Safari browser and tap Connect there. Tip: if you want to keep this page on your Home Screen, uncheck "Open as Web App" when adding it, so it opens in Safari with Bluetooth available.`,
+       action: {
+         text: 'Copy Link',
+         onClick: async (e) => {
+           e.preventDefault();
+           const copied = await copyDashboardLink();
+           els.modalMessage.textContent = copied
+             ? '✅ Link copied. Now open the Safari browser, paste this address in the address bar and tap Connect.'
+             : `Please open Safari and manually enter this address: ${window.location.href}`;
+           els.modalActionBtn.classList.add('hidden');
+         },
+       },
+     });
+   }
+
+   // iOS ≥26.2 Safari：beacio 引导（双按钮知情分流，用户自述已装/未装）。
+   // 页面层无法区分"已装未开"与"未装"；且能进入本引导时 beacio 必然未注入（active 时
+   // navigator.bluetooth 已存在、不会走到这里），无需再做握手等待（原 waitFinal 死逻辑已删）。
+   function guideBeacio() {
+     showGuideModal({
+       iconHtml: GUIDE_LOGO_ICON,
+       title: 'Bluetooth needs beacio',
+       message: 'To connect on iPhone or iPad, the free beacio Safari extension (iOS/iPadOS 26.2+) must be installed and enabled. Have you installed beacio before? Choose the first option only if you really installed it before — after enabling or installing, return here, refresh the page, and tap Connect again.',
+       hideAction: true,
+     });
+     beacioGotoOnboarding();
+   }
+
+   // iOS <26.2 Safari：Bluefy 引导。先复制链接，再尝试 bluefy:// 深链直接加载 Dashboard；
+   // 2.5s 后页面仍在前台说明未安装（已安装时 pagehide 清除定时器），回退 App Store。
+   function guideBluefy() {
+     showGuideModal({
+       iconHtml: GUIDE_LOGO_ICON,
+       title: 'Bluetooth Unavailable in Browser',
+       message: 'iOS Browser does not support Web Bluetooth. Tap "Open in Bluefy" to continue — the dashboard link will be copied to your clipboard so you can paste it into Bluefy after installing.',
+       action: {
+         text: 'Open in Bluefy',
+         onClick: async (e) => {
+           e.preventDefault();
+           const copied = await copyDashboardLink();
+           els.modalMessage.textContent = copied
+             ? '✅ Dashboard link copied to clipboard. Opening Bluefy… If it is not installed, you will be taken to the App Store — after installing, open Bluefy and paste the link to continue.'
+             : `After installing Bluefy from the App Store, open it and manually enter this address: ${window.location.href}`;
+           const start = Date.now();
+           const fallback = setTimeout(() => {
+             if (!document.hidden && Date.now() - start < 5000) {
+               window.location.href = BLUEFY_APPSTORE_URL;
+             }
+           }, 2500);
+           window.addEventListener('pagehide', () => clearTimeout(fallback), { once: true });
+           window.location.href = BLUEFY_DEEPLINK;
+         },
+       },
+     });
+   }
+
+   // Android：非 Chrome/Edge → intent:// scheme 拉起 Chrome 并携带当前页 URL（免复制粘贴）；
+   // 未安装 Chrome 时由 S.browser_fallback_url 自动落到 Play 商店页面（无需显式探测安装）。
+   function guideAndroidChrome() {
+     const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.android.chrome';
+     let intentUrl = null;
+     try {
+       const u = new URL(window.location.href);
+       // 去掉 fragment，避免与 #Intent 声明冲突
+       const clean = (u.origin + u.pathname + u.search).replace(/^https?:\/\//i, '');
+       intentUrl = 'intent://' + clean + '#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=' + encodeURIComponent(PLAY_STORE_URL) + ';end';
+     } catch (_) { /* URL 构造失败时退回纯 Play 商店按钮 */ }
+     showGuideModal({
+       iconHtml: GUIDE_LOGO_ICON,
+       title: 'Open in Chrome to Connect',
+       message: intentUrl
+         ? 'This browser does not support Web Bluetooth reliably. Turn on Bluetooth, then tap "Open in Chrome" — this page will open in Chrome automatically. If Chrome is not installed, you will be taken to its Play Store page.'
+         : 'Turn on Bluetooth, then open this page in Google Chrome to connect your sensor.',
+       action: intentUrl
+         ? { text: 'Open in Chrome', onClick: (e) => { e.preventDefault(); window.location.href = intentUrl; } }
+         : { text: 'Get Chrome on Google Play', href: PLAY_STORE_URL },
+     });
+   }
+
+   // 桌面：浏览器沙箱无法探测已装浏览器、也无法带 URL 拉起其他浏览器，
+   // 剪贴板是体验上限：主动写入链接 + 引导用户手动用 Chrome 打开。
+   function guideDesktopChrome() {
+     showGuideModal({
+       iconHtml: '💻',
+       title: 'Web Bluetooth Unavailable',
+       message: 'Please use Google Chrome to access this site. Tap "Copy Link", then paste it in Chrome and connect there.',
+       action: {
+         text: 'Copy Link',
+         onClick: async (e) => {
+           e.preventDefault();
+           const copied = await copyDashboardLink();
+           els.modalMessage.textContent = copied
+             ? '✅ Link copied. Now open Google Chrome, paste this address in the address bar and tap Connect.'
+             : `Please open Google Chrome and manually enter this address: ${window.location.href}`;
+           els.modalActionBtn.classList.add('hidden');
+         },
+       },
+     });
+   }
+
+   // Bluefy（iOS App Store 的 Web BLE 浏览器）：自带真实 Web Bluetooth 实现，UA 含
+   // "Bluefy" 标识、isNativeSafari 会排除它；只要 API 存在即直连，不引导去 Safari。
+   function isBluefy() {
+     return /Bluefy/i.test(navigator.userAgent);
+   }
+
+   // ===== 环境闸门（页面加载与点击 Connect 共用） =====
+   // 返回 true = 环境可直连（进入连接执行层）；false = 已弹出对应平台引导（不应继续连接）。
+   // iOS 判定顺序（Safari 优先 + Bluefy 特判）：② Bluefy 自带真实 API → ③ 原生 Safari?
+   // → ④ navigator.bluetooth（beacio active 注入为真直接放行）→ ⑤ standalone / beacio /
+   // Bluefy 三条路。
+   // iOS 点击 Connect 时的全量判定（②～⑤ 级联；④⑤ 依赖 beacio 注入 / standalone 等
+   // 运行时状态，统一延迟到点击时执行，不在页面加载时判定）
+   // async：④' 的 beacio 注入等待（probeBeacioReady）需要 await；调用方须 await 本函数
+   async function ensureIosEnv() {
+     if (isBluefy() && navigator.bluetooth) { log('[gate] ios: Bluefy + API → direct'); return true; }   // ② Bluefy 直连
+     if (!isNativeSafari()) { log('[gate] ios: non-native-Safari shell → x-safari guide'); guideIosNonSafari(); return false; }   // ③ Safari 优先（iPhone/iPad 同逻辑：iPadOS 17+ 的 x-safari 深链同样可用）
+     if (navigator.bluetooth) { log('[gate] ios: Safari + API (beacio active) → direct'); return true; }   // ④ beacio active 注入 → 直连
+     // ④' 唤醒恢复竞态兜底：锁屏唤醒后 Safari 从内存快照恢复页面，beacio 扩展桥可能尚未
+     // 重新注入 navigator.bluetooth——立即判负会把已装用户误导向 beacio 引导。此处等待至多
+     // 500ms 再判；WebKit transient activation 窗口约 5s，等待不消耗点击手势，
+     // 探测通过后同一次点击链路里的 requestDevice 仍然有效
+     if (await probeBeacioReady(500)) { log('[gate] ios: beacio ready after wait → direct'); return true; }
+     if (isStandalone()) { log('[gate] ios: standalone PWA → copy link guide'); guideIosStandalone(); return false; }
+     // ④' 后台切回时 beacio 注入可能被系统挂起，navigator.bluetooth 瞬时不可用：
+     //     重新触发自研握手并等待 beacio 恢复注入；恢复则直连，超时才走引导，避免误弹安装框。
+     if (await waitBeacioActive(1500)) {
+       log('[gate] ios: beacio recovered (reinject) → direct');
+       return true;
+     }
+     log('[gate] ios: no beacio API after wait → guide');
+     const iosVer = parseIOSVersion(navigator.userAgent);
+     if (iosVer !== null && iosVer >= 26.2) { log(`[gate] ios: v${iosVer} ≥ 26.2 → beacio guide`); guideBeacio(); return false; }
+     log(`[gate] ios: v${iosVer} < 26.2 → Bluefy guide`);
+     guideBluefy();
+     return false;
+   }
+
+   // iOS 页面加载时的轻量判定（beacio 注入时机不定，④⑤ 延迟到点击 Connect）：
+   // 仅识别浏览器——Bluefy（有真实 API）与原生 Safari 放行（页面保持正常，不弹窗不禁用）；
+   // 壳浏览器（Chrome iOS 等）返回 false，由调用方立即引导跳 Safari 并禁用 Connect
+   function checkIosBrowserAtLoad() {
+     if (isBluefy() && navigator.bluetooth) { log('[gate] load ios: Bluefy + API → pass'); return true; }
+     if (isNativeSafari()) { log('[gate] load ios: native Safari → pass（④⑤ 判定延迟到点击 Connect）'); return true; }
+     log('[gate] load ios: non-Safari shell → x-safari guide + disable Connect');
+     return false;
+   }
+
+   // async：iOS 分支（ensureIosEnv）含 beacio 注入等待，调用方必须 await（点击路径）；
+   // 页面加载体检只走 android/desktop 分支（无实际 await 点），也统一包 async IIFE 处理
+   async function ensureBluetoothEnv() {
+     const platform = detectPlatform();
+     log(`[gate] check: platform=${platform} bluetooth=${!!navigator.bluetooth} secure=${window.isSecureContext}`);
+     if (platform === 'ios') return ensureIosEnv();
+     if (platform === 'android') {
+       const allowed = isBrowserAllowed('android');
+       log(`[gate] android: browserAllowed=${allowed}${allowed ? ' → direct' : ' → intent Chrome guide'}`);
+       if (allowed) return true;
+       guideAndroidChrome();
+       return false;
+     }
+     const allowed = isBrowserAllowed('desktop');
+     log(`[gate] desktop: browserAllowed=${allowed}${allowed ? ' → direct' : ' → copy link guide'}`);
+     if (allowed) return true;   // 桌面：仅 Chrome/Edge（UA-CH 品牌判定，旧内核回退能力判定）
+     guideDesktopChrome();
+     return false;
+   }
+
+
+   async function handleConnect() {
+     // 环境闸门（与页面加载共用）：不满足时已弹出对应平台引导，直接返回不进入连接流程
+     // iOS 分支含 beacio 注入等待（最多 500ms），必须 await
+     if (!(await ensureBluetoothEnv())) return;
+     // 通过闸门即代表环境可直连（beacio active 注入 / Android Chrome/Edge / 桌面 Chromium
+     // 等真实 API），无需再按浏览器/UA 额外拦截；未通过时 ensureBluetoothEnv 已弹对应引导。
      const token = ++connectToken;
      clearConnectError();   // 新的连接尝试开始，清除上一次失败的红字提示
      setConnectBusy(true);   // 进入连接流程：锁定 Connect 按钮，防止连接过程中重复点击
@@ -1572,7 +2823,7 @@ function clearConnectError() {
        if (token !== connectToken) return;   // 期间用户又发起了新连接，丢弃本次
 
        // 阶段2：gatt.connect + 服务/特征发现，由 finishConnect 内部保证 5s 超时
-       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
+       const { dataChar, dailyChar, resetChar, calibChar, refreshChar, tempOffsetChar, calibStatusChar, devNameChar, latestChar, hisBlkChar, daily30Char, daily30ExtChar, otaChar, fwVersion } = await BLEProtocol.finishConnect(
          device,
          (records, hex) => {
            log(`Notification: ${hex}`);
@@ -1598,6 +2849,9 @@ function clearConnectError() {
        state.device = device;
        state.characteristic = dataChar;
        state.dailyChar = dailyChar;
+       state.hisBlkChar = hisBlkChar;
+       state.daily30Char = daily30Char;
+       state.daily30ExtChar = daily30ExtChar;
        state.resetChar = resetChar;
        state.calibChar = calibChar;
        state.refreshChar = refreshChar;
@@ -1619,6 +2873,16 @@ function clearConnectError() {
 
        // 设备已连上 GATT 即置 connected：按钮立即可用；notify 订阅移后台，不再阻塞按钮 ready
        setStatus('connected');
+       // 清除上一轮 OTA 结果残留（设备重启断链后重连，成功/失败文案都不应继续展示；
+       // otaJustSucceeded 复位，避免旧 3s 自动切页定时器在新会话误触发）
+       state.otaJustSucceeded = false;
+       els.otaStatus.textContent = '';
+       els.otaStatus.className = 'text-xs font-medium text-slate-600';
+       els.otaProgressWrap.classList.add("hidden");
+       setOtaRetryVisible(false);
+       // 上一轮升级写入后尚未验证的版本，在此刻比对：只有设备自报出新版本号才算成功。
+       // 放在 OTA 状态区清空之后，确保告警文案不会被上面的默认清空覆盖
+       verifyPendingFwUpdate(device.id, fwVersion);
        clearConnectError();
        setConnectBusy(false);   // 连接成功：解锁 Connect 按钮（此时才允许点击 Disconnect）
        log('Connected & Listening for updates.');
@@ -1639,21 +2903,22 @@ function clearConnectError() {
          }
        }
        startPolling();
+       armIdleWatch();   // 连接就绪：开始 180s 空闲提醒（固件 240s 超时兜底）
 
        // —— 以下为数据加载，串行后台执行，不阻塞按钮 ready ——
        // 读取设备当前温度偏移，同步设置面板滑杆；旧固件无此特征则保持 0 并提示不支持
        if (tempOffsetChar) {
          try {
-           state.tempOffsetX10 = await BLEProtocol.readTempOffset(tempOffsetChar);
+           state.tempOffsetX100 = await BLEProtocol.readTempOffset(tempOffsetChar);
            renderTempOffset();
            els.tempOffsetStatus.textContent = '';
          } catch (err) {
-           state.tempOffsetX10 = 0;
+           state.tempOffsetX100 = 0;
            renderTempOffset();
            log(`Temperature offset read failed: ${err.message || err}`);
          }
        } else {
-         state.tempOffsetX10 = 0;
+         state.tempOffsetX100 = 0;
          renderTempOffset();
          els.tempOffsetStatus.textContent = 'Not supported by this firmware';
        }
@@ -1665,14 +2930,84 @@ function clearConnectError() {
        // 中文：合并 0xFFEB latest——设备端 s_last_measure 含 Refresh 一次性测量值，
        //     若它比历史最后一条更新（如上次连接点过 Refresh），恢复卡片显示；
        //     旧固件无此特征时 readLatest 返回 null，静默跳过
-       try {
-         const devLatest = await BLEProtocol.readLatest(state.latestChar);
-         const histLatest = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
-         if (devLatest && (!histLatest || devLatest.timestamp > histLatest.timestamp)) {
-           applyLatestRecord(devLatest);
-           log(`Restored newer latest measurement from 0xFFEB (${formatTime(devLatest.timestamp)})`);
-         }
-       } catch (_) { /* latest 读取失败不影响连接流程 */ }
+      try {
+        const devLatest = await BLEProtocol.readLatest(state.latestChar);
+        const histLatest = state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null;
+        if (devLatest && (!histLatest || devLatest.timestamp > histLatest.timestamp)) {
+          applyLatestRecord(devLatest);
+          log(`Restored newer latest measurement from 0xFFEB (${formatTime(devLatest.timestamp)})`);
+        }
+      } catch (_) { /* latest 读取失败不影响连接流程 */ }
+
+      // 中文：24h 历史分块拉取（0xFFEC）——拆成"首屏 + 后台回填"两步，不再把连接流程
+      //      卡在全量 144 条上：
+      //        ① 首屏：末页 + 前一页（4 个 GATT 事务）拿到最新 ~6.7h，其中末页到手就上屏；
+      //        ② 回填：更旧的分块由 startHistoryBackfill 在后台逐页补，
+      //           用户往左拖时数据通常已经在，不必现场等一次往返。
+      //      旧固件不认末页哨兵（会把 offset=0xFF 原样回显）→ 回退原来的全量最新优先路径。
+      //      旧固件无此特征（hisBlkChar 为 null）时跳过，维持 0xFFE1 5 条老协议表现
+      if (state.hisBlkChar) {
+        try {
+          /* 中文：块读整体占用全局 GATT 锁——否则 5s 轮询的探活读会插进来，
+           *      安卓上表现为 "GATT operation already in progress" 或块数据错位 */
+          // 中文：最新优先 + 每页到手即画（fetchHistoryTail）：首屏第一帧来自第 1 个事务，
+          //      这里把每一页直接喂 render()——它会把该页并进内存/缓存再整表重画，
+          //      所以后到的旧页表现为"往左边补历史"，不会把已显示的最新读数顶掉。
+          let lastPaint = 0;
+          const paintChunk = (chunk, info) => {
+            if (!chunk.length) return;
+            // 中文：重画按 ~100ms 节流（末页不受限，保证首屏立刻出图）。
+            //      单页回调在 iOS 上可能挤在一起，连着重画只是白占主线程。
+            const now = (window.performance?.now?.() ?? Date.now());
+            if (!info.done && now - lastPaint < 100) return;
+            lastPaint = now;
+            log(`24h history: ${Math.min(info.fetched || 0, info.total || 0)}/${info.total || 0} records`);
+            render(chunk);
+          };
+
+          const t0 = Date.now();
+          const tail = await gattOp(
+            () => BLEProtocol.fetchHistoryTail(state.hisBlkChar, {
+              needCount: HISTORY_TAIL_RECORDS,
+              onChunk: paintChunk,
+            }),
+            'fetch 24h history tail (0xFFEC)',
+            10000   // 2 页 × (write+read)；慢平台单次往返可达 250ms，留足余量
+          );
+
+          if (tail) {
+            log(`24h history tail: ${tail.records.length}/${tail.total} record(s) in ${Date.now() - t0}ms (oldestOffset=${tail.oldestOffset})`);
+            applyHistoryRecords(tail.records);
+            state.historyBackfill = {
+              oldestOffset: tail.oldestOffset,
+              oldestTs: tail.records.length ? tail.records[0].timestamp : 0,
+              total: tail.total,
+              running: false,
+              unsupported: false,
+            };
+            // 中文：不 await——连接流程到此结束，剩余分块在后台补，界面立刻可操作
+            void startHistoryBackfill();
+          } else {
+            log('0xFFEC last-page window unsupported (old firmware) — falling back to full fetch');
+            const devRecords = await gattOp(
+              () => BLEProtocol.fetchHistoryNewestFirst(state.hisBlkChar, { onChunk: paintChunk }),
+              'fetch 24h history (0xFFEC)',
+              15000   // 8 块 × (write+read)，Bluefy/iOS 单次往返可达 250ms，5s 不够
+            );
+            log(`24h history fetched: ${devRecords.length} record(s)`);
+            applyHistoryRecords(devRecords);
+            state.historyBackfill = {
+              oldestOffset: 0,
+              oldestTs: 0,
+              total: devRecords.length,
+              running: false,
+              unsupported: true,   // 旧固件：不支持按需补页，也不存在"还没拉到"的区间
+            };
+          }
+        } catch (err) {
+          log(`24h history fetch failed (fallback to 5-record protocol): ${err.message || err}`);
+        }
+      }
 
        // 读取设备已保存的校准状态（0xFFE9），在干/湿校准点展示"已校准"提示（只提示存在性，不展示具体数值）
        await refreshCalibHints();
@@ -1696,17 +3031,27 @@ function clearConnectError() {
          // 阶段2b：已连上但服务发现/时间同步/订阅初始化超时——多为射频信号差或慢平台
          showConnectError('Connected, but setup timed out — weak signal? Move closer and reconnect');
          log('Post-connect setup timed out after 20s');
+       } else if (errMsg.includes('NOT_SOILPULSE') || errMsg.includes('INCOMPATIBLE_SERVICE')) {
+         // 连接后身份校验失败：主服务 UUID 不对，或该服务下缺 0xFFE1/0xFFE2 这类底座特征。
+         // 多见于兜底的名字过滤放过了一台同名设备（或固件服务表与网页不匹配），
+         // 与"信号差/初始化失败"是两回事，必须让用户重新挑设备而不是反复重试。
+         // err.detail 由 ble-protocol 填入失败阶段与底层错误（平台差异诊断用），直接透出到红字
+         const detail = err && err.detail ? ` [${err.detail}]` : '';
+         showConnectError('This is not a SoilPulse sensor, or its firmware is incompatible (service/characteristic mismatch). Tap Connect and pick your sensor again.' + detail);
+         log(`Service mismatch after connect — not a SoilPulse device or incompatible firmware (${errMsg}${detail})`);
        } else if (/cancel|chooser/i.test(errMsg) || /NotFoundError|AbortError/i.test(err && err.name)) {
          log('Connection chooser dismissed by user (not an error)');
        } else if (!devicePicked) {
-         // requestDevice 阶段失败（还没选到设备）：加载时无法判断浏览器能否真正拉起蓝牙，
-         // 只有真到这步才知道。不依赖 err.name 枚举（小米等会抛 NotAllowedError 等未枚举名，
-         // 会被旧 else 静默成"闪一下没反应"），统一走可见引导：Android → 用 Chrome；其他 → 显示具体错误
-         if (/Android/.test(navigator.userAgent)) {
-           showModal(false, true);   // Android：复用"请用 Google Chrome"引导弹窗
-         } else {
-           showConnectError(`This browser could not start Bluetooth (${(err && err.name) || 'error'}). Please use Google Chrome.`);
-         }
+         // requestDevice 阶段失败（还没选到设备）：统一提示蓝牙权限，不再分平台弹窗/换文案。
+         // 不依赖 err.name 枚举（小米等会抛 NotAllowedError 等未枚举名，会被旧 else 静默成
+         // “闪一下没反应”），统一走可见红字引导。
+         // iOS Safari（beacio）附加唤醒提示：锁屏唤醒后快速首点可能吞掉瞬时用户手势
+         // （页面尚在恢复渲染，WebKit 未注册 activation），requestDevice 被静默拒绝；
+         // 再点一次 Connect 手势重新注册即可正常弹出授权/设备选择器
+         const wakeHint = (detectPlatform() === 'ios' && isNativeSafari())
+           ? ' If you just unlocked your iPhone/iPad, tap Connect once more.'
+           : '';
+         showConnectError('Bluetooth failed to start. Make sure Bluetooth is on and allow Bluetooth permission for this browser, then retry.' + wakeHint);
          log(`Bluetooth could not start (requestDevice): ${(err && err.name) || '?'}: ${(err && err.message) || err}`);
        } else {
          // 已选到设备，后续连接/初始化失败 → 设备/信号问题，不引导 Chrome
@@ -1736,10 +3081,18 @@ function clearConnectError() {
    });
 
    // 从后台回到前台（App 切换、标签页恢复）时校验连接：手机系统可能在后台终止 BLE 连接，
-   // 且 gattserverdisconnected 事件在 WebKit 上可能不补发，这里主动校正 UI
+   // 且 gattserverdisconnected 事件在 WebKit 上可能不补发，这里主动校正 UI。
+   // 切到后台则收起空闲提醒：隐藏期间不会有人点"保持连接" → 不写 0xFFE7 → 设备 240s 自然断，
+   // 这正是"切后台就该省电"想要的结果，不需要额外主动断链（后台定时器还可能被节流，主动断也不可靠）。
    document.addEventListener('visibilitychange', () => {
-     if (document.visibilityState === 'visible' && state.device && !state.device.gatt.connected) {
+     if (document.visibilityState !== 'visible') {
+       clearIdleWatch();
+       return;
+     }
+     if (state.device && !state.device.gatt.connected) {
        onDisconnected();
+     } else if (state.device?.gatt.connected) {
+       armIdleWatch();   // 回前台重新计时（后台那段时间不计入 180s）
      }
    });
 
@@ -1759,11 +3112,23 @@ function clearConnectError() {
      if (!state.device?.gatt.connected) return;
      const msg = 'Clear cached data on this browser AND reset the connected device history? This cannot be undone.';
      if (!window.confirm(msg)) return;
-     clearAllCache();
-     // 向已连接设备下发 Clear/Reset 指令，清空芯片 RAM 历史/日均值
+     // 中文：先让设备清（设备是权威数据源），成功后再清本地。
+     //      旧顺序"先清本地再写设备"在写入超时/失败时会造成"本机空了、设备还在"，
+     //      重连后 0xFFEC 又把旧记录拉回来，用户看到的仍是"清了没用"。
+     let deviceCleared = false;
      if (state.resetChar) {
-       await gattOp(() => BLEProtocol.sendReset(state.resetChar), 'Device reset write (0xFFE5)');
-       log('Device reset command sent (0xFFE5)');
+       try {
+         await gattOp(() => BLEProtocol.sendReset(state.resetChar), 'Device reset write (0xFFE5)');
+         deviceCleared = true;
+         log('Device reset command sent (0xFFE5)');
+       } catch (err) {
+         log(`Device reset failed (0xFFE5): ${err.message || err}`);
+       }
+     }
+     clearAllCache();
+     // 失败必须可见：否则本地清空成功、设备纹丝不动，用户以为清干净了
+     if (state.resetChar && !deviceCleared) {
+       els.historyBody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-rose-500">Local cache cleared, but the device did not acknowledge the reset. Reconnect and clear again — device data is still stored.</td></tr>';
      }
    }));
 
@@ -1772,10 +3137,10 @@ function clearConnectError() {
 
   // 给任意 GATT Promise 包一层 5s 超时：底层链路半死时 readValue/writeValue 可能永远
   // 悬空（挂死会卡死 gattBusy 与按钮流程）。超时只是放弃等待，底层操作无法真正取消
-  function withGattTimeout(promise, label = 'GATT operation') {
+  function withGattTimeout(promise, label = 'GATT operation', timeoutMs = GATT_OP_TIMEOUT_MS) {
     let timer;
     const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out after ${GATT_OP_TIMEOUT_MS / 1000}s`)), GATT_OP_TIMEOUT_MS);
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs / 1000}s`)), timeoutMs);
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
@@ -1785,7 +3150,7 @@ function clearConnectError() {
   // 直接抛 "GATT operation already in progress" / status 133（iOS/PC 系统栈会内部排队，
   // 不会出现）。所有按钮写统一经 gattOp 串行化；轮询/Refresh 轮询走 gattBusy 跳拍（非阻塞）。
   // 锁内操作都有 withGattTimeout 兜底，保证锁必然释放（≤5s）。
-  async function gattOp(op, label = 'GATT operation') {
+  async function gattOp(op, label = 'GATT operation', timeoutMs = GATT_OP_TIMEOUT_MS) {
     let waited = false;
     while (state.gattBusy) {
       waited = true;
@@ -1794,7 +3159,7 @@ function clearConnectError() {
     if (waited) log(`gattOp [${label}]: waited for GATT lock`);
     state.gattBusy = true;
     try {
-      return await withGattTimeout(op(), label);
+      return await withGattTimeout(op(), label, timeoutMs);
     } finally {
       state.gattBusy = false;
     }
@@ -1832,9 +3197,10 @@ function clearConnectError() {
   }
 
   // 主动断连 + 复位 UI：浏览器栈半死（gatt.connected 迟迟不变 false、事件不派发）时，
-  // 本地 gatt.disconnect() 强制清理协议栈状态；onDisconnected 幂等，复位全部界面
+  // 本地 gatt.disconnect() 强制清理协议栈状态；onDisconnected 幂等，复位全部界面。
+  // 日志措辞保持中性（"Disconnect"而非"Connection lost"）——这里也会被"用户主动休眠"复用。
   function forceDisconnect(reason) {
-    log(`Connection lost${reason ? ` — ${reason}` : ''}`);
+    log(`Disconnect${reason ? ` — ${reason}` : ''}`);
     try { state.device?.gatt?.disconnect(); } catch (_) { /* 链路已断时可能抛错，忽略 */ }
     onDisconnected();
   }
@@ -2019,6 +3385,7 @@ The device will measure the current probe state first, then apply the calibratio
       // 每次尝试的确定结果由固件记录在 0xFFE9 第 2 字节：1=干点成功 2=湿点成功
       // 3=拒:湿度未低于20% 4=拒:湿度未高于80% 5=拒:两点过近 6=方向反向 7=测量失败或断链丢弃
       await gattOp(() => BLEProtocol.sendHumCalib(state.calibChar, point), 'Calibration write (0xFFE6)');
+      armIdleWatch();   // 校准请求会触发固件立即测量并清零 idle
       log(`Moisture ${label} calibration command sent (0xFFE6)`);
 
       // 等待设备完成新测量（校准由固件在测量后自动应用或拒绝），再回读 0xFFE9 用结果码判定
@@ -2143,6 +3510,83 @@ The device will measure the current probe state first, then apply the calibratio
   }
 
   els.devNameInput.addEventListener('input', updateDevNameByteCount);
+
+  /**
+   * 改名后的静默重连：让系统蓝牙缓存立即刷新为新名。
+   *
+   * 背景：Windows 把连接过的设备 GAP 名(0x2A00) 缓存进系统，选择器优先显示缓存名，
+   * 且只在"建立连接"时读取——改名发生在连接中途，当前连接不会刷新它，导致
+   * 改名后第一次重扫仍显示旧名（安卓/iOS 缓存策略不同，恰好掩盖）。
+   *
+   * 做法：断开 → 用已授权的 device 对象直接 gatt.connect()（不弹选择器）→ 重跑
+   * 初始化。这次新连接建立时 Windows 读到新 GAP 名，缓存当场刷新。
+   * 图表数据保留在内存（device.id 未变，不走 restoreCachedCharts）。
+   */
+  async function silentReconnectForGapName() {
+    const device = state.device;
+    if (!device?.gatt?.connected || state.otaRunning || state.disconnecting) return;
+    const token = ++connectToken;
+    state.silentReconnecting = true;   // 让 updateSettingsAccess 在断开瞬间不要强制切回 Data 页
+    setConnectBusy(true);
+    // 全屏锁：重连期间特征已置空，任何按钮点击都会落空/报错，索性整页禁点并给出明确进度
+    els.pageLockText.textContent = 'Refreshing Bluetooth name…';
+    els.pageLock.style.display = 'flex';   // ⚠ 内联样式开关（Tailwind 编译期 CSS 不含遮罩的类，见 index.html 注释）
+    log('Silent reconnect: refreshing system GAP name cache…');
+    device.gatt.disconnect();                       // 触发 onDisconnected 幂等清理（图表保留）
+    await new Promise((r) => setTimeout(r, 800));   // 等设备进入 30s 重连广播窗口 + GAP 名落盘
+    try {
+      const chars = await BLEProtocol.finishConnect(device,
+        (records) => render(records),
+        onDisconnected);
+      if (token !== connectToken) {                 // 迟到成功：丢弃并断开，防状态错乱
+        try { device.gatt.disconnect(); } catch (_) { /* 已断开则忽略 */ }
+        return;
+      }
+      state.device = device;
+      state.characteristic = chars.dataChar;
+      state.dailyChar = chars.dailyChar;
+      state.hisBlkChar = chars.hisBlkChar;
+      state.daily30Char = chars.daily30Char;
+      state.daily30ExtChar = chars.daily30ExtChar;
+      state.resetChar = chars.resetChar;
+      state.calibChar = chars.calibChar;
+      state.refreshChar = chars.refreshChar;
+      state.latestChar = chars.latestChar;
+      state.tempOffsetChar = chars.tempOffsetChar;
+      state.calibStatusChar = chars.calibStatusChar;
+      state.devNameChar = chars.devNameChar;
+      state.otaChar = chars.otaChar;
+      state.fwVersion = chars.fwVersion || getCachedFwVersion(device.id);
+      if (chars.fwVersion) setCachedFwVersion(device.id, chars.fwVersion);
+      setStatus('connected');
+      state.otaJustSucceeded = false;
+      clearConnectError();
+      setConnectBusy(false);
+      state.latestNotifySubscribed = false;
+      state.lastNotifiedRec = null;
+      if (chars.latestChar) {
+        try {
+          await gattOp(() => chars.latestChar.startNotifications(), 'subscribe latest notify (0xFFEB)');
+          chars.latestChar.addEventListener('characteristicvaluechanged', onLatestNotified);
+          state.latestNotifySubscribed = true;
+        } catch (err) {
+          state.latestNotifySubscribed = false;
+          log('Latest notify subscribe failed after silent reconnect: ' + err.message);
+        }
+      }
+      startPolling();
+      armIdleWatch();
+      if (els.devNameStatus) els.devNameStatus.textContent = 'Name saved — Bluetooth list name refreshed.';
+      log('Silent reconnect done — system GAP name cache refreshed.');
+    } catch (err) {
+      // 断开后重连失败：保持 onDisconnected 已清理的断开状态，用户手动 Connect 即可
+      log('Silent reconnect failed: ' + (err.message || err));
+    } finally {
+      state.silentReconnecting = false;
+      els.pageLock.style.display = 'none';
+    }
+  }
+
   els.devNameSaveBtn.addEventListener('click', gattButton('Device name save', async () => {
     if (state.otaRunning) {
       els.devNameStatus.textContent = 'Ignored: OTA update is running';
@@ -2159,8 +3603,11 @@ The device will measure the current probe state first, then apply the calibratio
       const res = await gattOp(() => BLEProtocol.sendDeviceName(state.devNameChar, name), 'Device name write (0xFFEA)');
       if (res.ok) {
         showDeviceNameBadge(name);
-        els.devNameStatus.textContent = 'Name saved — shown in this dashboard only (Bluetooth name unchanged).';
+        els.devNameStatus.textContent = 'Name saved — refreshing Bluetooth name (silent reconnect)…';
         log(`Device name saved: ${name}`);
+        // 固件在当轮主循环把新名写进扫描响应包与 GAP 名(0x2A00)；静默重连一次
+        // 让 Windows 等系统的设备名缓存立即刷新（否则下次扫描仍显示旧名）
+        silentReconnectForGapName();
       } else {
         els.devNameStatus.textContent = `Save failed: ${res.message}`;
       }
@@ -2313,6 +3760,7 @@ The device will measure the current probe state first, then apply the calibratio
         ?? (state.lastRecords?.length ? state.lastRecords[state.lastRecords.length - 1] : null);
       const waitPromise = waitForLatestMeasurement(prev);
       await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)');
+      armIdleWatch();   // 这次写已经在固件侧清零 idle，提醒重新计时（避免"刚点过为什么还问"）
       log('Refresh command sent (0xFFE7), measuring now');
       const rec = await waitPromise;
       if (rec) {
@@ -2341,7 +3789,7 @@ The device will measure the current probe state first, then apply the calibratio
   // 清空/非法输入时还原为设备当前值。兼容小数逗号（"0,2"）
   els.tempOffsetInput.addEventListener('change', () => {
     const raw = parseFloat(String(els.tempOffsetInput.value).replace(',', '.'));
-    setTempOffsetTicks(Number.isFinite(raw) ? Math.round(raw * 10) : tempOffsetToTicks(state.tempOffsetX10 || 0));
+    setTempOffsetTicks(Number.isFinite(raw) ? Math.round(raw * 10) : tempOffsetToTicks(state.tempOffsetX100 || 0));
   });
 
   els.tempOffsetApplyBtn.addEventListener('click', gattButton('Temperature offset', async () => {
@@ -2353,19 +3801,23 @@ The device will measure the current probe state first, then apply the calibratio
       els.tempOffsetStatus.textContent = 'Connect device to adjust temperature offset';
       return;
     }
-    const x10 = ticksToTempOffset(tempOffsetTicksFromInput());   // ℉ 格四舍五入对齐设备 0.1℃ 网格
+    // ticksToTempOffset 返回设备原值（0.01℃ = x100）；回执文案与日志都按 ℃/℉ 显示，必须 /100，
+    // /10 会把 2.5℃ 显示成 25.0℃（历史 bug）
+    const x100 = ticksToTempOffset(tempOffsetTicksFromInput());   // ℉ 格四舍五入对齐设备 0.01℃ 网格
+    const offsetC = x100 / 100;
     els.tempOffsetApplyBtn.disabled = true;
     els.tempOffsetStatus.textContent = 'Applying temperature offset…';
     try {
-      await gattOp(() => BLEProtocol.sendTempOffset(state.tempOffsetChar, x10), 'Offset write (0xFFE8)');
-      state.tempOffsetX10 = x10;
-      renderTempOffset();   // 回显设备 0.1℃ 网格真实值（℉ 模式滑杆位置可能微调 ≤1 格）
-      els.tempOffsetStatus.textContent = `Temperature offset set to ${fmtTempDelta(x10 / 10)}`;
-      log(`Temperature offset sent (0xFFE8): ${x10 / 10}℃`);
+      await gattOp(() => BLEProtocol.sendTempOffset(state.tempOffsetChar, x100), 'Offset write (0xFFE8)');
+      state.tempOffsetX100 = x100;
+      renderTempOffset();   // 回显设备 0.01℃ 网格真实值（℉ 模式滑杆位置可能微调 ≤1 格）
+      els.tempOffsetStatus.textContent = `Temperature offset set to ${fmtTempDelta(offsetC)}`;
+      log(`Temperature offset sent (0xFFE8): ${offsetC.toFixed(2)}℃ (raw ${x100})`);
       // 立即重测，让 Data 面板尽快反映修正后的温度
       if (state.refreshChar) {
         try { await gattOp(() => BLEProtocol.sendRefresh(state.refreshChar), 'Refresh write (0xFFE7)'); } catch (_) {}
       }
+      armIdleWatch();   // 偏移写 + 重测都在固件侧清零了 idle，提醒重新计时
     } finally {
       els.tempOffsetApplyBtn.disabled = !state.device?.gatt.connected || !state.tempOffsetChar;
     }
@@ -2411,6 +3863,17 @@ The device will measure the current probe state first, then apply the calibratio
       : `OTA error: ${raw}`;
   }
 
+  // START 阶段被固件拒绝（低电 17 / pdu 9 / 固件尺寸越界等）：预擦都还没开始，
+  // Flash 一个字节都没动。文案要明确这一点，否则用户会以为"升级失败=可能变砖"。
+  function formatOtaRejection(err) {
+    const why = {
+      17: "battery too low — replace the batteries first (below 2.2V the touch sensor stops working)",
+      9:  "the device rejected the 176-byte block size",
+      11: "the firmware size is out of range",
+    }[err?.otaResult] || (err?.message || "the device refused the upgrade");
+    return `Upgrade refused before any flash erase: ${why}. Nothing was written — fix this and tap Retry.`;
+  }
+
   // 新版本横幅一键升级：从 page/firmware/ 下载清单指向的固件并推送
   els.otaUpdateNowBtn.addEventListener("click", async () => {
     const upd = state.fwUpdate;
@@ -2421,12 +3884,13 @@ The device will measure the current probe state first, then apply the calibratio
     els.otaProgressBar.style.width = "0%";
     els.otaStatus.className = "text-xs font-medium text-slate-600";
     els.otaUpdateNowBtn.disabled = true;
+    els.otaUpdateNowBtn.textContent = 'Updating firmware…';   // 中文：点击即切进行中文案，覆盖下载+传输全程
     setOtaRetryVisible(false);
     els.otaStatus.textContent = `Downloading v${upd.version}…`;
     try {
       const res = await fetch(upd.url, { cache: "no-store" });
       if (!res.ok) throw new Error(`firmware download failed: HTTP ${res.status}`);
-      await runOtaUpdate(await res.arrayBuffer(), upd.bin, upd.version);
+      await runOtaUpdate(await res.arrayBuffer(), `firmware v${upd.version}`, upd.version);
     } catch (err) {
       els.otaStatus.textContent = formatOtaError(err);
       els.otaStatus.className = "text-xs font-medium text-rose-600";
@@ -2434,6 +3898,7 @@ The device will measure the current probe state first, then apply the calibratio
       log(`[OTA] error: ${err.message || err}`);
     } finally {
       els.otaUpdateNowBtn.disabled = state.otaRunning || !state.device?.gatt.connected || !state.fwUpdate;
+      els.otaUpdateNowBtn.textContent = 'Update now';          // 中文：会话结束恢复原文案（含下载阶段失败兜底）
     }
   });
 
@@ -2455,9 +3920,11 @@ The device will measure the current probe state first, then apply the calibratio
     state.otaRunning = true;
     state.otaLastFirmware = { firmware, label, version };
     stopPolling(); // OTA 期间暂停轮询，避免 GATT 读写抢占升级链路
+    clearIdleWatch();   // OTA 期间固件强制 latency=0 且自己清零 idle，不要弹"保持连接"打扰升级
     setOtaUiLock(true);
     els.otaProgressWrap.classList.remove("hidden");
     els.otaUpdateNowBtn.disabled = true;
+    els.otaUpdateNowBtn.textContent = 'Updating firmware…';   // 中文：重试/直调路径统一进行中文案（幂等）
     els.otaProgressBar.style.width = "0%";
     els.otaStatus.className = "text-xs font-medium text-slate-600";
     setOtaRetryVisible(false);
@@ -2469,7 +3936,11 @@ The device will measure the current probe state first, then apply the calibratio
       }
       return BLEProtocol.performOta(state.otaChar, firmware, (info) => {
         els.otaProgressBar.style.width = `${info.percent}%`;
-        if (info.phase === "data") {
+        if (info.phase === "preparing") {
+          // 固件整区预擦 ~3.1s（+web 盲等窗口）：显示 preparing 文案，避免 "Sending… 0%"
+          // 静止近 4s 误以为卡死；DATA 第一包开始时 data 分支自然切回 "Sending firmware…"
+          els.otaStatus.textContent = "Preparing device (erasing flash)…";
+        } else if (info.phase === "data") {
           els.otaStatus.textContent = `Sending firmware… ${info.percent}% (${(info.sent / 1024).toFixed(1)} / ${(info.total / 1024).toFixed(1)} KB)`;
         } else if (info.phase === "end") {
           els.otaStatus.textContent = "Firmware sent, verifying…";
@@ -2498,27 +3969,56 @@ The device will measure the current probe state first, then apply the calibratio
       log(`[OTA] ${message}`);
       if (ok) {
         state.fwUpdate = null;
-        // 升级成功：徽章立即切换为新版本，并写入按设备缓存——设备重启重连后
-        // 即使 DIS 读取再失败，也不会因“版本未知”再次提示升级
+        state.otaJustSucceeded = true;   // 中文：成功提示展示期——设备重启断链后保留 Setting 页展示本条成功文案
+        // 【闭环补强】不再把“上传 bin 的版本”写进 state.fwVersion / fwVer 缓存。
+        // 固件 SUCCESS 只代表回读 CRC32 通过 + boot mark 已切，不证明新固件能跑起来：
+        // bootctl 在几次非预期复位后会把另一个槽恢复成 KNLT 并复位过去，设备实际跑旧版本。
+        // 旧写法会把缓存写成目标版本，之后 compareVersions 恒判定“已是最新”，
+        // 于是回滚的设备永远不再收到升级提示 —— 静默失效。改为记一条待验证，
+        // 由重连时读 DIS 0x2A26 的设备自报版本来确认（verifyPendingFwUpdate）
         if (version) {
-          state.fwVersion = version;
-          setCachedFwVersion(state.activeDeviceId, version);
+          setPendingFwVerify(state.activeDeviceId, version);
+          els.otaStatus.textContent = `Firmware v${version} written, device rebooting — reconnect to confirm`;
         }
         renderFirmwareCard();
+        // 统一成功交互（所有成功路径一致）：成功文案在 Setting 页展示数秒后，自动切到
+        // Data 选项卡看数据。用户若在这几秒内主动操作（重连/切页），otaJustSucceeded
+        // 会被清除，定时器不再切换，避免误切。
+        setTimeout(() => {
+          if (state.otaJustSucceeded) switchMainTab('data');
+        }, 3000);
       }
     } catch (err) {
       // 中文：真实中途断链会走到这里（并非“已在进行中”类忙碌错误），需展示安抚性提示而非原始报错文案
-      els.otaStatus.textContent = formatOtaError(err);
+      // 中文：固件在 START 阶段就拒绝（otaStage='start'，如低电 17）时，Flash 未擦未写、
+      //       也没有任何在途 DATA 写请求——保持连接，让用户换电池后直接点 Retry；
+      //       只有真正进过 DATA 阶段才需要下面那套"断链清队列"的补救。
+      const startRejected = err?.otaStage === 'start';
+      els.otaStatus.textContent = startRejected ? formatOtaRejection(err) : formatOtaError(err);
       els.otaStatus.className = "text-xs font-medium text-rose-600";
       setOtaRetryVisible(true);
       log(`[OTA] error: ${err.message || err}`);
+      if (!startRejected) {
+        // 中文：失败后主动断开设备——Android WebBluetooth 的 writeValue 不等固件 ATT 响应连发
+        //       （实测 3~4ms/包），上一轮 OTA 的写请求队列会残留；不重连直接重试时，残留包
+        //       继续投递到已重置的固件端（expect=0 收到 141+）导致 jump 错位直到超时。
+        //       断开强制下次重试走全新连接，pending 写队列随连接取消清空。
+        try { state.device?.gatt?.disconnect?.(); } catch (_) { /* 断开失败不影响错误展示 */ }
+      }
     } finally {
       state.otaRunning = false;
+      els.otaUpdateNowBtn.textContent = 'Update now';          // 中文：会话结束（成功/失败/重试）统一恢复原文案
       // 成功后设备自动重启断链；失败但仍连接则恢复轮询与按钮态
       if (state.device?.gatt.connected) {
         setOtaUiLock(false);
         setStatus("connected");
         startPolling();
+        armIdleWatch();   // OTA 结束且仍连着：恢复空闲提醒（OTA 期间不打扰）
+      } else if (state.otaJustSucceeded) {
+        // 中文：断链确认成功路径——onDisconnected 监听先于本 continuation 执行，
+        //       可能已把页面强制切回 Data；这里恢复到 Setting 页并重套“保留成功提示”的可见性
+        switchMainTab('setting');
+        updateSettingsAccess(false);
       }
     }
   }
@@ -2561,8 +4061,11 @@ The device will measure the current probe state first, then apply the calibratio
         return;
       }
       const isForce = m.latest.isforce === true;
+      // 中文：isforce=true 用于反复下发测试固件——即使设备已在该版本（字符串相等）也提示；
+      //      仅非强制清单在“设备版本不低于清单”时才静默跳过
+
       if (String(state.fwVersion || "") === String(m.latest.version)
-        || (!isForce && compareVersions(m.latest.version, state.fwVersion) <= 0)) {
+        || (!isForce && compareVersions(m.latest.version, state.fwVersion) <= 0)){
         renderFirmwareCard();
         return;
       }
@@ -2635,7 +4138,7 @@ The device will measure the current probe state first, then apply the calibratio
 
   // —— 温度偏移取值：待应用值恒为“当前显示单位的 0.1”格数——
   // ℃ 模式：1 格 = 0.1℃（±100 格）；℉ 模式：1 格 = 0.1℉（±180 格，±18℉ = ±10℃）。
-  // 设备存储恒为 0.1℃（s8），℉ 格写入时四舍五入到 0.1℃ 网格（偏差 ≤0.05℉），
+  // 设备存储恒为 0.01℃（int16 小端，±1000），℉ 格写入时四舍五入到 0.01℃ 网格（偏差 ≤0.05℉），
   // 因此 Apply 后按设备真实值回显时显示可能微调 ≤0.1℉。
   function tempOffsetRange() {
     return state.tempUnit === 'F'
@@ -2666,21 +4169,213 @@ The device will measure the current probe state first, then apply the calibratio
   }
 
   function renderTempOffset() {
-    const x10 = state.tempOffsetX10 || 0;
+    const x100 = state.tempOffsetX100 || 0;
     const range = tempOffsetRange();
     // 数字框随单位切换同步量程（℃ ±10.0 / ℉ ±18.0）、步进与单位后缀
     els.tempOffsetInput.min = String(range.min / 10);
     els.tempOffsetInput.max = String(range.max / 10);
     els.tempOffsetInput.step = '0.1';
     if (els.tempOffsetUnitSpan) els.tempOffsetUnitSpan.textContent = tempDeltaSymbol();
-    els.tempOffsetInput.value = (tempOffsetToTicks(x10) / 10).toFixed(1);
+    els.tempOffsetInput.value = (tempOffsetToTicks(x100) / 10).toFixed(1);
   }
 
-  els.trendTabBtn.addEventListener('click', () => switchChartTab('trend'));
-   els.dailyTabBtn.addEventListener('click', () => switchChartTab('daily'));
+  els.trendTabBtn.addEventListener('click', () => switchChartView('trend'));
   els.dailyMetricTempBtn.addEventListener('click', () => setDailyMetric('temp'));
   els.dailyMetricHumBtn.addEventListener('click', () => setDailyMetric('hum'));
   els.dailyMetricBattBtn.addEventListener('click', () => setDailyMetric('batt'));
+  els.dailyRange7Btn?.addEventListener('click', () => setDailyRange(7));
+  els.dailyRange30Btn?.addEventListener('click', () => setDailyRange(30));
+  // 中文：点 / 拖动日均图任意一天 → 摘要头切换那天（Apple Health 式滑选）。
+  //      布局参数由 drawMultiSeriesChart 存在 canvas._chartLayout 上。
+  //      用 pointer 事件而不是 click：一根手指按住横着滑，竖线跟着走（左滑右滑都行），
+  //      canvas 上设了 touch-action:pan-y，所以竖着滑仍然是滚动页面、不会误触。
+  let dailyDragging = false;
+  let dailyScrubRaf = 0;
+
+  const dailyIndexAt = (clientX) => {
+    const lay = els.dailyChart?._chartLayout;
+    if (!lay || lay.len < 1 || lay.stepX <= 0) return null;
+    const rect = els.dailyChart.getBoundingClientRect();
+    if (!rect.width) return null;
+    const x = (clientX - rect.left) * (els.dailyChart.clientWidth / rect.width);
+    const idx = Math.round((x - lay.padLeft) / lay.stepX);
+    return Math.max(0, Math.min(lay.len - 1, idx));
+  };
+
+  // 中文：拖动时一帧最多重绘一次（pointermove 在手机上可达 120Hz，重绘是全量 canvas 绘制）
+  const scheduleDailyRender = () => {
+    if (dailyScrubRaf) return;
+    dailyScrubRaf = requestAnimationFrame(() => {
+      dailyScrubRaf = 0;
+      if (state.lastDailyRecords) renderDaily(state.lastDailyRecords);
+    });
+  };
+
+  const scrubDaily = (e) => {
+    const sel = dailyIndexAt(e.clientX);
+    if (sel == null || state.dailySelIdx === sel) return;
+    state.dailySelIdx = sel;
+    scheduleDailyRender();
+  };
+
+  els.dailyChart?.addEventListener('pointerdown', (e) => {
+    if (!els.dailyChart._chartLayout) return;
+    dailyDragging = true;
+    try { els.dailyChart.setPointerCapture(e.pointerId); } catch (_) {}
+    scrubDaily(e);
+  });
+  els.dailyChart?.addEventListener('pointermove', (e) => {
+    if (dailyDragging) scrubDaily(e);
+  });
+  const endDailyDrag = (e) => {
+    if (!dailyDragging) return;
+    dailyDragging = false;
+    try { els.dailyChart.releasePointerCapture?.(e.pointerId); } catch (_) {}
+  };
+  els.dailyChart?.addEventListener('pointerup', endDailyDrag);
+  els.dailyChart?.addEventListener('pointercancel', endDailyDrag);
+  els.dailyChart?.addEventListener('pointerleave', endDailyDrag);
+
+  // ────────── 24h 图 x 轴平移 / 缩放 ──────────
+  // 中文：canvas 上设了 touch-action:pan-y（见 index.html），所以竖着滑仍然是滚页面，
+  //      横着滑才平移图。重绘按帧合并：pointermove 在手机上可达 120Hz，而 drawChart
+  //      是整块 canvas 重绘，逐事件重画会白占主线程。
+  let trendRaf = 0;
+  const scheduleTrendRedraw = () => {
+    if (trendRaf) return;
+    trendRaf = requestAnimationFrame(() => {
+      trendRaf = 0;
+      if (!state.lastRecords || els.trendTabPanel.classList.contains('hidden')) return;
+      drawChart(state.lastRecords);
+      updateTrendSummary(state.lastRecords);
+    });
+  };
+
+  const trendLayout = () => els.trendChart?._trendLayout || null;
+
+  const trendRelX = (clientX) => {
+    const rect = els.trendChart.getBoundingClientRect();
+    return rect.width ? (clientX - rect.left) * (els.trendChart.clientWidth / rect.width) : 0;
+  };
+
+  // 中文：设置窗口右边界/跨度。follow 不传时按"右边界是否贴到最新一条"自动判定——
+  //      贴到就算回到跟随态，此后新记录进来自动跟着走（不必再点 Latest）。
+  function setTrendWindow({ endTs, spanSec } = {}) {
+    const v = state.trendView;
+    if (Number.isFinite(spanSec)) {
+      v.spanSec = Math.round(Math.min(TREND_VIEW_SPAN_MAX, Math.max(TREND_VIEW_SPAN_MIN, spanSec)));
+    }
+    if (Number.isFinite(endTs)) v.endTs = Math.round(endTs);
+    const lay = trendLayout();
+    if (lay) v.follow = Math.abs(v.endTs - lay.dataLast) <= 2;
+    scheduleTrendRedraw();
+  }
+
+  // 中文：回到"最新 + 默认 6h"。双击/双触、点 Latest 胶囊都走这里。
+  function resetTrendView() {
+    const lay = trendLayout();
+    const v = state.trendView;
+    v.spanSec = TREND_VIEW_SPAN_DEFAULT;
+    v.follow = true;
+    v.endTs = lay ? lay.dataLast : null;
+    scheduleTrendRedraw();
+  }
+
+  const trendPointers = new Map();   // pointerId → 最近一次坐标（双指缩放要两个点）
+  let trendDrag = null;              // { pointerId, x0, end0 }
+  let trendPinch = null;             // { dist0, span0, frac, anchorTs }
+  let trendLastTap = { t: 0, x: 0, y: 0 };
+
+  els.trendChart?.addEventListener('pointerdown', (e) => {
+    const lay = trendLayout();
+    if (!lay) return;
+    trendPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { els.trendChart.setPointerCapture(e.pointerId); } catch (_) {}
+    if (trendPointers.size >= 2) {
+      // 双指 → 缩放：只认前两个点，第三根手指忽略
+      const [a, b] = [...trendPointers.values()];
+      const rect = els.trendChart.getBoundingClientRect();
+      const midX = (a.x + b.x) / 2 - rect.left;
+      const frac = Math.min(1, Math.max(0, (midX - lay.padLeft) / lay.plotW));
+      trendPinch = {
+        dist0: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+        span0: lay.spanSec,
+        frac,
+        // 锚点 = 双指中点此刻对应的时刻：缩放时它不动，画面才不会往一边跑
+        anchorTs: lay.winStart + frac * lay.spanSec,
+      };
+      trendDrag = null;
+      return;
+    }
+    trendDrag = { pointerId: e.pointerId, x0: e.clientX, end0: lay.endTs, moved: 0 };
+  });
+
+  els.trendChart?.addEventListener('pointermove', (e) => {
+    const lay = trendLayout();
+    if (!lay) return;
+    if (trendPointers.has(e.pointerId)) trendPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (trendPinch && trendPointers.size >= 2) {
+      const [a, b] = [...trendPointers.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      const span = Math.round(Math.min(TREND_VIEW_SPAN_MAX,
+        Math.max(TREND_VIEW_SPAN_MIN, trendPinch.span0 * (trendPinch.dist0 / dist))));
+      state.trendView.spanSec = span;
+      state.trendView.endTs = Math.round(trendPinch.anchorTs + (1 - trendPinch.frac) * span);
+      state.trendView.follow = false;
+      scheduleTrendRedraw();
+      return;
+    }
+
+    if (!trendDrag || trendDrag.pointerId !== e.pointerId) return;
+    const dx = e.clientX - trendDrag.x0;
+    trendDrag.moved = Math.max(trendDrag.moved, Math.abs(dx));
+    // 手指往左拖 = 往更早的数据看（dx<0 → endTs 变小）
+    setTrendWindow({ endTs: trendDrag.end0 - dx * (lay.spanSec / lay.plotW) });
+  });
+
+  const endTrendPointer = (e) => {
+    const drag = trendDrag && trendDrag.pointerId === e.pointerId ? trendDrag : null;
+    trendPointers.delete(e.pointerId);
+    if (trendPointers.size < 2) trendPinch = null;
+    if (drag) trendDrag = null;
+    try { els.trendChart.releasePointerCapture?.(e.pointerId); } catch (_) {}
+
+    // 双击/双触回到最新：300ms 内第二次抬手、且两次都没怎么移动（拖动结束不算）
+    if (drag && drag.moved > 12) return;
+    const now = Date.now();
+    const near = Math.hypot(e.clientX - trendLastTap.x, e.clientY - trendLastTap.y) < 24;
+    if (now - trendLastTap.t < 300 && near) {
+      trendLastTap = { t: 0, x: 0, y: 0 };
+      resetTrendView();
+      return;
+    }
+    trendLastTap = { t: now, x: e.clientX, y: e.clientY };
+  };
+  els.trendChart?.addEventListener('pointerup', endTrendPointer);
+  els.trendChart?.addEventListener('pointercancel', endTrendPointer);
+
+  // 中文：桌面端 ctrl/⌘ + 滚轮缩放（触控板捏合同样落在这里）；不按时放手，
+  //      让页面正常滚动——图表占了大半屏，抢滚轮会把页面卡死在一张图上。
+  els.trendChart?.addEventListener('wheel', (e) => {
+    const lay = trendLayout();
+    if (!lay || !(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const frac = Math.min(1, Math.max(0, (trendRelX(e.clientX) - lay.padLeft) / lay.plotW));
+    const anchorTs = lay.winStart + frac * lay.spanSec;
+    const span = Math.round(Math.min(TREND_VIEW_SPAN_MAX,
+      Math.max(TREND_VIEW_SPAN_MIN, lay.spanSec * (e.deltaY > 0 ? 1.15 : 1 / 1.15))));
+    state.trendView.spanSec = span;
+    state.trendView.endTs = Math.round(anchorTs + (1 - frac) * span);
+    state.trendView.follow = false;
+    scheduleTrendRedraw();
+  }, { passive: false });
+
+  els.trendLatestBtn?.addEventListener('click', (e) => {
+    e.preventDefault();
+    resetTrendView();
+  });
+
   // 单位切换：点击切换器任意位置（含按钮、灰底间隙、以及当前激活的单位）都翻转单位（°F ↔ °C）。
   // 用户期望“按到上面就切换”——即使当前在 °C，按到 °C 上也切回 °F，故统一 toggle，不做“切到该按钮单位”的区分。
   els.tempUnitToggle?.addEventListener('click', () => {
@@ -2707,6 +4402,7 @@ The device will measure the current probe state first, then apply the calibratio
  
 
    updateDailyMetricButtons();
+   updateChartViewButtons();
   updateTempUnitUI();
   // 启动时恢复本地保存的校准尝试结果（问题2：刷新页面后错误/成功标记仍显示）
   ['dry', 'wet'].forEach((p) => {
@@ -2720,18 +4416,38 @@ The device will measure the current probe state first, then apply the calibratio
   state.activeDeviceId = getLastDeviceId();
   if (state.activeDeviceId) restoreCachedCharts(state.activeDeviceId);
  
-   startBeacioDetect();   // 启动自研 beacio 检测（幂等）：active 判定 + 非 active 引导弹窗
-   if (!canUseBluetooth()) {
-     // 给 beacio 扩展注入留窗口：iOS Safari 从后台恢复重建页面时，扩展注入可能晚于页面脚本，
-     // 立即同步判断会把"beacio 即将就绪"误判为"无 Web Bluetooth"而误弹窗（表现为切后台回来自动弹）。
-     // 延迟重查：beacio 注入完成后 navigator.bluetooth 出现则正常可用（不弹不禁用）；
-     // 仍无 bluetooth 才提示并禁用按钮（弹一次，按钮禁用后不会每次点击重复弹）。
-     setTimeout(() => {
-       if (canUseBluetooth()) return;
-       const ua = navigator.userAgent;
-       showModal(/iPad|iPhone|iPod/.test(ua) && !window.MSStream, /Android/.test(ua));
+   // 核心环境日志（现场排查第一条）：页面版本 / 安全上下文 / Web Bluetooth / 平台 / UA-CH 品牌 / UA
+   try {
+     const uad = navigator.userAgentData;
+     const brands = (uad && Array.isArray(uad.brands)) ? uad.brands.map((b) => b.brand).join('|') : 'n/a';
+     log(`[env] v${PAGE_VERSION} secure=${window.isSecureContext} bluetooth=${!!navigator.bluetooth} platform=${detectPlatform()} brands=${brands} ua=${navigator.userAgent}`);
+   } catch (_) { /* 环境日志失败不影响功能 */ }
+
+   // 页面加载自动体检（立即执行，无延迟）：
+   //   - Android / 桌面：全量判定，假支持浏览器（小米/UC/微信/三星）与无 API 浏览器
+   //     （Safari/Firefox）加载即弹对应引导并禁用 Connect；
+   //   - iOS：仅识别浏览器——Bluefy / 原生 Safari 放行（页面保持正常，后续 beacio active /
+   //     standalone / beacio / Bluefy 判定延迟到点击 Connect 时触发）；壳浏览器（Chrome iOS
+   //     等）立即引导跳 Safari 并禁用 Connect。800ms 等待已移除（各分支均无注入等待需求）。
+   const loadGatePlatform = detectPlatform();
+   if (loadGatePlatform === 'ios') {
+     const ok = checkIosBrowserAtLoad();
+     log(`[gate] load check (ios): ${ok ? 'pass' : 'fail → x-safari guide + disable Connect'}`);
+     if (!ok) {
+       guideIosNonSafari();
        els.connectBtn.disabled = true;
        els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
-     }, 800);
+     }
+   } else {
+     // ensureBluetoothEnv 现为 async（iOS 点击路径含 beacio 注入等待）：加载体检只走
+     // android/desktop 分支（无实际 await 点），用 IIFE await 拿到真实布尔值再禁用 Connect
+     (async () => {
+       const ok = await ensureBluetoothEnv();
+       log(`[gate] load check (${loadGatePlatform}): ${ok ? 'pass' : 'fail → disable Connect until environment fixed'}`);
+       if (!ok) {
+         els.connectBtn.disabled = true;
+         els.connectBtn.classList.add('opacity-40', 'cursor-not-allowed');
+       }
+     })();
    }
  })();

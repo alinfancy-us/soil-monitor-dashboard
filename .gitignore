@@ -10,3 +10,6 @@ page/firmware/
 
 # 日志
 *.log
+
+# GitHub Token（本地拉取私有仓库固件 Release 用，勿提交）
+.fw_token

@@ -1,0 +1,398 @@
+{
+  "generatedFrom": "/Volumes/data1/SoilPulse/bth_soil_sensor/bth_soil_sensor",
+  "note": "由 tools/extract-gatt.mjs 从固件源码解析生成，勿手改",
+  "services": [
+    {
+      "handle": 1,
+      "name": "Generic Access",
+      "uuid": "00001800-0000-1000-8000-00805f9b34fb",
+      "declaredAttrCount": 7,
+      "actualAttrCount": 7,
+      "characteristics": [
+        {
+          "handle": 2,
+          "name": "my_devNameCharVal",
+          "uuid": "00002a00-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read"
+          ],
+          "valueLen": 18,
+          "valueHandle": 3,
+          "readCallback": false,
+          "writeCallback": false,
+          "hasCCCD": false,
+          "hasUserDesc": false,
+          "valueUuid": "my_devNameUUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "ble_devName"
+        },
+        {
+          "handle": 4,
+          "name": "my_appearanceCharVal",
+          "uuid": "00002a01-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read"
+          ],
+          "valueLen": 2,
+          "valueHandle": 5,
+          "readCallback": false,
+          "writeCallback": false,
+          "hasCCCD": false,
+          "hasUserDesc": false,
+          "valueUuid": "my_appearanceUUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "my_appearance"
+        },
+        {
+          "handle": 6,
+          "name": "my_periConnParamCharVal",
+          "uuid": "00002a04-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read"
+          ],
+          "valueLen": 8,
+          "valueHandle": 7,
+          "readCallback": false,
+          "writeCallback": false,
+          "hasCCCD": false,
+          "hasUserDesc": false,
+          "valueUuid": "my_periConnParamUUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "my_periConnParameters"
+        }
+      ]
+    },
+    {
+      "handle": 8,
+      "name": "Generic Attribute",
+      "uuid": "00001801-0000-1000-8000-00805f9b34fb",
+      "declaredAttrCount": 4,
+      "actualAttrCount": 4,
+      "characteristics": [
+        {
+          "handle": 9,
+          "name": "my_serviceChangeCharVal",
+          "uuid": "00002a05-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "indicate"
+          ],
+          "valueLen": 4,
+          "valueHandle": 10,
+          "readCallback": false,
+          "writeCallback": false,
+          "hasCCCD": true,
+          "hasUserDesc": false,
+          "valueUuid": "serviceChangeUUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "serviceChangeVal"
+        }
+      ]
+    },
+    {
+      "handle": 12,
+      "name": "Device Information",
+      "uuid": "0000180a-0000-1000-8000-00805f9b34fb",
+      "declaredAttrCount": 5,
+      "actualAttrCount": 5,
+      "characteristics": [
+        {
+          "handle": 13,
+          "name": "my_modelNumberCharVal",
+          "uuid": "00002a24-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read"
+          ],
+          "valueLen": 7,
+          "valueHandle": 14,
+          "readCallback": false,
+          "writeCallback": false,
+          "hasCCCD": false,
+          "hasUserDesc": false,
+          "valueUuid": "my_modelNumberUUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "my_modelNumber"
+        },
+        {
+          "handle": 15,
+          "name": "my_fwRevisionCharVal",
+          "uuid": "00002a26-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read"
+          ],
+          "valueLen": 6,
+          "valueHandle": 16,
+          "readCallback": false,
+          "writeCallback": false,
+          "hasCCCD": false,
+          "hasUserDesc": false,
+          "valueUuid": "my_fwRevisionUUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "my_fwRevision"
+        }
+      ]
+    },
+    {
+      "handle": 17,
+      "name": "Soil Sensor",
+      "uuid": "749b53b7-2662-4658-9fb4-e47241816727",
+      "declaredAttrCount": 42,
+      "actualAttrCount": 42,
+      "characteristics": [
+        {
+          "handle": 18,
+          "name": "soilHistoryCharVal",
+          "uuid": "0000ffe1-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read",
+            "notify"
+          ],
+          "valueLen": 46,
+          "valueHandle": 19,
+          "readCallback": true,
+          "writeCallback": false,
+          "hasCCCD": true,
+          "hasUserDesc": true,
+          "valueUuid": "soilHistoryUUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "soilHistoryData"
+        },
+        {
+          "handle": 22,
+          "name": "soilTimeSyncCharVal",
+          "uuid": "0000ffe2-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "write"
+          ],
+          "valueLen": 6,
+          "valueHandle": 23,
+          "readCallback": false,
+          "writeCallback": true,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "soilTimeSyncUUID",
+          "permissions": "ATT_PERMISSIONS_RDWR",
+          "bufferName": "soilTimeSyncData"
+        },
+        {
+          "handle": 25,
+          "name": "soilDailyCharVal",
+          "uuid": "0000ffe3-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read"
+          ],
+          "valueLen": 71,
+          "valueHandle": 26,
+          "readCallback": true,
+          "writeCallback": false,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "soilDailyUUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "soilDailyData"
+        },
+        {
+          "handle": 28,
+          "name": "soilResetCharVal",
+          "uuid": "0000ffe5-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "write"
+          ],
+          "valueLen": 4,
+          "valueHandle": 29,
+          "readCallback": false,
+          "writeCallback": true,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "soilResetUUID",
+          "permissions": "ATT_PERMISSIONS_RDWR",
+          "bufferName": "soilResetData"
+        },
+        {
+          "handle": 31,
+          "name": "soilHumCalibCharVal",
+          "uuid": "0000ffe6-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "write"
+          ],
+          "valueLen": 1,
+          "valueHandle": 32,
+          "readCallback": false,
+          "writeCallback": true,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "soilHumCalibUUID",
+          "permissions": "ATT_PERMISSIONS_RDWR",
+          "bufferName": "soilHumCalibData"
+        },
+        {
+          "handle": 34,
+          "name": "soilRefreshCharVal",
+          "uuid": "0000ffe7-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "write"
+          ],
+          "valueLen": 1,
+          "valueHandle": 35,
+          "readCallback": false,
+          "writeCallback": true,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "soilRefreshUUID",
+          "permissions": "ATT_PERMISSIONS_RDWR",
+          "bufferName": "soilRefreshData"
+        },
+        {
+          "handle": 37,
+          "name": "soilTempOffsetCharVal",
+          "uuid": "0000ffe8-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read",
+            "write"
+          ],
+          "valueLen": 2,
+          "valueHandle": 38,
+          "readCallback": false,
+          "writeCallback": true,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "soilTempOffsetUUID",
+          "permissions": "ATT_PERMISSIONS_RDWR",
+          "bufferName": "soilTempOffsetData"
+        },
+        {
+          "handle": 40,
+          "name": "soilCalibStatusCharVal",
+          "uuid": "0000ffe9-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read"
+          ],
+          "valueLen": 2,
+          "valueHandle": 41,
+          "readCallback": true,
+          "writeCallback": false,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "soilCalibStatusUUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "soilCalibStatusData"
+        },
+        {
+          "handle": 43,
+          "name": "soilDevNameCharVal",
+          "uuid": "0000ffea-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read",
+            "write"
+          ],
+          "valueLen": 21,
+          "valueHandle": 44,
+          "readCallback": true,
+          "writeCallback": true,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "soilDevNameUUID",
+          "permissions": "ATT_PERMISSIONS_RDWR",
+          "bufferName": "soilDevNameData"
+        },
+        {
+          "handle": 46,
+          "name": "soilLatestCharVal",
+          "uuid": "0000ffeb-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read",
+            "notify"
+          ],
+          "valueLen": 10,
+          "valueHandle": 47,
+          "readCallback": true,
+          "writeCallback": false,
+          "hasCCCD": true,
+          "hasUserDesc": true,
+          "valueUuid": "soilLatestUUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "soilLatestData"
+        },
+        {
+          "handle": 50,
+          "name": "soilHisBlkCharVal",
+          "uuid": "0000ffec-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read",
+            "write"
+          ],
+          "valueLen": 183,
+          "valueHandle": 51,
+          "readCallback": true,
+          "writeCallback": true,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "soilHisBlkUUID",
+          "permissions": "ATT_PERMISSIONS_RDWR",
+          "bufferName": "soilHisBlkData"
+        },
+        {
+          "handle": 53,
+          "name": "soilDaily30CharVal",
+          "uuid": "0000ffed-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read"
+          ],
+          "valueLen": 184,
+          "valueHandle": 54,
+          "readCallback": true,
+          "writeCallback": false,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "soilDaily30UUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "soilDaily30Data"
+        },
+        {
+          "handle": 56,
+          "name": "soilDaily30ExtCharVal",
+          "uuid": "0000ffee-0000-1000-8000-00805f9b34fb",
+          "props": [
+            "read"
+          ],
+          "valueLen": 124,
+          "valueHandle": 57,
+          "readCallback": true,
+          "writeCallback": false,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "soilDaily30ExtUUID",
+          "permissions": "ATT_PERMISSIONS_READ",
+          "bufferName": "soilDaily30ExtData"
+        }
+      ]
+    },
+    {
+      "handle": 59,
+      "name": "Telink OTA",
+      "uuid": "00010203-0405-0607-0809-0a0b0c0d1912",
+      "declaredAttrCount": 4,
+      "actualAttrCount": 4,
+      "characteristics": [
+        {
+          "handle": 60,
+          "name": "my_OtaCharVal",
+          "uuid": "00010203-0405-0607-0809-0a0b0c0d2b12",
+          "props": [
+            "read",
+            "writeWithoutResponse",
+            "write"
+          ],
+          "valueLen": 16,
+          "valueHandle": 61,
+          "readCallback": true,
+          "writeCallback": true,
+          "hasCCCD": false,
+          "hasUserDesc": true,
+          "valueUuid": "my_OtaUUID",
+          "permissions": "ATT_PERMISSIONS_RDWR",
+          "bufferName": "my_OtaData"
+        }
+      ]
+    }
+  ]
+}
