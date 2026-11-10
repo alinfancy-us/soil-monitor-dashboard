@@ -824,8 +824,113 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
     }
   }
 
+  // 中文：首屏「历史尾部过期」兜底——对应固件「未对时零 Flash 写 + 首次对时后一次性补写」。
+  //      未对时期间设备只把样本留在 144 条 RAM 环里，网页写 0xFFE2 之后设备才在主循环里把
+  //      积压样本补写进 Flash（ATT 回调里不能擦 4K）。若网页的 0xFFEC 首拉早于补写完成，
+  //      曲线最新点会比 Latest 卡片旧——这些点时间戳有效（不是 0），所以脏数据过滤看不见它。
+  //
+  //      判据是「Latest 与历史最后一个点的时间差」，与 600s 采样间隔无关：
+  //        · 正常采样轮：soil_sensor_measure() 更新 s_last_measure，同一轮又写历史，
+  //          两者时间戳相同 → lag = 0，永不触发；
+  //        · 快采轮（s_fast_round && !ema_stable 时跳过写历史）：lag ≤ 30s，小于阈值；
+  //        · 唯一误触发源是点过 Refresh 后重连（refresh 只更新 s_last_measure、不写历史），
+  //          lag 可达 600s —— 所以重拉一次后若"历史尾部没有前进"就立即停手。
+  const TAIL_STALE_LAG_S = 60;
+  const TAIL_STALE_DELAY_MS = 600;
+  const TAIL_STALE_MAX = 2;
+  let tailStaleTimer = 0;
+  let tailStaleAttempts = 0;
+  let tailStaleGeneration = 0;   // 中文：会话代号，断连/换设备/清空时 +1，作废在途定时器
+
+  function cancelTailStaleRefresh() {
+    tailStaleGeneration += 1;
+    if (tailStaleTimer) { clearTimeout(tailStaleTimer); tailStaleTimer = 0; }
+    tailStaleAttempts = 0;
+  }
+
+  // 中文：历史最后一个点落后 Latest 卡片多少秒（<=0 = 不落后或无从比较）。
+  function historyTailLagS() {
+    const histLast = state.lastRecords?.length
+      ? Number(state.lastRecords[state.lastRecords.length - 1]?.timestamp)
+      : 0;
+    const latest = Number(state.latestShown?.timestamp) || 0;
+    if (!histLast || !latest) return 0;
+    return latest - histLast;
+  }
+
+  // 中文：整体重拉首屏尾部。**不能只追加末页**：0xFFEC 只导出最新 144 条，补写后 total
+  //      增大、offset 基准整体右移，增量追加会重复或漏点。
+  //      拉取期间不动界面（保持已画的曲线），成功后再整体替换基座：render 内部是
+  //      mergeTrendRecords(state.lastRecords, records)，不清基座会把已不在设备里的旧点留下；
+  //      换掉 historyBackfill 对象则同时终止在途的后台回填（它用对象身份判活）。
+  async function refreshHistoryTail() {
+    if (!state.hisBlkChar) return null;
+    const tail = await gattOp(
+      () => BLEProtocol.fetchHistoryTail(state.hisBlkChar, { needCount: HISTORY_TAIL_RECORDS }),
+      're-fetch 24h history tail (0xFFEC)',
+      10000
+    );
+    if (!tail) return null;
+    state.lastRecords = null;
+    state.historyBackfill = {
+      oldestOffset: tail.oldestOffset,
+      oldestTs: tail.records.length ? tail.records[0].timestamp : 0,
+      total: tail.total,
+      running: false,
+      unsupported: false,
+    };
+    render(tail.records);
+    void startHistoryBackfill();
+    return tail;
+  }
+
+  // 中文：首拉装配完成后调一次。lag 未超阈值直接返回（正常连接都是这条路）。
+  function scheduleTailStaleRefresh() {
+    cancelTailStaleRefresh();
+    const lag = historyTailLagS();
+    if (lag <= TAIL_STALE_LAG_S) return;
+
+    const gen = tailStaleGeneration;
+    log(`[TIME] tail stale: latest is ${lag}s ahead of history tail, silent refresh in ${TAIL_STALE_DELAY_MS}ms`);
+
+    const tick = async () => {
+      tailStaleTimer = 0;
+      if (tailStaleGeneration !== gen) return;                 // 会话已作废
+      if (state.device?.gatt?.connected !== true) return;      // 已断链
+      if (state.disconnecting || state.otaRunning) return;
+
+      tailStaleAttempts += 1;
+      const before = Number(state.lastRecords?.[state.lastRecords.length - 1]?.timestamp) || 0;
+      let tail = null;
+      try {
+        tail = await refreshHistoryTail();
+      } catch (err) {
+        if (tailStaleGeneration !== gen) return;
+        log(`[TIME] tail refresh failed: ${err.message || err}`);
+      }
+      if (tailStaleGeneration !== gen) return;
+
+      const after = Number(state.lastRecords?.[state.lastRecords.length - 1]?.timestamp) || 0;
+      const left = historyTailLagS();
+      log(`[TIME] tail recheck ${tailStaleAttempts}/${TAIL_STALE_MAX}: lag=${left}s, tailAdvanced=${after > before}`);
+
+      // 中文：尾部没有前进 → 这次"落后"不是补写造成的（典型是 Refresh 只更新
+      //      s_last_measure、不写历史），再拉也是白跑，立即停手，避免反复重拉。
+      if (!tail || after <= before) return;
+      if (left <= TAIL_STALE_LAG_S) return;
+      if (tailStaleAttempts >= TAIL_STALE_MAX) return;
+
+      tailStaleTimer = setTimeout(() => { void tick(); }, TAIL_STALE_DELAY_MS);
+    };
+
+    tailStaleTimer = setTimeout(() => { void tick(); }, TAIL_STALE_DELAY_MS);
+  }
+
   // 清空 live 展示区（切换到另一台设备、或没有该设备缓存时，避免继续显示上一台设备的数据）。
   function resetDisplay() {
+    // 中文：换设备 / Clear 之后，上一轮针对旧设备排的"尾部过期重拉"必须作废，
+    //      否则它会拿新设备的 hisBlkChar 去拉旧设备的时间窗口。
+    cancelTailStaleRefresh();
     state.lastRecords = null;
     state.latestShown = null;
     state.lastDailyRecords = null;
@@ -2285,6 +2390,10 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
       if (state.characteristic === null && state.device === null) return;
       state.disconnecting = true;
       try {
+        // 中文：作废在途的"历史尾部过期重拉"——断链后 state.device/hisBlkChar 都会被清空，
+        //      留着定时器只会在下一次连接上误用（tick 内部虽有 connected 判断，但会话代号
+        //      递增才是唯一可靠的作废手段）。
+        cancelTailStaleRefresh();
         clearIdleWatch();      // 先收起空闲提醒弹窗/定时器，避免断开后还挂着一个"要不要保持连接"
         stopPolling();         // 先停定时器：防止清理期间轮询再跑一拍（断开后 GATT 报错噪音的来源）
         cancelRefreshWait();   // 若 refresh 正在等待测量结果，断连后立即恢复按钮
@@ -3014,6 +3123,11 @@ function clearConnectError() {
 
        // 读取设备侧存储的网页展示名（0xFFEA）：仅在连接与初始化全部完成后读取，不使用选择器里的蓝牙名
        await refreshDeviceNameFromDevice();
+
+       // 中文：连接初始化全部完成后再判「历史尾部是否落后 Latest」——放在这里而不是
+       //      紧随 0xFFEC 首拉之后，是为了不与上面两个 GATT 读抢锁；延迟 600ms 由
+       //      scheduleTailStaleRefresh 内部负责。正常连接 lag 恒为 0，等于不执行。
+       scheduleTailStaleRefresh();
 
        
      } catch (err) {
