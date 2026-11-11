@@ -88,6 +88,13 @@
   // 记录的换算时间戳可能漂移 1~2 秒；按 timestamp 精确去重会漏判，缓存里就会堆出
   // 成对的"近似重复"并挤掉真正的历史。10 分钟采样间隔下 2 秒容差不会误合并相邻样本。
   const TREND_MERGE_TOLERANCE_S = 2;
+  // 中文：同值近似合并窗口（秒）。老固件的时间戳是"导出时按当前对时基准现算"，
+  //      网页每写一次 0xFFE2 基准就变，同一条测量在 0xFFE1（RAM）与 0xFFEC（Flash）
+  //      里会差几十秒（现场观测 41s / 53s），缓存里于是出现"温湿电完全相同、时间差
+  //      一分钟内"的成对点。60s 覆盖这个量级；真实采样间隔 600s、快采 30s，且要求
+  //      三个数值完全相同才合并，30s 快采轮不会误合并（读数的量化步长决定相邻
+  //      两轮几乎不可能三个值全等）。保留**较早**的时间戳（更接近 Flash 里的真相位）。
+  const TREND_SAME_VALUE_MERGE_S = 60;
   // 中文：24h 图的可视窗口跨度（秒）。144 条铺满一屏在手机上每条只摊到 1.6px，
   //      点挤成毛毛虫、最近几小时看不出走势——所以只画窗口内这一段，默认 6h（≈36 条）。
   //      缩放范围 30min ~ 24h：小于 30min 画不出趋势、大于 24h 没有数据可看。
@@ -539,6 +546,13 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      .slice(-TREND_MAX_RECORDS);
  }
 
+ // 中文：两条记录是否是"同一份读数"。要求三个字段都是有限数值且完全相等——
+ //      缓存里的旧数据/半解析记录可能字段缺失，undefined === undefined 会误判成同值。
+ function isSameTrendReading(a, b) {
+   return Number.isFinite(a?.temp) && Number.isFinite(a?.hum) && Number.isFinite(a?.batt)
+     && a.temp === b.temp && a.hum === b.hum && a.batt === b.batt;
+ }
+
  // 中文：按 timestamp 去重合并（base 在前、增量在后；同一时刻以增量为准——
  //      设备新读出的记录覆盖缓存旧值）。供 render() 把轮询/通知的 5 条增量
  //      并回 24h 大缓存用，避免每次小更新把缓存覆盖成只剩 5 条
@@ -559,9 +573,17 @@ const CALIB_ATTEMPT_KEY = 'soilpulse_calib_attempt_v1';
      const last = out[out.length - 1];
      if (last && Math.abs(r.timestamp - last.timestamp) <= TREND_MERGE_TOLERANCE_S) {
        out[out.length - 1] = r;
-     } else {
-       out.push(r);
+       continue;
      }
+     // 中文：兜底合并"同值近似副本"（老固件重设基准导致的时间漂移）。只在三条读数
+     //      完全一致、且相差不超过 TREND_SAME_VALUE_MERGE_S 时生效，保留较早的时间戳。
+     //      排序保证 r 一定比 last 新，所以这里是"丢掉后来的副本"。
+     if (last
+       && isSameTrendReading(last, r)
+       && Math.abs(r.timestamp - last.timestamp) <= TREND_SAME_VALUE_MERGE_S) {
+       continue;
+     }
+     out.push(r);
    }
    return out;
  }

@@ -189,23 +189,34 @@ export class FakeSoilDevice {
 
   // ---- 数据装配 ----
 
-  /** 造 n 条 600s 间隔的 24h 记录（结束于 now，可留断档） */
-  seedHistory(n = 144, { step = 600, gapFromH = 13, gapToH = 10, endAt = null } = {}) {
+  /**
+   * 造 n 条 600s 间隔的 24h 记录（结束于 now，可留断档）
+   * @param {object} [opts]
+   * @param {number} [opts.duplicateShiftS=0] - 非 0 时每条记录追加一份"温湿电完全相同、
+   *        时间戳 +N 秒"的副本，模拟老固件的同值重复点：同一采样在 0xFFEC（Flash，
+   *        较早）与轮询重读（RAM，较晚，基准已刷新）里各出现一次。前端合并应把它
+   *        合成一条（保留较早时间戳），因此断言"总条数 = 物理采样数"即证明去重生效。
+   */
+  seedHistory(n = 144, { step = 600, gapFromH = 13, gapToH = 10, endAt = null, duplicateShiftS = 0 } = {}) {
     const now = endAt || Math.floor(Date.now() / 1000);
     const out = [];
     for (let i = 0; i < n; i++) {
       const ts = now - (n - 1 - i) * step;
       if (gapFromH > gapToH && ts > now - gapFromH * 3600 && ts < now - gapToH * 3600) continue;
       const phase = ((ts % 86400) / 86400) * Math.PI * 2;
-      out.push({
+      const rec = {
         timestamp: ts,
         temp: Math.round((21 + 4.2 * Math.sin(phase - 1.6)) * 100) / 100,
         hum: Math.round((55 + 12 * Math.sin(phase - 0.4)) * 100) / 100,
         batt: 92 - Math.floor(i / 48),
-      });
+      };
+      out.push(rec);
+      if (duplicateShiftS) {
+        out.push({ ...rec, timestamp: ts + duplicateShiftS });
+      }
     }
-    this.records = out;
-    return out;
+    this.records = duplicateShiftS ? out.sort((a, b) => a.timestamp - b.timestamp) : out;
+    return this.records;
   }
 
   /**

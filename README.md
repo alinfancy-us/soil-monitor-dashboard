@@ -109,6 +109,17 @@ One silent fallback covers that race: when the Latest timestamp is more than **6
 
 Normal rounds never trigger it: a sampled round updates the Latest value and the history record with the same timestamp, so the lag is 0 (fast rounds that skip the history write stay far below the threshold). The only false positive is a reconnect after pressing Refresh, since Refresh updates the Latest value only — which is exactly what the "did the tail advance?" check catches.
 
+### Duplicate points with shifted timestamps
+
+Older firmware stored `uptime` in the ring and converted it to an absolute epoch **at export time**. Because the page writes `0xFFE2` on every connection, the base can move by tens of seconds, so the same measurement came back at two different times: once from `0xFFEC` (flash, written under the old base) and again from a later `0xFFE1` poll (re-converted with the new base). The cache then held pairs of records with identical `temp`/`hum`/`batt` and timestamps 41–53 s apart, which looked like duplicated points and pushed real history out of the 144-record cap.
+
+Two layers now prevent it:
+
+- **Firmware (root fix):** each ring slot freezes its epoch when the record is pushed, so re-syncing the clock only affects new samples. `0xFFE1`, `0xFFEB` and the `0xFFEC` RAM fallback all read the frozen value. Upgrading requires **one `CLR1`** to drop the `ts = 0` records left by old firmware.
+- **Page (backstop):** `mergeTrendRecords()` still merges records within **2 s** (device-side drift, later value wins), and additionally treats two records as the same point when `temp`, `hum` and `batt` are **all equal** and they are **≤ 60 s** apart — keeping the **earlier** timestamp (the flash truth). Normal 600 s sampling and 30 s fast rounds cannot collide: three quantised values matching exactly one minute apart is effectively impossible.
+
+`test/e2e/run-history-dedupe.mjs` injects `duplicateShiftS: 53` into the fake device's history and asserts the cache ends up with exactly the physical sample count, no same-value pairs within 60 s, and ascending timestamps. No cache migration is performed — the dedupe runs on every `render()`, so old caches are cleaned the first time the page loads.
+
 ## 7. Keeping in sync with the firmware repo
 
 - Constants such as the GATT UUIDs, the advertised name prefix, calibration command values and the temperature offset range (±10 ℃) must match `bth_soil_sensor/app_att.h` and `app_config.h` in the firmware repo; always change both sides together, otherwise the dashboard cannot connect or writes invalid parameters.
