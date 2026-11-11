@@ -14,6 +14,7 @@
     "offset": "node run-temp-offset.mjs",
     "idle": "node run-idle.mjs",
     "unsynced": "node run-unsynced.mjs",
+    "history-dedupe": "node run-history-dedupe.mjs",
     "preview": "node preview-daily.mjs"
   },
   "dependencies": {
