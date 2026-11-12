@@ -15,6 +15,7 @@
     "idle": "node run-idle.mjs",
     "unsynced": "node run-unsynced.mjs",
     "history-dedupe": "node run-history-dedupe.mjs",
+    "golden": "node run-golden-crosscheck.mjs",
     "preview": "node preview-daily.mjs"
   },
   "dependencies": {

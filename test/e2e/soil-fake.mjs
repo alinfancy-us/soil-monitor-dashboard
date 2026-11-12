@@ -160,7 +160,10 @@ export class FakeSoilDevice {
     this.client = client;
     this.address = opts.address || 'C0:FF:EE:00:00:01';
     this.name = opts.name || 'SoilPulse-E2E';
-    this.records = [];            // 24h 环（时间升序）
+    this.records = [];            // 24h 环（时间升序）—— 0xFFEC 的数据源，代表"Flash 里的历史"
+    // 中文：RAM 侧视图（0xFFE1 / 0xFFEB 的数据源）。null = 与 records 相同（默认，等价旧行为）；
+    //      金数据交叉验证用它模拟"冷启动后 RAM 空、Flash 仍满"这一真机状态。
+    this.ramRecords = null;
     this.daily = [];              // 日均（dateEpoch 升序）
     this.fwRev = opts.fwRev || '1.0.0';
     this.modelNumber = opts.modelNumber || 'SP-100';
@@ -296,11 +299,29 @@ export class FakeSoilDevice {
 
   // ---- 读值分发 ----
 
+  /** RAM 侧视图（0xFFE1 / 0xFFEB）：ramRecords 为 null 时回退 records */
+  ramView() {
+    return this.ramRecords ?? this.records;
+  }
+
+  /**
+   * 按金数据的"设备真值"装配假外设。
+   * @param {{flash: Array, ram: Array}} view - flash → 0xFFEC；ram → 0xFFE1 / 0xFFEB
+   * @note  record 结构与 seedHistory 一致：{ timestamp, temp, hum, batt }
+   */
+  applyGoldenView(view = {}) {
+    const toRecord = (r) => ({ timestamp: r.ts, temp: r.temp, hum: r.hum, batt: r.batt });
+    this.records = (view.flash || []).map(toRecord);
+    this.ramRecords = (view.ram || []).map(toRecord);
+    return this;
+  }
+
   valueFor(uuid) {
     switch (uuid) {
-      case UUIDS.DATA_CHAR: return encodePacket(this.records.slice(-5));
+      case UUIDS.DATA_CHAR: return encodePacket(this.ramView().slice(-5));
       case UUIDS.LATEST_CHAR: {                // 10B = 9B 记录 + measure_seq（固件 soil_latest_t）
-        const last = this.records[this.records.length - 1];
+        const ram = this.ramView();
+        const last = ram[ram.length - 1];
         const rec = last ? encodeRecord(last) : Buffer.alloc(9);
         const out = Buffer.alloc(10);
         rec.copy(out, 0);

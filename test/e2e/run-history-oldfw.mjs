@@ -56,7 +56,13 @@ const geom = (page) => page.evaluate(() => {
     assert(offsets[offsets.length - 1] === 20, `最后一块应是 20（最旧的整页），实际 ${offsets[offsets.length - 1]}`);
 
     // ── C. 数据完整上屏 ──
-    await until(async () => (await geom(page)) !== null, { timeout: 10000, label: '图表绘制' });
+    // 中文：后台回填是分块追加的，图表在只加载了前几块时就已经能画。必须等"最旧一条"
+    //      真正上屏再断言 dataFirst，否则会读到"已加载的最旧"而非"设备的最旧"——
+    //      机器负载高（例如整套 e2e 连跑）时稳定复现，属于本用例原有的竞态。
+    await until(async () => {
+      const g = await geom(page);
+      return g !== null && Math.abs(g.dataFirst - device.records[0].timestamp) <= 2;
+    }, { timeout: 20000, label: '历史回填到最旧一条' });
     const snap = await snapshot(page);
     const g = await geom(page);
     log(`历史表 ${snap.historyRows} 行 / 窗口内 ${g.visible} 点 / dataLast=${g.dataLast}`);

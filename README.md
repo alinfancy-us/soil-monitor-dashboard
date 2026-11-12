@@ -125,3 +125,21 @@ Two layers now prevent it:
 - Constants such as the GATT UUIDs, the advertised name prefix, calibration command values and the temperature offset range (±10 ℃) must match `bth_soil_sensor/app_att.h` and `app_config.h` in the firmware repo; always change both sides together, otherwise the dashboard cannot connect or writes invalid parameters.
 - The `0xFFEC` window/block layout (183 B response, ≤ 20 records per block, `offset ≥ total` = end of transfer) is driven by the firmware's MTU-185 read limit, and the tail-stale thresholds are tuned against `SOIL_HISTORY_MAX = 144` / `SOIL_SAMPLE_PERIOD_S = 600`; change them together with `soil_hourly.h` and `app_config.h`.
 - Firmware release flow: publish a Release in the firmware repo (asset named `SoilPulse_v<version>.bin`) → this repo's production pipeline fetches it via `FW_TAG` and attaches it to the `page/firmware/firmware.json` manifest → after connecting, the page compares versions automatically and prompts a one-tap OTA update.
+
+## 8. Golden cross-check with the firmware
+
+`tests/golden/history_crosscheck.json` (repo root) is the single source of truth for the history /
+time-sync logic. The same file drives the firmware host tests and `test/e2e/run-golden-crosscheck.mjs`:
+
+| Scene | Firmware side (`test_history_crosscheck`) | Page side (`npm run golden`) |
+| --- | --- | --- |
+| A unsynced → first sync | flash untouched before sync, full backfill after | `ts = 0` records dropped, "Time not synced" shown, then 1 point |
+| B repeated sync drift | old records keep frozen epochs | cached timestamps do not shift |
+| C deep-sleep retention | exports identical before/after | reconnect adds no duplicate points |
+| D cold boot (RAM lost) | `0xFFE1` empty, `0xFFEC` keeps the timeline | page still shows history from `0xFFEC` |
+| E Clear | ring + frozen array + flash wiped | empty state; new samples start from scratch |
+
+`soil-fake.mjs` exposes `applyGoldenView({ flash, ram })` and a separate `ramRecords` view, which is
+how "flash keeps data but RAM is empty after a cold boot" is simulated: `0xFFE1` / `0xFFEB` read
+`ramRecords`, while `0xFFEC` reads `records`. The 12 export points in the JSON are asserted one by
+one — see `tests/golden/README.md`.
