@@ -2645,6 +2645,70 @@ function clearConnectError() {
   els.connectErrorText.classList.add('hidden');
 }
 
+// ===== 设备选择器"用户取消"的判定（跨平台指纹） =====
+// 规范平台（Android Chrome / 桌面 Chromium）：取消 → DOMException name=NotFoundError
+//        （规范原文 "the chooser closed with no device selected"），部分实现用 AbortError。
+// Bluefy（iOS）：**不抛 Error**，而是以数字 reject。实测 2026-11-16 iOS Bluefy：
+//        · 点弹窗外部取消：type=number raw=2 dt≈1769ms，Bluefy 自带 Bluetooth Logs 记为
+//          "RequestDevice — Bluetooth discover was cancelled."，此时 GetBluetoothAvailability 正常（avail=true）；
+//        · 关掉蓝牙再点 Connect（或在选择器打开时关蓝牙）：Bluefy 日志同样是
+//          "RequestDevice [2] Bluetooth not enabled/available on this device."。
+//        → 数字 2 被复用了：既表示"用户取消"，也表示"蓝牙未开启/不可用"，光看错误值分不开。
+//        第二判据用适配器状态（Bluefy 实现了 navigator.bluetooth.getAvailability）：
+//        取消时适配器仍在（true），关蓝牙时应为 false。未知（不支持/超时/抛错）时保守按取消处理，
+//        优先保证"用户取消不误报"这一主诉求。
+// 兜底文案类判定：message 里出现 cancel/chooser 的自家封装（mock、部分壳浏览器）同样按取消处理。
+const BLUEFY_CANCEL_CODE = 2;
+
+/** 读取属性并吞掉抛异常的 getter（Bluefy 自定义对象可能不老实） */
+function safeRead(obj, key) {
+  try { return obj == null ? undefined : obj[key]; } catch (_) { return '<throw>'; }
+}
+
+/**
+ * 查询适配器可用性，永不 reject，超时返回 null（未知）。
+ * @param {number} timeoutMs 超时上限（超时按"未知"处理，避免错误提示被拖住）
+ * @returns {Promise<boolean|null>}
+ */
+function bluetoothAvailability(timeoutMs = 500) {
+  const bt = navigator.bluetooth;
+  if (!bt || typeof bt.getAvailability !== 'function') return Promise.resolve(null);
+  const query = Promise.resolve()
+    .then(() => bt.getAvailability())
+    .then((v) => (typeof v === 'boolean' ? v : null))
+    .catch(() => null);
+  const timeout = new Promise((resolve) => { setTimeout(() => resolve(null), timeoutMs); });
+  return Promise.race([query, timeout]);
+}
+
+/**
+ * 该 reject 值是否代表"用户在设备选择器里取消"（应静默，不当作故障）。
+ * 注意：Bluefy 上"取消"与"蓝牙未开启"共用数字 2，因此本函数对这类值需再做一次
+ *       适配器状态校验，返回 Promise<boolean>（调用方要 await）。
+ * @param {unknown} err requestDevice 的 reject 值
+ * @param {number} elapsedMs 从调用 requestDevice 到被 reject 的毫秒数（适配器状态未知时的弱证据）
+ * @returns {Promise<boolean>}
+ */
+async function isChooserDismissed(err, elapsedMs) {
+  const numeric = typeof err === 'number';   // 用 typeof 判，避免 "2" / true 之类误命中
+  const name = safeRead(err, 'name');
+  const cancelSignal = numeric
+    ? err === BLUEFY_CANCEL_CODE
+    : (name === 'NotFoundError' || name === 'AbortError'
+       || /cancel|chooser/i.test(String(safeRead(err, 'message') ?? '')));
+  if (!cancelSignal) return false;
+  // 只有 Bluefy（数字码 / Bluefy UA）可能出现"同一个值两种含义"，其它平台维持原判定
+  if (!numeric && !isBluefy()) return true;
+  const avail = await bluetoothAvailability();
+  if (avail === true) return true;    // 适配器仍在 → 用户自己取消，静默
+  if (avail === false) return false;  // 适配器不可用 → 真故障，给红字引导
+  // 状态未知（未实现 / 超时 / 抛错）：退回耗时弱证据——人手取消必然经过"看列表再点外面"，
+  // 实测约 1.7s；机器侧拒绝（蓝牙关闭/权限被拒）几乎瞬时返回
+  const fast = Number(elapsedMs) >= 0 && Number(elapsedMs) < 800;
+  return !fast;
+}
+
+
    // ===== 平台判定与浏览器引导（平台优先重构：全链路只判一次平台，加载/点击共用同一闸门） =====
 
    // 平台判定：ios / android / desktop。iOS 用排除法（所有 iOS 浏览器壳 UA 都含 Safari，
@@ -2944,13 +3008,20 @@ function clearConnectError() {
      clearConnectError();   // 新的连接尝试开始，清除上一次失败的红字提示
      setConnectBusy(true);   // 进入连接流程：锁定 Connect 按钮，防止连接过程中重复点击
      let devicePicked = false;   // 是否已通过 requestDevice 拿到设备：区分"浏览器拉不起蓝牙"与"连接/信号失败"
+     let chooserT0 = 0;          // 中文：requestDevice 调用时刻——耗时是"取消 vs 机器拒绝"的弱证据（见 isChooserDismissed）
      try {
        setStatus('connecting');
        log('Requesting Bluetooth Device...');
 
        // 阶段1：仅弹设备选择器（不设超时，用户挑设备时长不受限）
+       // 中文：计时点必须紧贴 requestDevice，中间不插 await/额外 API 调用——iOS 瞬时用户激活
+       //      会被任何前置异步消耗（见下方 wakeHint 注释的同类坑），否则选择器拉不起来反而污染取证
+       chooserT0 = Date.now();
        const device = await BLEProtocol.requestSoilDevice();
        devicePicked = true;   // 已拿到设备：此后失败属连接/信号问题，不再归因"浏览器拉不起蓝牙"
+
+
+
        if (token !== connectToken) return;   // 期间用户又发起了新连接，丢弃本次
 
        // 阶段2：gatt.connect + 服务/特征发现，由 finishConnect 内部保证 5s 超时
@@ -3175,8 +3246,10 @@ function clearConnectError() {
          const detail = err && err.detail ? ` [${err.detail}]` : '';
          showConnectError('This is not a SoilPulse sensor, or its firmware is incompatible (service/characteristic mismatch). Tap Connect and pick your sensor again.' + detail);
          log(`Service mismatch after connect — not a SoilPulse device or incompatible firmware (${errMsg}${detail})`);
-       } else if (/cancel|chooser/i.test(errMsg) || /NotFoundError|AbortError/i.test(err && err.name)) {
-         log('Connection chooser dismissed by user (not an error)');
+       } else if (await isChooserDismissed(err, chooserT0 ? Date.now() - chooserT0 : 0)) {
+         // 用户取消（规范平台的 NotFoundError/AbortError，或 Bluefy 的数字 2 且适配器仍可用）＝
+         // 正常操作，只留日志，不给红字——否则会误导成"蓝牙坏了/没权限"
+         log(`Connection chooser dismissed by user (not an error), reject = ${typeof err === 'number' ? err : ((err && err.name) || '?')}`);
        } else if (!devicePicked) {
          // requestDevice 阶段失败（还没选到设备）：统一提示蓝牙权限，不再分平台弹窗/换文案。
          // 不依赖 err.name 枚举（小米等会抛 NotAllowedError 等未枚举名，会被旧 else 静默成
@@ -3190,10 +3263,24 @@ function clearConnectError() {
          showConnectError('Bluetooth failed to start. Make sure Bluetooth is on and allow Bluetooth permission for this browser, then retry.' + wakeHint);
          log(`Bluetooth could not start (requestDevice): ${(err && err.name) || '?'}: ${(err && err.message) || err}`);
        } else {
-         // 已选到设备，后续连接/初始化失败 → 设备/信号问题，不引导 Chrome
-         showConnectError(`Connection failed (${(err && err.name) || 'error'}). Check signal and retry.`);
-         log(`Connection failed after device pick: ${(err && err.name) || '?'}: ${(err && err.message) || err}`);
+         // 已选到设备，后续连接/初始化失败 → 设备/信号问题，不引导 Chrome。
+         // 中文：Bluefy 的失败值是**纯数字错误码**（没有 name/message）。实测 2026-11-16：
+         //      在选择器打开期间关掉蓝牙再选中设备，requestDevice 会成功，随后 gatt.connect()
+         //      以 code 2 拒绝。这种情况再提示 "Check signal" 会误导用户去挪设备，实际是蓝牙没开；
+         //      所以先用适配器状态区分，再给出错误码本身（而不是难看的 "(error)"）。
+         const code = typeof err === 'number' ? `code ${err}` : ((err && err.name) || 'error');
+         const avail = await bluetoothAvailability();
+         const btOff = avail === false
+           || (avail === null && typeof err === 'number' && err === BLUEFY_CANCEL_CODE);
+         if (btOff) {
+           showConnectError('Bluetooth is off. Turn Bluetooth back on, then tap Connect again.');
+           log(`Connect failed: Bluetooth unavailable (${code})`);
+         } else {
+           showConnectError(`Connection failed (${code}). Check signal and retry.`);
+           log(`Connection failed after device pick: ${code}`);
+         }
        }
+
      }
    }
  
