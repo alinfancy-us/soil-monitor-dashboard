@@ -2812,7 +2812,7 @@ async function isChooserDismissed(err, elapsedMs) {
      showGuideModal({
        iconHtml: GUIDE_LOGO_ICON,
        title: 'Open in Safari to Connect',
-       message: 'Your iPhone or iPad does not support Web Bluetooth in this browser. Tap "Open in Safari" to switch to the Safari browser and connect.',
+       message: 'Web Bluetooth has not been tested in this browser, or may not be supported. Tap "Open in Safari" to switch. If the redirect does not work, copy the address from your browser address bar and open it in Safari.',
        action: {
          text: 'Open in Safari',
          onClick: (e) => {
