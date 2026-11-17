@@ -2812,7 +2812,7 @@ async function isChooserDismissed(err, elapsedMs) {
      showGuideModal({
        iconHtml: GUIDE_LOGO_ICON,
        title: 'Open in Safari to Connect',
-       message: 'Your iPhone or iPad does not support Web Bluetooth in this browser. Tap "Open in Safari" to switch to the Safari browser and connect.',
+       message: 'Web Bluetooth has not been tested in this browser, or may not be supported. Tap "Open in Safari" to switch. If the redirect does not work, copy the address from your browser address bar and open it in Safari.',
        action: {
          text: 'Open in Safari',
          onClick: (e) => {
@@ -2942,6 +2942,33 @@ async function isChooserDismissed(err, elapsedMs) {
    // Bluefy 三条路。
    // iOS 点击 Connect 时的全量判定（②～⑤ 级联；④⑤ 依赖 beacio 注入 / standalone 等
    // 运行时状态，统一延迟到点击时执行，不在页面加载时判定）
+   // ===== 出口 B（beacio 注入态丢失）自动重载兜底 =====
+   // 现象（真机实证）：Safari 锁屏唤醒 / BFCache 恢复后，beacio 的 content script 注入态丢失，
+   //   navigator.bluetooth 在页面生命周期内不会自己回来，只有一次完整 reload 才重新注入
+   //   （用户实测"刷新一下页面就解决"）。故在出口 B 即将弹安装引导前，先自动 reload 一次。
+   // 防循环：sessionStorage 记 reload 时间戳；窗口内已 reload 过仍失败 → 不再 reload，改弹原引导。
+   //   用 sessionStorage（非 localStorage）：仅当前标签页会话有效，关页即清，不污染下次打开。
+   const BEACIO_RELOAD_KEY = 'soilpulse_beacio_reload_v1';
+   const BEACIO_RELOAD_WINDOW_MS = 30000;
+   // 返回 true = 已触发 reload，调用方应立即 return（reload 会中断本次脚本）；
+   // 返回 false = 不 reload，调用方继续走原引导（已试过 / 被禁用 / 存储不可用）。
+   function maybeAutoReloadForBeacio() {
+     // 对照测试开关：?autoReload=0 关闭自动重载，观察原始引导行为
+     try { if (new URLSearchParams(location.search).get('autoReload') === '0') { log('[gate] ios: auto-reload disabled by ?autoReload=0'); return false; } } catch (_) {}
+     let last = 0;
+     try { last = Number(sessionStorage.getItem(BEACIO_RELOAD_KEY) || 0) || 0; } catch (_) {}
+     const now = Date.now();
+     if (last && (now - last) < BEACIO_RELOAD_WINDOW_MS) {
+       try { sessionStorage.removeItem(BEACIO_RELOAD_KEY); } catch (_) {}
+       log(`[gate] ios: auto-reload tried ${now - last}ms ago, still no API → stop, show guide`);
+       return false;
+     }
+     try { sessionStorage.setItem(BEACIO_RELOAD_KEY, String(now)); } catch (_) {}
+     log('[gate] ios: no beacio API after wait → auto-reload once to re-inject');
+     try { location.reload(); } catch (_) {}
+     return true;
+   }
+
    // async：④' 的 beacio 注入等待（probeBeacioReady）需要 await；调用方须 await 本函数
    async function ensureIosEnv() {
      if (isBluefy() && navigator.bluetooth) { log('[gate] ios: Bluefy + API → direct'); return true; }   // ② Bluefy 直连
@@ -2960,6 +2987,9 @@ async function isChooserDismissed(err, elapsedMs) {
        return true;
      }
      log('[gate] ios: no beacio API after wait → guide');
+     // 出口 B：注入态丢失时先自动 reload 一次重建 beacio 注入（见 maybeAutoReloadForBeacio）。
+     // reload 会中断本次脚本，用户 reload 后需再点一次 Connect（requestDevice 必须有用户手势）。
+     if (maybeAutoReloadForBeacio()) return false;
      const iosVer = parseIOSVersion(navigator.userAgent);
      if (iosVer !== null && iosVer >= 26.2) { log(`[gate] ios: v${iosVer} ≥ 26.2 → beacio guide`); guideBeacio(); return false; }
      log(`[gate] ios: v${iosVer} < 26.2 → Bluefy guide`);
