@@ -2942,31 +2942,25 @@ async function isChooserDismissed(err, elapsedMs) {
    // Bluefy 三条路。
    // iOS 点击 Connect 时的全量判定（②～⑤ 级联；④⑤ 依赖 beacio 注入 / standalone 等
    // 运行时状态，统一延迟到点击时执行，不在页面加载时判定）
-   // ===== 出口 B（beacio 注入态丢失）自动重载兜底 =====
+   // ===== beacio 注入态丢失：从"点击时补救"改为"回前台时主动重建" =====
    // 现象（真机实证）：Safari 锁屏唤醒 / BFCache 恢复后，beacio 的 content script 注入态丢失，
-   //   navigator.bluetooth 在页面生命周期内不会自己回来，只有一次完整 reload 才重新注入
-   //   （用户实测"刷新一下页面就解决"）。故在出口 B 即将弹安装引导前，先自动 reload 一次。
-   // 防循环：sessionStorage 记 reload 时间戳；窗口内已 reload 过仍失败 → 不再 reload，改弹原引导。
-   //   用 sessionStorage（非 localStorage）：仅当前标签页会话有效，关页即清，不污染下次打开。
-   const BEACIO_RELOAD_KEY = 'soilpulse_beacio_reload_v1';
-   const BEACIO_RELOAD_WINDOW_MS = 30000;
-   // 返回 true = 已触发 reload，调用方应立即 return（reload 会中断本次脚本）；
-   // 返回 false = 不 reload，调用方继续走原引导（已试过 / 被禁用 / 存储不可用）。
-   function maybeAutoReloadForBeacio() {
-     // 对照测试开关：?autoReload=0 关闭自动重载，观察原始引导行为
-     try { if (new URLSearchParams(location.search).get('autoReload') === '0') { log('[gate] ios: auto-reload disabled by ?autoReload=0'); return false; } } catch (_) {}
-     let last = 0;
-     try { last = Number(sessionStorage.getItem(BEACIO_RELOAD_KEY) || 0) || 0; } catch (_) {}
-     const now = Date.now();
-     if (last && (now - last) < BEACIO_RELOAD_WINDOW_MS) {
-       try { sessionStorage.removeItem(BEACIO_RELOAD_KEY); } catch (_) {}
-       log(`[gate] ios: auto-reload tried ${now - last}ms ago, still no API → stop, show guide`);
-       return false;
-     }
-     try { sessionStorage.setItem(BEACIO_RELOAD_KEY, String(now)); } catch (_) {}
-     log('[gate] ios: no beacio API after wait → auto-reload once to re-inject');
+   //   navigator.bluetooth 在页面生命周期内不会自己回来，只有一次完整 reload 才重新注入。
+   // 策略：切后台时记下 API 是否在（btApiBeforeHide）；回前台若"之前有、现在没有"，先短暂
+   //   探测区分"注入慢"与"真丢失"，确认真丢失才 reload 重建。这样重建发生在点 Connect 之前，
+   //   用户点一次就能连；且关掉 beacio 时（后台时本就无 API）不会 reload，点一次直接弹引导。
+   // 防循环：reload 会清空 JS 内存 → btApiBeforeHide 归零 → 天然只重建一次，无需 sessionStorage。
+   let btApiBeforeHide = null;
+   let fgReloadBusy = false;   // 防 visibilitychange + pageshow 并发重入；reload 后内存清空自动复位
+   async function maybeReloadOnForeground() {
+     if (btApiBeforeHide !== true || fgReloadBusy) return;   // 后台时就无 API / 已在重建 → 跳过
+     // 对照测试开关：?autoReload=0 关闭自动重建，观察原始行为
+     try { if (new URLSearchParams(location.search).get('autoReload') === '0') { log('[gate] fg: auto-reload disabled by ?autoReload=0'); return; } } catch (_) {}
+     if (navigator.bluetooth) { log('[gate] fg: API present on foreground → no reload'); return; }
+     fgReloadBusy = true;
+     // 短暂探测：注入可能只是慢到，别急着 reload
+     if (await probeBeacioReady(800)) { log('[gate] fg: beacio recovered after brief probe → no reload'); fgReloadBusy = false; return; }
+     log('[gate] fg: API lost while backgrounded → reload once to re-inject');
      try { location.reload(); } catch (_) {}
-     return true;
    }
 
    // async：④' 的 beacio 注入等待（probeBeacioReady）需要 await；调用方须 await 本函数
@@ -2986,10 +2980,8 @@ async function isChooserDismissed(err, elapsedMs) {
        log('[gate] ios: beacio recovered (reinject) → direct');
        return true;
      }
+     // 出口 B：注入态丢失的重建已前移到"回前台时"（maybeReloadOnForeground），此处直接弹引导。
      log('[gate] ios: no beacio API after wait → guide');
-     // 出口 B：注入态丢失时先自动 reload 一次重建 beacio 注入（见 maybeAutoReloadForBeacio）。
-     // reload 会中断本次脚本，用户 reload 后需再点一次 Connect（requestDevice 必须有用户手势）。
-     if (maybeAutoReloadForBeacio()) return false;
      const iosVer = parseIOSVersion(navigator.userAgent);
      if (iosVer !== null && iosVer >= 26.2) { log(`[gate] ios: v${iosVer} ≥ 26.2 → beacio guide`); guideBeacio(); return false; }
      log(`[gate] ios: v${iosVer} < 26.2 → Bluefy guide`);
@@ -3339,9 +3331,11 @@ async function isChooserDismissed(err, elapsedMs) {
    // 这正是"切后台就该省电"想要的结果，不需要额外主动断链（后台定时器还可能被节流，主动断也不可靠）。
    document.addEventListener('visibilitychange', () => {
      if (document.visibilityState !== 'visible') {
+       btApiBeforeHide = !!navigator.bluetooth;   // 切后台记录 API 状态，供回前台判断是否注入丢失
        clearIdleWatch();
        return;
      }
+     maybeReloadOnForeground();   // 回前台：若后台期间注入丢失，先 reload 重建（不 await，reload 会中断）
      if (state.device && !state.device.gatt.connected) {
        onDisconnected();
      } else if (state.device?.gatt.connected) {
@@ -3349,8 +3343,9 @@ async function isChooserDismissed(err, elapsedMs) {
      }
    });
 
-   // BFCache（前进/后退）恢复页面时同样校验一次
+   // BFCache（前进/后退）恢复页面时同样校验一次 + 检测注入丢失
    window.addEventListener('pageshow', () => {
+     maybeReloadOnForeground();
      if (state.device && !state.device.gatt.connected) {
        onDisconnected();
      }
